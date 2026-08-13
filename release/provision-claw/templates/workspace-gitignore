@@ -1,0 +1,21 @@
+# Structured state. The backup rail protects it; git cannot merge it.
+database/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+.venv/
+__pycache__/
+*.pyc
+
+# Never commit a credential. Config carries manager references, not values.
+.env
+.env.*
+!.env.example
+.mcp.json
+
+.claude/settings.local.json
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "release_schema": "commonclaw-release-v1",
+  "version": "1.0.0",
+  "revision": "f730f21",
+  "class": "fix and feature",
+  "disruption": "quiet",
+  "codex_floor": "0.147.0",
+  "claude_floor": "2.1.227"
+}

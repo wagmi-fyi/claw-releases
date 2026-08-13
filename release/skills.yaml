@@ -1,0 +1,25 @@
+# Fleet skills manifest — which skills every claw carries.
+#
+# provision-claw reads this file, materializes one canonical copy of each skill
+# on the claw, and links that copy into both cores' machine-wide directories.
+# A claw's own copy of what it ended up with is written to /etc/commonclaw.
+#
+# Promotion is an edit here plus a provisioning re-run, up the tier: a change
+# proves itself on staging before it reaches a claw somebody depends on.
+#
+# FIELDS
+#   source  a directory holding a SKILL.md. Relative paths resolve against
+#           --skills-root, which the operator points at the root these paths are
+#           written from. Absolute paths are taken as they are.
+#   pin     optional, and ENFORCED when present: the digest measured on the claw
+#           after install must match it or the run fails. Leave it off a skill
+#           that is still moving; the claw records the measured digest either
+#           way, so what a claw carries is always answerable.
+#
+# NAMES ARE UNIQUE FLEET-WIDE. One core resolves a same-name collision by
+# authority and the other does not resolve it at all — it lists both copies and
+# leaves the model to guess. So two skills may never share a name anywhere in
+# the fleet, and this is a constraint rather than a preference.
+skills:
+  claw-ops:
+    source: .claude/skills/claw-ops
