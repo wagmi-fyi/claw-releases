@@ -1,8 +1,8 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "staging",
-  "version": "1.0.0",
-  "tag": "v1.0.0",
-  "tree_digest": "f486f5f2a36f5558c5a8c113624f12c9a9a3f25c4059d9e96931082eae4f2136",
-  "note": "The digest is measured over release/ in the tag above, and it was verified by fetching the tarball and re-computing it before this pointer was written."
+  "version": "1.0.1",
+  "tag": "v1.0.1",
+  "tree_digest": "0922b064d5ccff2ee4812ed440a111df306fed5c722590baf84fcd18f0b77bb9",
+  "note": "Digest verified by fetching the tag anonymously and re-computing before this pointer was written."
 }
