@@ -34,6 +34,13 @@ UPDATER_CONF=/etc/commonclaw/updater.conf
 STATE=/etc/commonclaw/release.json
 RUN_LOG_DIR=/var/log/commonclaw/updater
 PLANE=/opt/commonclaw/provision-claw
+# THE RULED STAGE PREFIX. The same on every claw and kept afterwards, because the
+# claw records the absolute source its skills resolved from, and a prefix named
+# after the run that made it leaves that record pointing at nothing.
+# reference/claw-conventions.md states this; an earlier cut of this script
+# applied straight out of its own temporary directory and put a path that no
+# longer existed into /etc/commonclaw/skills.yaml, differently on every run.
+FLEET_STAGE=/root/fleet-stage
 
 MODE_NOW=0; CHECK_ONLY=0
 while [ $# -gt 0 ]; do
@@ -258,7 +265,8 @@ DECLARED="$(sed -n 's/.*"disruption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 # The claw's own reading, from the same comparison the core phases make. Both
 # this and the declaration must say quiet.
 would_move_core=0
-rf() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${TOP}/release/release.json" | head -1; }
+RELEASE_META="${TOP}/release/release.json"
+rf() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$RELEASE_META" | head -1; }
 CODEX_WANT="$(rf codex_floor)"; CLAUDE_WANT="$(rf claude_floor)"
 if [ -n "$CODEX_WANT" ]; then
   have="$(command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | awk '{print $2}' || true)"
@@ -330,20 +338,43 @@ fi
 STEP="apply"
 log info "applying release ${OFFERED} from ${OFFERED_TAG} (carrying ${CARRIED})"
 
-# The previous plane is kept, so a failed apply has something to converge back
-# to. This is not a rollback: the provisioning script is convergent, not
-# transactional, and no wrapper makes it so.
-[ -d "$PLANE" ] && rm -rf /root/plane-previous && cp -a "$PLANE" /root/plane-previous 2>/dev/null || true
+# THE VERIFIED PAYLOAD MOVES TO THE RULED PREFIX BEFORE IT IS APPLIED.
+#
+# Everything up to here happened in a temporary directory, which is what makes a
+# failed fetch or a failed verification leave this claw byte-identical. The move
+# happens only after the digest matched, which is the moment this run commits to
+# applying, so that property is untouched.
+#
+# It has to be a STABLE prefix rather than the temporary one. A provisioning run
+# records the absolute path its skills resolved from into the claw's own
+# declaration, so applying out of a per-run directory writes a path that is
+# already gone by the time anybody reads it, and writes a different one every
+# run. Measured on staging: three applies of one identical release produced three
+# different declarations and the recorded source did not exist.
+#
+# Keeping the previous stage is also what a failed apply converges back to. That
+# is not a rollback, because the provisioning script is convergent rather than
+# transactional and no wrapper makes it so.
+rm -rf "${FLEET_STAGE}.previous"
+# if/fi rather than an AND-list, for legibility rather than for safety. A claw
+# taking its FIRST release has no stage to move aside, which is the ordinary
+# path and not an error. An AND-list would also survive that, because bash
+# exempts a failing test in that position from set -e; checked rather than
+# assumed, because the reverse is a common belief and writing it down as a
+# reason would have put a false sentence in this file.
+if [ -d "$FLEET_STAGE" ]; then mv "$FLEET_STAGE" "${FLEET_STAGE}.previous"; fi
+mv "${TOP}/release" "$FLEET_STAGE"
+RELEASE_META="${FLEET_STAGE}/release.json"
 
-NOTES="${TOP}/release/notes.md"
+NOTES="${FLEET_STAGE}/notes.md"
 CLASS="$(rf class)"
 REV="$(rf revision)"
 
 set +e
-"${TOP}/release/provision-claw/scripts/provision-claw.sh" \
+"${FLEET_STAGE}/provision-claw/scripts/provision-claw.sh" \
   --project "$PROJECT" --hostname "$BOX" --timezone "$TZ_NOW" \
   --bucket "$BUCKET" --s3-endpoint "$ENDPOINT" \
-  --skills-manifest "${TOP}/release/skills.yaml" \
+  --skills-manifest "${FLEET_STAGE}/skills.yaml" \
   --release-notes "$NOTES" --release-class "$CLASS" --revision "$REV" \
   > "${STAGE}/run.json" 2> "${STAGE}/run.log"
 apply_rc=$?
