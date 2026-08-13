@@ -304,13 +304,15 @@ GRANTED_RETIRE="${INSTALL_PREFIX}/scripts/retire-seat.sh"
 GRANTED_ONBOARD="${INSTALL_PREFIX}/scripts/onboard-person.sh"
 GRANTED_TOKEN="${INSTALL_PREFIX}/scripts/install-machine-token.sh"
 GRANTED_MODE="${INSTALL_PREFIX}/scripts/set-update-mode.sh"
+GRANTED_DESTROY="${INSTALL_PREFIX}/scripts/destroy-workspace.sh"
+GRANTED_ACCESS="${INSTALL_PREFIX}/scripts/manage-workspace-access.sh"
 
 # ONE list, four uses: what preflight requires beside this script, what the
 # sudoers alias names, what the scope control requires the member's listing to
 # hold, and nothing else. Adding an operation to the member plane is adding its
 # script here; the control then fails until the alias and this list agree.
 GRANTED_SCRIPTS=("$GRANTED_SCAFFOLD" "$GRANTED_RETIRE" "$GRANTED_ONBOARD" "$GRANTED_TOKEN" \
-                 "$GRANTED_MODE")
+                 "$GRANTED_MODE" "$GRANTED_DESTROY" "$GRANTED_ACCESS")
 
 # The adjacent script the grant does NOT name. It is installed deliberately: a
 # refusal only proves scope when the refused path exists, is root-owned, and
@@ -2226,8 +2228,10 @@ ADMINEOF
 # (workspace name pattern, members resolved through getent; seat person and core
 # shape, and a reason that cannot carry a line break or a brace; a new person's
 # name constrained rather than escaped, and their key refused unless it is a
-# public key of a named type) and a second copy of those rules here would drift
-# from the copy the script enforces.
+# public key of a named type; a destroy target that must carry a manifest and
+# must still resolve to a directory directly under the workspace root, so a
+# symlink cannot walk the grant out of it) and a second copy of those rules here
+# would drift from the copy the script enforces.
 #
 # One of these takes no path argument at all. The token door composes its drop
 # path from the caller's own uid, because a caller-supplied path would let a
