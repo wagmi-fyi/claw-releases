@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# commonclaw-changelog.sh — write one entry into the claw's own changelog.
+# commonclaw-changelog.sh — write one entry into the claw"s own changelog.
 #
 # PAYLOAD SCRIPT. Installed onto the claw by provision-claw.sh. Called by the
 # provisioning run that caused the change, and by the updater when it applies a
