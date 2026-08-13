@@ -1,7 +1,8 @@
 {
+  "pointer_schema": "commonclaw-channel-v1",
   "channel": "tenants",
   "version": null,
   "tag": null,
   "tree_digest": null,
-  "note": "No release published on this channel yet. An updater reading this makes no change and records a no-op, which is a defined state rather than an error."
+  "note": "No release published on this channel yet. An updater reading this makes no change and records a no-op, which is a defined state rather than an error. The schema marker above is what separates this from a fetch that returned something else entirely."
 }
