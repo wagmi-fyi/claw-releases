@@ -1,8 +1,8 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "staging",
-  "version": null,
-  "tag": null,
-  "tree_digest": null,
-  "note": "No release published on this channel yet. An updater reading this makes no change and records a no-op, which is a defined state rather than an error. The schema marker above is what separates this from a fetch that returned something else entirely."
+  "version": "1.0.0",
+  "tag": "v1.0.0",
+  "tree_digest": "f486f5f2a36f5558c5a8c113624f12c9a9a3f25c4059d9e96931082eae4f2136",
+  "note": "The digest is measured over release/ in the tag above, and it was verified by fetching the tarball and re-computing it before this pointer was written."
 }
