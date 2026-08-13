@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# commonclaw-update.sh — take a validated release, or say why nOt.
+# commonclaw-update.sh — take a validated release, or say why not.
 #
 # PAYLOAD SCRIPT. Installed onto the claw by provision-claw.sh and invoked there
 # by a systemd timer, never by an agent. Its consumers are the timer's exit
@@ -144,29 +144,33 @@ fetch_raw() {  # <remote path> <destination file>
     # this claw's credential plane needs: a manager read, or nothing at all.
     token="$(eval "$FETCH_TOKEN_CMD" 2>/dev/null || true)"
     [ -n "$token" ] || return 3
-    curl -fsSL --max-time 120 -H "Authorization: Bearer ${token}" -o "$dest" "$what"
+    curl -fsSL --max-time 120 -H "Accept: application/vnd.github.raw" -H "Authorization: Bearer ${token}" -o "$dest" "$what"
   else
-    curl -fsSL --max-time 120 -o "$dest" "$what"
+    curl -fsSL --max-time 120 -H "Accept: application/vnd.github.raw" -o "$dest" "$what"
   fi
 }
 
 STEP="fetch channel pointer"
 STAGE="$(mktemp -d /tmp/commonclaw-update.XXXXXX)"
 
-# THE POINTER FETCH DEFEATS THE CACHE, and it is not superstition.
+# THE POINTER COMES FROM THE API, NOT FROM THE RAW HOST.
 #
-# Measured 2026-08-13: the raw host serves a channel pointer with max-age 300 and
-# answered a claw with a HIT carrying the PREVIOUS release five seconds after a
-# new one was published. On an hourly timer five minutes of staleness is noise.
-# It is not noise on the granted door's --now path, which is a person acting the
-# moment they are told a release exists, and being told nothing is available is
-# the one answer that reads as broken rather than slow.
+# Measured 2026-08-13, twice, and the second measurement corrected the first. The
+# raw host serves a channel pointer with max-age 300 and answered a claw with the
+# PREVIOUS release seconds after a new one was published. A query-string cache
+# buster does NOT fix it: the same host answered x-cache HIT with a unique
+# parameter and served a copy 249 seconds old. That was tried, shipped, and found
+# not to work, which is why the reasoning is written here rather than the fix
+# being quietly swapped.
 #
-# The tarball carries the same parameter for a different reason: a cached one
-# that no longer matches the digest would be REFUSED, and a spurious refusal
-# reads as tampering, which is the most alarming way for a cache to surface.
-CB="$(date +%s)"
-POINTER_URL="https://raw.githubusercontent.com/${RELEASE_REPO}/main/channels/${CHANNEL}.json?cb=${CB}"
+# The API contents endpoint is authoritative, carries a 60 second edge cache
+# instead of 300, and serves the current file. Its unauthenticated rate limit is
+# 60 an hour, and an hourly timer spends one or two, so nothing here needs a
+# credential to stay inside it.
+#
+# The tarball still comes from codeload, where a tag is effectively immutable and
+# any staleness is caught by the digest comparison rather than acted on.
+POINTER_URL="https://api.github.com/repos/${RELEASE_REPO}/contents/channels/${CHANNEL}.json"
 fetch_raw "$POINTER_URL" "${STAGE}/pointer.json" \
   || die "pointer unreachable" "could not read the ${CHANNEL} channel pointer; this claw is unchanged"
 
@@ -230,7 +234,7 @@ fi
 
 # ---------------------------------------------------------------- fetch payload
 STEP="fetch payload"
-fetch_raw "https://codeload.github.com/${RELEASE_REPO}/tar.gz/refs/tags/${OFFERED_TAG}?cb=${CB}" "${STAGE}/payload.tgz" \
+fetch_raw "https://codeload.github.com/${RELEASE_REPO}/tar.gz/refs/tags/${OFFERED_TAG}" "${STAGE}/payload.tgz" \
   || die "payload unreachable" "could not fetch the payload at tag ${OFFERED_TAG}; this claw is unchanged"
 
 mkdir -p "${STAGE}/x"
