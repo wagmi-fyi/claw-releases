@@ -1,8 +1,8 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "staging",
-  "version": "1.0.2",
-  "tag": "v1.0.2",
+  "version": "1.0.3",
+  "tag": "v1.0.3",
   "tree_digest": "1b8397a56412cba08daa2ea253321790ef9ac88667025f65e3951c8d1f3fcdb4",
-  "note": "Digest verified by fetching the tag and re-computing before this pointer was written."
+  "note": "TEMPORARY CONTROL. This digest is the untampered value and the tag carries one changed byte, so a claw must refuse it."
 }
