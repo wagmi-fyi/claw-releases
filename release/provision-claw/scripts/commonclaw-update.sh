@@ -153,7 +153,20 @@ fetch_raw() {  # <remote path> <destination file>
 STEP="fetch channel pointer"
 STAGE="$(mktemp -d /tmp/commonclaw-update.XXXXXX)"
 
-POINTER_URL="https://raw.githubusercontent.com/${RELEASE_REPO}/main/channels/${CHANNEL}.json"
+# THE POINTER FETCH DEFEATS THE CACHE, and it is not superstition.
+#
+# Measured 2026-08-13: the raw host serves a channel pointer with max-age 300 and
+# answered a claw with a HIT carrying the PREVIOUS release five seconds after a
+# new one was published. On an hourly timer five minutes of staleness is noise.
+# It is not noise on the granted door's --now path, which is a person acting the
+# moment they are told a release exists, and being told nothing is available is
+# the one answer that reads as broken rather than slow.
+#
+# The tarball carries the same parameter for a different reason: a cached one
+# that no longer matches the digest would be REFUSED, and a spurious refusal
+# reads as tampering, which is the most alarming way for a cache to surface.
+CB="$(date +%s)"
+POINTER_URL="https://raw.githubusercontent.com/${RELEASE_REPO}/main/channels/${CHANNEL}.json?cb=${CB}"
 fetch_raw "$POINTER_URL" "${STAGE}/pointer.json" \
   || die "pointer unreachable" "could not read the ${CHANNEL} channel pointer; this claw is unchanged"
 
@@ -217,7 +230,7 @@ fi
 
 # ---------------------------------------------------------------- fetch payload
 STEP="fetch payload"
-fetch_raw "https://codeload.github.com/${RELEASE_REPO}/tar.gz/refs/tags/${OFFERED_TAG}" "${STAGE}/payload.tgz" \
+fetch_raw "https://codeload.github.com/${RELEASE_REPO}/tar.gz/refs/tags/${OFFERED_TAG}?cb=${CB}" "${STAGE}/payload.tgz" \
   || die "payload unreachable" "could not fetch the payload at tag ${OFFERED_TAG}; this claw is unchanged"
 
 mkdir -p "${STAGE}/x"
