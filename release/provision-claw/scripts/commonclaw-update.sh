@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# commonclaw-update.sh — take a validated release, or say why not.
+# commonclaw-update.sh — take a validated release, or say why nOt.
 #
 # PAYLOAD SCRIPT. Installed onto the claw by provision-claw.sh and invoked there
 # by a systemd timer, never by an agent. Its consumers are the timer's exit
