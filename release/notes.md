@@ -20,5 +20,13 @@
   had no core they could start. The shortcut now has to lead to a real program
   before its name counts as an answer.
 
+- **Why this machine goes from 1.1.1 to 1.1.3, with no 1.1.2.** Release 1.1.2 was
+  published and then refused by every machine that was offered it. It was built
+  from two different snapshots of our own source, and the halves disagreed about
+  which files a release carries, so it stopped before changing anything. Nothing
+  was applied anywhere and nothing needed undoing. 1.1.3 carries the same fix,
+  built from one snapshot, and it was checked against its own contents before it
+  was offered to anybody.
+
 Nothing here changes what either core does, and no core is moved for anybody who
 already has one.
