@@ -1,33 +1,24 @@
-- **The morning check no longer starts a program inside your home directory.**
-  Every day this machine checks whether your core logins are close to expiring. To
-  find out about one of the two cores it used to start that core as you, in your
-  own home, which left files and timestamps behind and did it for everybody,
-  including people who had never signed into that core at all. It now reads the
-  same answer out of a file, as root, and nothing runs in anybody's home.
+- **Somebody on this machine who has never signed into a core now gets one,
+  instead of the update stopping on them.** This machine holds every person to a
+  minimum version of each core. To decide what to do for you it reads the version
+  you have. When somebody had no core at all there was no version to read, and
+  the machine treated that the same way it treats a core that is installed and
+  will not say what it is: it left it alone and reported a failure. So a person
+  who had simply never logged in would stop the whole update for everybody.
 
-- **A provisioning run no longer opens a login shell as you.** To read which
-  version of the persistent-session core you have, a run used to start a shell as
-  you and load your profile. Every person, every run, including runs where nothing
-  needed doing. It now reads the version from the installer's own symlink without
-  starting anything.
+  It now asks the question directly. If you have no core, it installs the minimum
+  version for you, the same way it does for somebody whose core is out of date.
+  If you do have one and it cannot say what it is, it still leaves it alone and
+  tells you, because installing over a core nobody can read could move you
+  backwards to an older one. When a run finishes it says how many cores it moved
+  and how many it installed fresh, separately, because those are not the same
+  event.
 
-- **This machine's name, its clock and its backup destination can no longer be
-  changed by a re-run.** These are decided when the machine is built. A later run
-  that is handed a different value now stops and says so instead of applying it.
-  A wrong clock moves the backup schedule, the daily check and the storage
-  reclaim together, and a wrong destination sends backups somewhere nobody is
-  watching, so this is refused rather than obeyed.
+  One more thing was found beside it and is fixed here too. If a core had been
+  removed and the shortcut that starts it was left behind, the machine read a
+  version out of the shortcut's name and reported that person as up to date. They
+  had no core they could start. The shortcut now has to lead to a real program
+  before its name counts as an answer.
 
-- **If automatic updates are switched on, a broken release now stops instead of
-  retrying forever.** A release that fails to apply is retried three times and
-  then held, and the machine records what failed and how many times. A newer
-  release is always accepted, because that is the way out. Before this, a release
-  that could not apply was downloaded and attempted every hour indefinitely.
-
-- **The copy of the last working release is kept properly.** The machine keeps
-  the previous release so a bad one can be undone by converging back to it. That
-  copy could previously be replaced by a release that had itself failed, which
-  left nothing to go back to. A release now has to have applied successfully
-  before it can become the copy you fall back to.
-
-Nothing here changes what either core does, and no core is moved by this release.
+Nothing here changes what either core does, and no core is moved for anybody who
+already has one.

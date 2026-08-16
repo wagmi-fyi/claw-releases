@@ -108,7 +108,10 @@
 #   10 claude        skipped per person when they are at or above the floor, so
 #                    the ordinary run touches nobody's core. When it does install
 #                    it names the floor version explicitly and keeps the
-#                    installer's exit status.
+#                    installer's exit status. Three states per person, each with
+#                    its own branch: no core installs the floor, below the floor
+#                    installs the floor, and a core whose version cannot be read
+#                    is refused rather than guessed at.
 #   Both cores       A FLOOR IS A MINIMUM, NEVER A TARGET: at or above it is a
 #                    skip, below it is an install, and neither phase can move an
 #                    installed core backwards under any argument.
@@ -175,6 +178,10 @@ WARN_DAYS_DEFAULT=14
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${SCRIPT_DIR}/../templates"
+# Programs that run on the MEMBER plane rather than the provisioning one. They
+# are staged here so the phase that installs them names one source directory,
+# the way the templates do.
+PAYLOAD_DIR="${SCRIPT_DIR}/../payload"
 
 # The workspace-template substitution, sourced from the one file that holds it.
 # Phase 7 reproduces an existing briefing to decide whether a member has edited
@@ -306,13 +313,14 @@ GRANTED_TOKEN="${INSTALL_PREFIX}/scripts/install-machine-token.sh"
 GRANTED_MODE="${INSTALL_PREFIX}/scripts/set-update-mode.sh"
 GRANTED_DESTROY="${INSTALL_PREFIX}/scripts/destroy-workspace.sh"
 GRANTED_ACCESS="${INSTALL_PREFIX}/scripts/manage-workspace-access.sh"
+GRANTED_PERSON_KEYS="${INSTALL_PREFIX}/scripts/manage-person-keys.sh"
 
 # ONE list, four uses: what preflight requires beside this script, what the
 # sudoers alias names, what the scope control requires the member's listing to
 # hold, and nothing else. Adding an operation to the member plane is adding its
 # script here; the control then fails until the alias and this list agree.
 GRANTED_SCRIPTS=("$GRANTED_SCAFFOLD" "$GRANTED_RETIRE" "$GRANTED_ONBOARD" "$GRANTED_TOKEN" \
-                 "$GRANTED_MODE" "$GRANTED_DESTROY" "$GRANTED_ACCESS")
+                 "$GRANTED_MODE" "$GRANTED_DESTROY" "$GRANTED_ACCESS" "$GRANTED_PERSON_KEYS")
 
 # The adjacent script the grant does NOT name. It is installed deliberately: a
 # refusal only proves scope when the refused path exists, is root-owned, and
@@ -358,6 +366,36 @@ CLAW_BRIEFING_LINK="${WORKSPACE_ROOT}/AGENTS.md"
 SKILLS_CANON="${OPT_ROOT}/skills"
 CLAUDE_MACHINE_SKILLS="/etc/claude-code/.claude/skills"
 CODEX_MACHINE_SKILLS="/etc/codex/skills"
+
+# ---- the claw's shared session bus ----
+#
+# One rail every member's sessions land on, so an agent of one person can reach
+# an agent of another. A bus inside somebody's home cannot do that: unix keeps
+# the homes apart, which is what homes are for.
+#
+# THE MESSAGES ARE VISIBLE TO EVERY MEMBER, BY DESIGN. The bus home is group
+# `claw-members` and group-writable, so anybody with a login here reads every
+# inbox on it. That is the trust plane this claw already runs on and not a
+# weakening of it. The standing law is unchanged and applies here in full: a
+# credential never goes in a message body. See ${BUS_DOC}.
+STATE_ROOT="/var/lib/commonclaw"
+BUS_HOME="${STATE_ROOT}/bus"
+BUS_DOC="${ETC_ROOT}/session-bus.md"
+
+# The member-facing programs. 0755 root:root beside the skill tree, for the
+# same reason and with the same audience: every member's session runs these,
+# and a program a member can edit is a program a member can rewrite for
+# everybody. The provisioning prefix next door stays 0750 and unreadable.
+CLAW_BIN="${OPT_ROOT}/bin"
+BUS_CLI="${CLAW_BIN}/bus"
+BUS_JOIN_HOOK="${CLAW_BIN}/claw-bus-join"
+
+# THE AUTO-JOIN, AND WHY IT IS HERE RATHER THAN IN A BRIEFING. A sentence in a
+# CLAUDE.md asks a model to run something; it lands or it does not, and nothing
+# reports which. The machine-wide harness settings are read by the harness
+# itself on every session start, so the join is a fact about the machine rather
+# than an instruction somebody's session may reinterpret.
+MANAGED_SETTINGS="/etc/claude-code/managed-settings.json"
 
 # The same path with the inner segment DROPPED. It is where the machine-path
 # control plants the probe that must stay invisible, and it is therefore the one
@@ -891,6 +929,16 @@ phase_1_preflight() {
   # the file and would silently skip the seeding on the one that does not.
   [ -r "${TEMPLATE_DIR}/claw-instructions.md" ] \
     || missing_payload="$missing_payload ../templates/claw-instructions.md"
+  # The session bus's three pieces. Named here rather than only in phase 16
+  # because the phase installs the machine-wide session-start hook: a run that
+  # reached it with the hook program missing would register a hook pointing at
+  # nothing, on every member's session, and only the members would find out.
+  [ -r "${PAYLOAD_DIR}/bus" ] \
+    || missing_payload="$missing_payload ../payload/bus"
+  [ -r "${PAYLOAD_DIR}/claw-bus-join" ] \
+    || missing_payload="$missing_payload ../payload/claw-bus-join"
+  [ -r "${TEMPLATE_DIR}/session-bus.md" ] \
+    || missing_payload="$missing_payload ../templates/session-bus.md"
   # At least one RETIRED generation, and this one is not tidiness.
   #
   # The reconcile recognises an unedited briefing by reproducing a retired
@@ -1889,7 +1937,7 @@ phase_10_claude() {
   # per PERSON, not per key: this downloads and runs an installer, so driving
   # it from the key list makes somebody with two devices pay for it twice and
   # reports their seat twice in the result
-  local user home installed now out status rc rc2 rc3 any_fail=0 moved=0
+  local user home installed now out status rc rc2 rc3 absent any_fail=0 moved=0 fresh=0
 
   for user in "${PEOPLE[@]}"; do
     if [ "$DRY_RUN" -eq 1 ]; then say "  would hold $user at or above ${CLAUDE_FLOOR}"; continue; fi
@@ -1906,21 +1954,49 @@ phase_10_claude() {
       continue
     fi
 
-    # UNREADABLE MEANS DO NOTHING. The vendor installer downgrades on request
-    # (measured 2026-08-13), so an install we cannot prove is forward is one we
-    # must not make. A person whose core answers nothing comparable is reported,
-    # not guessed at.
+    # THE REFUSAL COVERS TWO DIFFERENT PEOPLE, and only one of them belongs in
+    # it. The comparison refuses on the empty string, and the version read
+    # answers the empty string BOTH for a core that cannot say what it is AND
+    # for a person who has no core at all. Measured 2026-08-16 on the hub: a
+    # roster member who had never logged in was reported as a core too dangerous
+    # to touch, and the release's apply failed on her rather than giving her one.
+    #
+    # So ask, rather than infer from the field that failed. A probe keyed on the
+    # version read reports absence as a defect, which is what this was.
+    absent=0
     if [ "$rc" -eq 2 ]; then
-      bad "$user: no comparable version to read (got '${installed:-nothing}') -- refusing to install rather than risk moving this core backwards"
-      any_fail=1
-      continue
+      claude_present_for "$user" || absent=1
+
+      # PRESENT AND UNREADABLE MEANS DO NOTHING, w40's branch and its reason
+      # intact. The vendor installer downgrades on request (measured
+      # 2026-08-13), so an install over a core we cannot read is one we cannot
+      # prove is forward. A person whose core answers nothing comparable is
+      # reported, not guessed at.
+      if [ "$absent" -eq 0 ]; then
+        bad "$user: no comparable version to read (got '${installed:-nothing}') -- refusing to install rather than risk moving this core backwards"
+        any_fail=1
+        continue
+      fi
     fi
 
+    # NOTHING INSTALLED IS A FRESH INSTALL, not a refusal. There is no core here,
+    # so there is no backwards to move and the whole reason for the refusal is
+    # gone with it. The floor is the right version to land on for the same reason
+    # it is everywhere else in this phase.
+    #
+    # It falls into the install below rather than carrying its own copy of it: a
+    # later change to how this claw installs a core must not be able to reach one
+    # of these two states and miss the other.
+    #
     # BELOW THE FLOOR: install the floor BY NAME. Never a bare install, which
     # resolves to whatever shipped this morning -- measured 2026-08-13, a bare
     # run over an installed 2.1.227 moved it to 2.1.229 with nothing saying so.
     # </dev/null so the installer cannot consume this script's stdin.
-    say "  $user: ${installed:-nothing} is below the floor, installing ${CLAUDE_FLOOR}"
+    if [ "$absent" -eq 1 ]; then
+      say "  $user: no core is installed, installing the floor ${CLAUDE_FLOOR}"
+    else
+      say "  $user: ${installed} is below the floor, installing ${CLAUDE_FLOOR}"
+    fi
     status=0
     out="$(sudo -u "$user" -H bash -lc \
              "curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_FLOOR}" \
@@ -1938,8 +2014,17 @@ phase_10_claude() {
 
     now="$(claude_version_for "$user")"
     rc2=0; version_at_least "$now" "$CLAUDE_FLOOR" || rc2=$?
+    # ONE LINE PER STATE, because the two installs are not the same event. A
+    # fresh install gave somebody a core they did not have; an upgrade moved one
+    # that was already there. Reporting both as a move hides the first inside a
+    # count of the second, and the first is the one a claw's operator is waiting
+    # on when a new person is onboarded.
     case "$rc2" in
-      0) ok "$user: ${installed:-nothing} -> ${now}, now at or above the floor ${CLAUDE_FLOOR}"; moved=$((moved+1)) ;;
+      0) if [ "$absent" -eq 1 ]; then
+           ok "$user: had no core, ${now} installed at the floor ${CLAUDE_FLOOR}"; fresh=$((fresh+1))
+         else
+           ok "$user: ${installed} -> ${now}, now at or above the floor ${CLAUDE_FLOOR}"; moved=$((moved+1))
+         fi ;;
       1) bad "$user: still ${now} after installing, BELOW the floor ${CLAUDE_FLOOR}"; any_fail=1 ;;
       *) bad "$user: version unreadable after installing (got '${now:-nothing}')"; any_fail=1 ;;
     esac
@@ -1961,7 +2046,7 @@ phase_10_claude() {
   done
 
   [ "$DRY_RUN" -eq 1 ] && return 0
-  [ "$any_fail" -eq 0 ] && ok "every person is at or above the floor ${CLAUDE_FLOOR}; ${moved} core(s) moved this run"
+  [ "$any_fail" -eq 0 ] && ok "every person is at or above the floor ${CLAUDE_FLOOR}; ${moved} core(s) moved and ${fresh} installed fresh this run"
   human "each person completes the browser login for this core"
 }
 
@@ -2317,8 +2402,11 @@ ADMINEOF
 # name constrained rather than escaped, and their key refused unless it is a
 # public key of a named type; a destroy target that must carry a manifest and
 # must still resolve to a directory directly under the workspace root, so a
-# symlink cannot walk the grant out of it) and a second copy of those rules here
-# would drift from the copy the script enforces.
+# symlink cannot walk the grant out of it; a key door that acts only on a person
+# already in the members group, refuses to write through a symlink or a second
+# hard link into a home its owner controls, and refuses a revoke that would leave
+# somebody no key at all unless the caller says the lockout is the intent) and a
+# second copy of those rules here would drift from the copy the script enforces.
 #
 # One of these takes no path argument at all. The token door composes its drop
 # path from the caller's own uid, because a caller-supplied path would let a
@@ -2887,6 +2975,169 @@ TIMEOF
   human "enable commonclaw-update.timer only after the release rail has been ridden on the staging tier and the cost-and-timing must-fix list is closed"
 }
 
+# ---------------------------------------------------------------- phase 16
+
+phase_16_session_bus() {
+  head1 16 "the claw's shared session bus"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would create ${BUS_HOME} 2770 root:${MEMBERS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
+    say "  register the session-start join in ${MANAGED_SETTINGS}, and install ${BUS_DOC}"
+    return 0
+  fi
+
+  # THE GROUP IS THE WHOLE ACCESS MODEL, so its absence is a refusal and not a
+  # warning. Creating the group here would hand the bus to a set of people
+  # nobody has decided on; `claw-members` is written where people are made.
+  if ! getent group "$MEMBERS_GROUP" >/dev/null 2>&1; then
+    bad "no ${MEMBERS_GROUP} group on this claw, so there is nobody to share a bus between -- phase 8 makes it"
+    return 0
+  fi
+
+  # ---- the state root, and the one mode that decides whether any of this works ----
+  #
+  # 0755 BECAUSE MEMBERS MUST TRAVERSE IT. Everything under this root belongs to
+  # a different reader: the updater's defer directory is already 0755 for the
+  # same reason, and the backup rail's prune stamp is a timestamp. Nothing
+  # secret has ever lived here; the claw's credentials are in /etc/commonclaw.
+  #
+  # ⚠ commonclaw-backup.sh USED TO RESET THIS DIRECTORY TO 0700 on every run
+  # (`install -d -m 0700`, which applies the mode to a directory that already
+  # exists -- measured 2026-08-14). That silently cut every member off from the
+  # bus one backup after provisioning installed it, and the sessions would have
+  # kept reporting a healthy join into a directory they could no longer reach.
+  # The backup rail now creates this root at the same mode as every other writer
+  # of it. If a third writer appears, it agrees with these two or the bus dies
+  # on a schedule.
+  install -d -m 0755 -o root -g root "$STATE_ROOT"
+  check "${STATE_ROOT} is 0755 root:root so a member can traverse it to the bus" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$STATE_ROOT')\" = '755 root:root' ]"
+
+  # ---- the bus home ----
+  #
+  # SETGID IS NOT DECORATION HERE. Without it a file abigail creates lands in
+  # her own primary group and jeremiah cannot append to it, so the first
+  # cross-member message fails and every one after it. The setgid bit is what
+  # makes every file on this bus reachable by every member regardless of who
+  # wrote it.
+  install -d -m 2770 -o root -g "$MEMBERS_GROUP" "$BUS_HOME"
+  chmod 2770 "$BUS_HOME"        # install -d honors the umask on some coreutils; this does not
+  check "${BUS_HOME} is 2770 root:${MEMBERS_GROUP} -- setgid, group-writable, closed to the world" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_HOME')\" = '2770 root:${MEMBERS_GROUP}' ]"
+
+  # Default ACLs, the same instrument a workspace uses. The setgid bit carries
+  # the group down; it does not carry the group's WRITE bit down, and a member
+  # running with a 022 umask would create files their peers cannot append to.
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -d -m "g:${MEMBERS_GROUP}:rwx" -m "g:${MEMBERS_GROUP}:rwx" "$BUS_HOME" 2>/dev/null \
+      && ok "default ACL on ${BUS_HOME}: a member's umask cannot lock their peers out of a file they create" \
+      || warn "could not set the default ACL on ${BUS_HOME} -- the bus still works, but a member with a 022 umask can write a file their peers cannot append to"
+  else
+    warn "setfacl absent, so ${BUS_HOME} has no default ACL"
+  fi
+
+  # ---- the two programs every member's session runs ----
+  install -d -m 0755 -o root -g root "$CLAW_BIN"
+  local p missing=""
+  for p in bus claw-bus-join; do
+    [ -r "${PAYLOAD_DIR}/${p}" ] || missing="$missing $p"
+  done
+  if [ -n "$missing" ]; then
+    bad "payload missing from ${PAYLOAD_DIR}:${missing} -- copy the whole skill directory"
+    return 0
+  fi
+  # `payload/bus` IS the bus program. A fleet program every claw runs belongs to
+  # the release rather than to one person's skill tree, which would drift the
+  # first time that tree is reorganized for its own reasons. The orchestrate
+  # skill reaches this same file through a symlink, so the tree carries one copy
+  # and this phase installs the original.
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus" "$BUS_CLI"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-bus-join" "$BUS_JOIN_HOOK"
+  check "${BUS_CLI} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_CLI')\" = '755 root:root' ]"
+  check "${BUS_JOIN_HOOK} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_JOIN_HOOK')\" = '755 root:root' ]"
+
+  # ---- the join, registered where the harness reads it ----
+  #
+  # MERGED, NEVER OVERWRITTEN. This file is the machine's policy tier and the
+  # firm may have put other things in it. Two keys are ours; the rest is
+  # somebody else's decision and survives this run untouched.
+  install -d -m 0755 -o root -g root "$(dirname "$MANAGED_SETTINGS")"
+  local existing='{}' merged
+  [ -s "$MANAGED_SETTINGS" ] && existing="$(cat "$MANAGED_SETTINGS")"
+  if ! merged="$(printf '%s' "$existing" | jq \
+        --arg dir "$BUS_HOME" --arg hook "$BUS_JOIN_HOOK" '
+        .env = ((.env // {}) + {SESSION_BUS_DIR: $dir})
+        | .hooks = ((.hooks // {}) + {SessionStart:
+            (((.hooks.SessionStart // []) | map(select(
+                 [.hooks[]?.command] | index($hook) | not)))
+             + [{hooks: [{type: "command", command: $hook}]}])})' 2>/dev/null)"; then
+    bad "${MANAGED_SETTINGS} is not readable as JSON, so the session-start join was NOT registered. Sessions will not auto-join. Fix the file by hand."
+  else
+    printf '%s\n' "$merged" > "$MANAGED_SETTINGS"
+    chmod 0644 "$MANAGED_SETTINGS"; chown root:root "$MANAGED_SETTINGS"
+    check "${MANAGED_SETTINGS} sets SESSION_BUS_DIR to ${BUS_HOME}" \
+      bash -c "[ \"\$(jq -r '.env.SESSION_BUS_DIR // empty' '$MANAGED_SETTINGS')\" = '$BUS_HOME' ]"
+    check "${MANAGED_SETTINGS} runs ${BUS_JOIN_HOOK} on SessionStart, once" \
+      bash -c "[ \"\$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command == \"$BUS_JOIN_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    check "${MANAGED_SETTINGS} is 0644 root:root -- a member who could edit it could redirect every session's bus" \
+      bash -c "[ \"\$(stat -c '%a %U:%G' '$MANAGED_SETTINGS')\" = '644 root:root' ]"
+  fi
+
+  # ---- the member's own copy of what this is ----
+  if [ -r "${TEMPLATE_DIR}/session-bus.md" ]; then
+    install -m 0644 -o root -g root "${TEMPLATE_DIR}/session-bus.md" "$BUS_DOC"
+    ok "member-facing bus reference installed at ${BUS_DOC}"
+  else
+    bad "no ../templates/session-bus.md, so members have nothing that says what the bus is or what is public on it"
+  fi
+
+  # ---- does a member actually join? ----
+  #
+  # THE ONLY CHECK THAT ANSWERS THE QUESTION THE PHASE EXISTS FOR. Every check
+  # above measures a file. This one runs the join as an unprivileged member,
+  # against the real bus, exactly as the harness will.
+  local member="${PEOPLE[0]:-}"
+  if [ -z "$member" ]; then
+    warn "join NOT PROVEN: this claw carries nobody to run it as"
+    return 0
+  fi
+  # The session id the probe claims, and the handle the hook will derive from
+  # it: the first eight characters, qualified with the member's unix name.
+  local probe_sid="provisionprobe$$" probe_handle
+  probe_handle="${member}-${probe_sid:0:8}"
+  local out=""
+  out="$(printf '{"session_id":"%s","hook_event_name":"SessionStart","source":"startup"}' "$probe_sid" \
+        | sudo -u "$member" -H env SESSION_BUS_DIR="$BUS_HOME" "$BUS_JOIN_HOOK" 2>&1)" || true
+  case "$out" in
+    *"joined the claw bus as '${probe_handle}'"*)
+      ok "${member} joined the bus through the installed hook, as ${probe_handle}" ;;
+    *)
+      bad "${member} did NOT join through the installed hook. It said: ${out:-nothing}" ;;
+  esac
+
+  # The probe handle is this run's and comes off the board by name.
+  #
+  # NOT `bus gc --days 0`, WHICH WOULD TAKE EVERY MEMBER'S LIVE HANDLE WITH IT:
+  # idle is always at least zero, so a zero threshold matches every fully-read
+  # handle on the claw, including the sessions of people who are working right
+  # now. Named removal, or none.
+  local board="${BUS_HOME}/handles.json"
+  if [ -s "$board" ] && jq -e --arg h "$probe_handle" 'has($h)' "$board" >/dev/null 2>&1; then
+    local pruned
+    if pruned="$(jq --arg h "$probe_handle" 'del(.[$h])' "$board")"; then
+      printf '%s\n' "$pruned" > "$board"
+      chgrp "$MEMBERS_GROUP" "$board" 2>/dev/null || true
+      chmod 0660 "$board" 2>/dev/null || true
+    fi
+  fi
+  rm -f "${BUS_HOME}/inbox/${probe_handle}.jsonl" \
+        "${BUS_HOME}/cursors/${probe_handle}.cursor" 2>/dev/null || true
+  check "the provisioning probe left no handle on the board" \
+    bash -c "! jq -e --arg h '$probe_handle' 'has(\$h)' '$board' >/dev/null 2>&1"
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -2922,6 +3173,7 @@ if want_phase 12; then phase_12_seat_check;  fi
 if want_phase 13; then phase_13_admin_door;  fi
 if want_phase 14; then phase_14_skill_plane; fi
 if want_phase 15; then phase_15_release_rail; fi
+if want_phase 16; then phase_16_session_bus;  fi
 
 # ---------------------------------------------------------------- the record
 #
