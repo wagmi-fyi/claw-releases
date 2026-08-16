@@ -259,7 +259,7 @@ fi
 # Echoes "<state> <days>". days is empty unless a live seat carries an expiry.
 
 probe_seat() {
-  local user="$1" core="$2" home="$3" cred exp out
+  local user="$1" core="$2" home="$3" cred exp
   case "$core" in
     claude)
       # --- the persistent-session core: the refresh token is the durable one ---
@@ -274,14 +274,30 @@ probe_seat() {
       printf 'active %s' "$(( (exp / 1000 - now) / 86400 ))"
       ;;
     codex)
-      # --- the per-task core: match the OUTPUT STRING, not the exit code ---
-      # The logged-out exit code was never observable on a read-only lab claw,
-      # so this branch deliberately does not depend on it.
-      out="$(sudo -u "$user" -H codex login status </dev/null 2>&1 || true)"
-      case "$out" in
-        *"Logged in"*) printf 'active ' ;;
-        *) printf 'not-active ' ;;
-      esac
+      # --- the per-task core: READ THE STATE, never start the core ---
+      #
+      # This branch used to ask the core itself, as the member and with -H, which
+      # started a core process inside their real home every time the check ran.
+      # It was armed for everybody rather than for seat-holders, because the scan
+      # keys on the core's directory and provisioning creates that directory for
+      # every person, so somebody who never seated this core was walked into
+      # anyway. The daily cron entry paid the same price every morning.
+      #
+      # The state is a file, so it is read as a file, by root, exactly like the
+      # branch above. Nothing executes in anybody's home and the verdict is
+      # unchanged.
+      cred="${home}/.codex/auth.json"
+      if [ ! -r "$cred" ]; then printf 'not-active '; return 0; fi
+      # Either credential is a live seat, which is what the core's own status
+      # string reported: a subscription seat carries a refresh token, an API-key
+      # seat carries a key. PRESENCE ONLY -- no value is read, printed or logged,
+      # which is the rule stated at the top of this file.
+      if [ -n "$(jq -r '.tokens.refresh_token // empty' "$cred" 2>/dev/null || true)" ] ||
+         [ -n "$(jq -r '.OPENAI_API_KEY // empty' "$cred" 2>/dev/null || true)" ]; then
+        printf 'active '
+      else
+        printf 'not-active '
+      fi
       ;;
   esac
 }

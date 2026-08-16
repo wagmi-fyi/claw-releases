@@ -7,7 +7,12 @@
 # status, the journal, and the two files it writes under /etc/commonclaw.
 #
 #   commonclaw-update.sh            the scheduled run
-#   commonclaw-update.sh --now      ignore the quiet window, still honour the mode
+#   commonclaw-update.sh --now      apply now: ignores the quiet window, applies
+#                                   even on a claw pinned to manual, and retries a
+#                                   release this claw has stopped retrying. It is
+#                                   the operator's override and it overrides all
+#                                   three. The mode door prints this command to an
+#                                   admin who has just pinned their claw.
 #   commonclaw-update.sh --check    report what is on offer and change nothing
 #
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
@@ -41,6 +46,10 @@ PLANE=/opt/commonclaw/provision-claw
 # applied straight out of its own temporary directory and put a path that no
 # longer existed into /etc/commonclaw/skills.yaml, differently on every run.
 FLEET_STAGE=/root/fleet-stage
+# Written into a stage before an apply starts and removed when it passes, so the
+# stage itself says whether it is a way back. A dotfile, because the stage is
+# also a payload tree and this is not part of the payload.
+APPLY_INCOMPLETE=.commonclaw-apply-incomplete
 
 MODE_NOW=0; CHECK_ONLY=0
 while [ $# -gt 0 ]; do
@@ -87,13 +96,15 @@ trap record_run EXIT
 die() { VERDICT="$1"; log err "$2"; exit 1; }
 
 # ---------------------------------------------------------------- siblings
-for s in version-compare.sh tree-digest.sh; do
+for s in version-compare.sh tree-digest.sh core-version.sh; do
   [ -r "${PLANE}/scripts/${s}" ] || die "plane incomplete" "missing ${PLANE}/scripts/${s}: the provisioning plane is incomplete, so this claw cannot verify a release"
 done
 # shellcheck source=version-compare.sh
 . "${PLANE}/scripts/version-compare.sh"
 # shellcheck source=tree-digest.sh
 . "${PLANE}/scripts/tree-digest.sh"
+# shellcheck source=core-version.sh
+. "${PLANE}/scripts/core-version.sh"
 
 # ---------------------------------------------------------------- config
 STEP="config"
@@ -104,8 +115,6 @@ STEP="config"
 # What the FIRM decides, so the conf may set it. Defaults exist so a conf missing
 # an optional key does not abort under set -u.
 MODE="auto"; CHANNEL="tenants"; RELEASE_REPO=""; FETCH_TOKEN_CMD=""
-OUTSIDE_WINDOW=0
-DEFER_DIR=/var/lib/commonclaw/updater
 # shellcheck disable=SC1090
 . "$UPDATER_CONF"
 
@@ -119,6 +128,23 @@ DEFER_DIR=/var/lib/commonclaw/updater
 # making them agree, which is the shape the fleet removed on 2026-08-13. A firm
 # that wants a release sooner has the granted door, which is a person deciding.
 WINDOW_START="04"; WINDOW_END="06"; MAX_DEFER_HOURS="26"
+# How many times one release may fail to apply before the claw stops retrying it
+# on its own. A constant here for the same reason as the three above: a firm that
+# could raise it could restore the unbounded loop this bound exists to end.
+MAX_APPLY_FAILURES="3"
+
+# THE BOUND'S STATE BELONGS DOWN HERE TOO, and this was the hole in the argument
+# above. The three constants were protected by being assigned after the conf, and
+# these two were assigned before it, so the conf could set them. That protected
+# the bound's VALUE while leaving the directory its accrual lives in settable: a
+# DEFER_DIR pointed at a tmpfs loses the stamp on every reboot, the wait restarts
+# from zero each time, and the releasing branch stops being reachable. A bound
+# whose state a firm can reset is not a bound, which is the same sentence the
+# comment above makes about the numbers. OUTSIDE_WINDOW is the recorded verdict
+# and moves for the same reason: settable from the conf, it reports a release as
+# having landed outside the window when it did not.
+OUTSIDE_WINDOW=0
+DEFER_DIR=/var/lib/commonclaw/updater
 
 case "$MODE" in auto|manual) : ;; *) die "bad mode" "MODE in ${UPDATER_CONF} must be auto or manual, not '${MODE}'" ;; esac
 [ -n "$RELEASE_REPO" ] || die "no repo" "RELEASE_REPO is unset in ${UPDATER_CONF}: there is nowhere to pull from"
@@ -128,11 +154,77 @@ STEP="read carried version"
 # NO STATE MEANS NOTHING HAS BEEN TAKEN YET, which compares below every release.
 # It does NOT mean refuse: a claw provisioned before this rail existed carries no
 # state file and must still be able to take its first release.
+sv() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$STATE" 2>/dev/null | head -1; }
+
 CARRIED="0.0.0"
+CARRIED_TAG=""; CARRIED_DIGEST=""; CARRIED_APPLIED=""; CARRIED_PREV=""
+LAST_VERDICT=""; FAILING_VERSION=""; FAILURE_COUNT=0
 if [ -r "$STATE" ]; then
-  CARRIED="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE" | head -1)"
+  CARRIED="$(sv version)"
   [ -n "$CARRIED" ] || CARRIED="0.0.0"
+  # Carried forward verbatim, because a failed apply rewrites this file to record
+  # the failure and must not lose what the claw actually holds.
+  CARRIED_TAG="$(sv tag)"; CARRIED_DIGEST="$(sv tree_digest)"
+  CARRIED_APPLIED="$(sv applied_at)"; CARRIED_PREV="$(sv previous)"
+  LAST_VERDICT="$(sv last_verdict)"; FAILING_VERSION="$(sv failing_version)"
+  # An unreadable count is treated as none. It costs one extra attempt, which is
+  # the safe direction: a count trusted wrongly stops a claw that could still
+  # have repaired itself.
+  FAILURE_COUNT="$(sed -n 's/.*"consecutive_failures"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$STATE" 2>/dev/null | head -1)"
+  case "$FAILURE_COUNT" in ''|*[!0-9]*) FAILURE_COUNT=0 ;; esac
 fi
+
+# THE STATE FILE IS WRITTEN ON BOTH PATHS, and it is one writer so the two cannot
+# describe different worlds.
+#
+# `release-rail.md` has always said this file carries the last run's verdict and
+# the consecutive-failure count, and nothing wrote either. Without them a failed
+# apply left the carried version where it was and the next tick repeated the
+# whole pass -- fetch, extract, digest, stage swap, a full provisioning run --
+# every hour, forever, on a box with nobody watching.
+#
+# write_state <version> <tag> <digest> <applied_at> <previous> <verdict> <failing> <count>
+write_state() {
+  cat > "$STATE" <<STATEEOF
+{
+  "version": "${1}",
+  "tag": "${2}",
+  "tree_digest": "${3}",
+  "channel": "${CHANNEL}",
+  "applied_at": "${4}",
+  "previous": "${5}",
+  "last_verdict": "${6}",
+  "failing_version": "${7}",
+  "consecutive_failures": ${8}
+}
+STATEEOF
+  chmod 0644 "$STATE"
+}
+
+# EVERY DETERMINISTIC REFUSAL PAST THE FETCH COUNTS TOWARD THE BOUND, because the
+# cost it repeats is the fetch. The apply counter alone left every post-download refusal outside
+# the bound: the tarball came back every hour, forever, and the claw never
+# reached the point that stops it. What is being counted is not "the apply
+# failed" but "this offered release could not be taken", and that is the same
+# question the bound answers, and every one of these will answer it the same way
+# on the next tick: a payload that does not extract, carries no release directory,
+# ships an unparseable updater, or meets a claw whose identity file is incomplete
+# is in exactly that state again an hour later.
+#
+# THE FETCH FAILING IS DELIBERATELY NOT COUNTED. It is the one refusal here that
+# is not a property of the payload or the box, so a transient network fault would
+# burn attempts against a release that is fine and stop a claw from ever taking
+# it. It also downloads nothing, so it is not the repeated cost this bound exists
+# to end.
+count_refusal() {   # count_refusal <verdict>
+  if [ "$FAILING_VERSION" = "$OFFERED" ]; then
+    FAILURE_COUNT=$(( FAILURE_COUNT + 1 ))
+  else
+    FAILURE_COUNT=1
+  fi
+  write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
+              "$1" "$OFFERED" "$FAILURE_COUNT"
+}
 
 # ---------------------------------------------------------------- fetch
 # ONE SEAM FOR TRANSPORT AND AUTH. Everything above and below is indifferent to
@@ -226,10 +318,63 @@ if [ "$MODE" = "manual" ] && [ "$MODE_NOW" -eq 0 ]; then
   exit 0
 fi
 
+# THE SAME RELEASE IS TRIED A BOUNDED NUMBER OF TIMES, THEN IT STOPS.
+#
+# `release-rail.md` states this bound and nothing implemented it. A failed apply
+# does not advance the carried version, so without a bound the next tick finds
+# the same release still newer and repeats the entire pass: a repository tarball,
+# an extract, a digest, a stage swap and a full provisioning run. Hourly. Forever.
+# The run that causes it is one that can converge the whole box and still exit
+# non-zero, because `bad()` in the provisioning script records a failure and
+# returns 0, so a single late check decides the verdict for a pass that worked.
+#
+# A NEWER RELEASE IS ALWAYS ACCEPTED, because a newer release is the repair path.
+# The count is keyed to the version that failed and any other version clears it.
+#
+# `--now` walks past this, deliberately. The escape from a stuck rail is a person
+# deciding, which is the granted door, and that is the same escape the quiet
+# window has.
+STUCK_HERE=0
+if [ "$FAILING_VERSION" = "$OFFERED" ] && [ "$FAILURE_COUNT" -ge "$MAX_APPLY_FAILURES" ] && [ "$MODE_NOW" -eq 0 ]; then
+  STUCK_HERE=1
+fi
+
+# --check REPORTS AND WRITES NOTHING, AND IT IS ANSWERED BEFORE THE BOUND ACTS.
+#
+# The bound used to sit above this exit and rewrite the state file on its way to
+# refusing, so `--check` on a stuck claw rewrote state and exited 1 while its own
+# help says it changes nothing and its own message says the same. A read-only flag
+# that writes is worse than the thing it was reporting on.
 if [ "$CHECK_ONLY" -eq 1 ]; then
-  VERDICT="available"
-  log info "release ${OFFERED} is available (carrying ${CARRIED}); --check changes nothing"
+  if [ "$STUCK_HERE" -eq 1 ]; then
+    VERDICT="stuck"
+    log info "release ${OFFERED} is available and this claw has stopped retrying it after ${FAILURE_COUNT} failed attempts (carrying ${CARRIED}); --check changes nothing"
+  else
+    VERDICT="available"
+    log info "release ${OFFERED} is available (carrying ${CARRIED}); --check changes nothing"
+  fi
   exit 0
+fi
+
+if [ "$STUCK_HERE" -eq 1 ]; then
+  VERDICT="stuck"
+  write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
+              "stuck" "$OFFERED" "$FAILURE_COUNT"
+  die "stuck" "release ${OFFERED} has failed to apply ${FAILURE_COUNT} times and will not be retried on its own. This claw still carries ${CARRIED} and is unchanged. A NEWER release will be taken normally. To retry this one, an operator runs this script with --now"
+fi
+
+# THE PEOPLE SET IS REQUIRED BEFORE THE TARBALL, NOT AFTER IT.
+#
+# This refusal used to sit down in the classifier, past the fetch, the extract and
+# the digest. A claw with no people set therefore downloaded and verified the
+# whole payload every hour before refusing on a fact that was true before the
+# first byte moved, and the refusal never touched the failure count, so it never
+# reached the bound either. Nothing here needs the payload.
+MEMBER_LIST="$(getent group claw-members 2>/dev/null | awk -F: '{print $4}')"
+MEMBER_COUNT="$(printf '%s' "$MEMBER_LIST" | awk -F, '{n=0; for(i=1;i<=NF;i++) if($i!="") n++; print n}')"
+[ -n "${MEMBER_COUNT:-}" ] || MEMBER_COUNT=0
+if [ "$MEMBER_COUNT" -eq 0 ]; then
+  die "no people set" "the claw-members group is missing or empty, so this claw cannot say whether a release would move anybody's core. Refusing rather than reporting quiet from a measurement that read nobody. This claw is unchanged and nothing was fetched"
 fi
 
 # ---------------------------------------------------------------- fetch payload
@@ -239,18 +384,20 @@ fetch_raw "https://codeload.github.com/${RELEASE_REPO}/tar.gz/refs/tags/${OFFERE
 
 mkdir -p "${STAGE}/x"
 tar xzf "${STAGE}/payload.tgz" -C "${STAGE}/x" \
-  || die "payload did not extract" "the payload at ${OFFERED_TAG} did not extract; this claw is unchanged"
+  || { count_refusal "payload did not extract"; die "payload did not extract" "the payload at ${OFFERED_TAG} did not extract; this claw is unchanged. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"; }
 
 # The archive carries one top directory whose name is generated, so it is
 # resolved rather than assumed.
 TOP="$(find "${STAGE}/x" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 [ -n "$TOP" ] && [ -d "${TOP}/release" ] \
-  || die "payload has no release directory" "the payload at ${OFFERED_TAG} carries no release/ directory; this claw is unchanged"
+  || { count_refusal "payload has no release directory"; die "payload has no release directory" "the payload at ${OFFERED_TAG} carries no release/ directory; this claw is unchanged. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"; }
+
 
 STEP="verify digest"
 GOT_DIGEST="$(tree_digest "${TOP}/release")"
 if [ "$GOT_DIGEST" != "$OFFERED_DIGEST" ]; then
-  die "digest mismatch, REFUSED" "the payload at ${OFFERED_TAG} does not match the digest the channel names. wanted ${OFFERED_DIGEST}, measured ${GOT_DIGEST}. NOTHING was applied and this claw is unchanged"
+  count_refusal "digest mismatch"
+  die "digest mismatch, REFUSED" "the payload at ${OFFERED_TAG} does not match the digest the channel names. wanted ${OFFERED_DIGEST}, measured ${GOT_DIGEST}. NOTHING was applied and this claw is unchanged. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"
 fi
 
 STEP="verify the updater it carries"
@@ -258,7 +405,7 @@ STEP="verify the updater it carries"
 # says nothing about a logic break, and the header says so.
 if [ -r "${TOP}/release/provision-claw/scripts/commonclaw-update.sh" ]; then
   bash -n "${TOP}/release/provision-claw/scripts/commonclaw-update.sh" \
-    || die "release carries an unparseable updater" "the updater inside ${OFFERED_TAG} does not parse; refusing to install a release that would leave this claw unable to update itself"
+    || { count_refusal "unparseable updater"; die "release carries an unparseable updater" "the updater inside ${OFFERED_TAG} does not parse; refusing to install a release that would leave this claw unable to update itself. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"; }
 fi
 
 # ---------------------------------------------------------------- identity
@@ -269,10 +416,28 @@ STEP="read this box's identity"
 # AT ALL, so an update cannot re-create somebody who was offboarded.
 cv() { sed -n "s/^$1=//p" "$CONF" | head -1; }
 PROJECT="$(cv PROJECT)"; BOX="$(cv BOX_HOSTNAME)"; BUCKET="$(cv B2_BUCKET)"; ENDPOINT="$(cv S3_ENDPOINT)"
-TZ_NOW="$(timedatectl show -p Timezone --value 2>/dev/null || echo Etc/UTC)"
+
+# THE CLOCK IS AN IDENTITY FIELD AND IT REFUSES LIKE THE REST OF THEM.
+#
+# This read used to end in `|| echo Etc/UTC`, which INVENTED a timezone whenever
+# the machine failed to report one, while the four fields above it died rather
+# than invent. The comment at the top of this block says an update cannot move
+# the clock, and the clock was the one thing it could move: a box set to
+# anything else took Etc/UTC from a failed read and handed it to the provisioning
+# run as an argument. Three schedules follow local time -- the seat-check hour,
+# the backup timer, and the prune gate -- so they all move together and none of
+# them names the timezone anywhere.
+#
+# The claw records its own timezone, so that is the first source. The machine
+# answers for a claw whose config predates the field. Neither answering is a
+# refusal, because a value nobody chose is worse than a run that did not happen.
+TZ_NOW="$(cv TIMEZONE)"
+[ -n "$TZ_NOW" ] || TZ_NOW="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+
 for v in PROJECT BOX BUCKET ENDPOINT; do
-  [ -n "${!v}" ] || die "identity incomplete" "${CONF} carries no ${v}; refusing rather than inventing an identity value"
+  [ -n "${!v}" ] || { count_refusal "identity incomplete"; die "identity incomplete" "${CONF} carries no ${v}; refusing rather than inventing an identity value. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"; }
 done
+[ -n "$TZ_NOW" ] || { count_refusal "identity incomplete"; die "identity incomplete" "neither ${CONF} nor this machine reports a timezone; refusing rather than inventing one, because a clock nobody chose moves the seat-check hour, the backup timer and the prune gate together. Attempt ${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} for this release"; }
 
 # ---------------------------------------------------------------- classify
 STEP="classify disruption"
@@ -284,15 +449,71 @@ DECLARED="$(sed -n 's/.*"disruption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 would_move_core=0
 RELEASE_META="${TOP}/release/release.json"
 rf() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$RELEASE_META" | head -1; }
-CODEX_WANT="$(rf codex_floor)"; CLAUDE_WANT="$(rf claude_floor)"
+# THE FLOORS COME FROM THE THING THAT WILL ACTUALLY INSTALL THEM.
+#
+# This read them from release.json, which no provisioning run ever opens. The
+# floors phase 9 and phase 10 enforce are constants inside provision-claw.sh, so
+# release.json's copy is a declaration ABOUT the payload rather than the payload's
+# own answer, and nothing makes the two agree. Two ways that bit. A release whose
+# metadata omits a floor left the want empty and skipped the entire block, so the
+# claw classified quiet while the payload went on to replace cores. A release
+# declaring a floor lower than the one its own script ships classified quiet for
+# the same reason, and then installed the higher one at whatever hour the tick
+# landed.
+#
+# So the floors are read out of the payload's own script. It is sitting in the
+# temporary directory at this point, unpacked and digest-verified, and it is the
+# exact file that will run.
+PAYLOAD_PROV="${TOP}/release/provision-claw/scripts/provision-claw.sh"
+pf() { sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$PAYLOAD_PROV" 2>/dev/null | head -1; }
+CODEX_WANT="$(pf CODEX_FLOOR)"; CLAUDE_WANT="$(pf CLAUDE_FLOOR)"
+
+# A PAYLOAD THIS CLAW CANNOT READ THE FLOORS OUT OF IS TREATED AS CORE-MOVING.
+# Refusing outright would let a rename of that file stop every release; assuming
+# quiet would put the case back that this row exists to close. Waiting for the
+# window costs at most the deferral bound, which still releases it.
+FLOORS_UNREADABLE=0
+# EITHER floor missing is unreadable, not both. Requiring both empty meant a
+# payload declaring one floor and not the other classified from the half it could
+# read and said nothing about the core it could not, which is the same
+# measured-nothing shape one level down.
+if [ ! -r "$PAYLOAD_PROV" ] || [ -z "$CODEX_WANT" ] || [ -z "$CLAUDE_WANT" ]; then
+  FLOORS_UNREADABLE=1
+  log warning "could not read the core floors out of ${PAYLOAD_PROV}; treating this release as core-moving so it waits for the quiet window rather than classifying quiet from a value nobody read"
+fi
+
+[ "$FLOORS_UNREADABLE" -eq 0 ] || would_move_core=1
+
 if [ -n "$CODEX_WANT" ]; then
   have="$(command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | awk '{print $2}' || true)"
   r=0; version_at_least "${have:-}" "$CODEX_WANT" || r=$?
   [ "$r" -eq 0 ] || would_move_core=1
 fi
+
+# THE SECOND ARM THAT REPLACES CORES, AND IT IS ASKED UNCONDITIONALLY.
+#
+# The provisioning run installs the per-task core on two arms, not one. The
+# version floor is the arm above. The other is the companion set: the skip
+# requires the version to be at or above the floor AND the companion host to be
+# present, so a box missing that binary is reinstalled even when its version is
+# fine, replacing /opt/codex for every member at once.
+#
+# This sat inside the floor block, which meant a release that declared no codex
+# floor skipped the question entirely and still replaced the core. The arm does
+# not depend on any floor being declared, so neither does the question.
+if [ ! -x /opt/codex/codex-code-mode-host ]; then
+  would_move_core=1
+  log info "the per-task core's companion host is absent, so applying this release replaces the core binaries regardless of version; treating it as core-moving"
+fi
 if [ -n "$CLAUDE_WANT" ]; then
+  # READ THE INSTALL, DO NOT RUN IT. This asked each person's core directly, as
+  # them and with -H, so deciding whether a release needs the quiet window opened
+  # a login shell in every member's home -- to answer a question about a release
+  # they may not even be behind. The reader is sourced from core-version.sh,
+  # which is the same one the provisioning run uses, so the two cannot drift on
+  # how much of somebody's home a routine check opens.
   while IFS=: read -r person _; do
-    have="$(sudo -u "$person" -H bash -lc 'command -v claude >/dev/null 2>&1 && claude --version' </dev/null 2>/dev/null | awk '{print $1}' || true)"
+    have="$(claude_version_for "$person")"
     r=0; version_at_least "${have:-}" "$CLAUDE_WANT" || r=$?
     [ "$r" -eq 0 ] || would_move_core=1
   done < <(getent group claw-members | awk -F: '{n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]!="") print a[i]":"}')
@@ -331,7 +552,40 @@ if { [ "$would_move_core" -eq 1 ] || [ "$DECLARED" != "quiet" ]; } && [ "$MODE_N
     read -r d_ver d_epoch < "$DEFER_FILE" || true
     # A different release resets the clock, because the wait belongs to the
     # release being held rather than to the claw.
-    if [ "${d_ver:-}" = "$OFFERED" ] && [ -n "${d_epoch:-}" ]; then
+    # THE STAMP IS ARITHMETIC INPUT, SO IT IS VALIDATED BEFORE IT IS ARITHMETIC.
+    #
+    # Two different bad values, and only one of them is loud. A stamp that is not
+    # a number aborts the whole run under this script's `set -u`, because bash
+    # reads the name as a variable; that is a stopped rail rather than a wrong
+    # verdict. The quiet one is a stamp that is still DIGITS but truncated, which
+    # a digits-only check accepts: a torn `1786624214` left as `17552` reads as
+    # 1970, `waited` becomes about half a million hours, the bound is passed on
+    # the first tick and the release applies at once, outside the quiet window,
+    # reporting that it waited.
+    #
+    # Digits alone cannot tell those apart, so the check is against something the
+    # content cannot corrupt: the file's own modification time. The stamp is
+    # written once and never edited, so its epoch and its mtime describe the same
+    # instant. A value that disagrees with the mtime is not what was written.
+    # Anything rejected here is treated as no usable stamp and rewritten, which
+    # costs one deferral cycle and is the safe direction.
+    # THE MTIME CHECK ALONE STILL TRUSTS THE CLOCK THAT WROTE BOTH.
+    #
+    # Content and mtime are written in the same instant, so a box whose clock was
+    # days ahead when the stamp was made produces a future epoch and a matching
+    # future mtime: the skew is zero and the pair agrees with itself while both
+    # are wrong. The wait then goes NEGATIVE, negative is below the bound, and the
+    # release defers on every tick forever, which is the unreachable releasing
+    # branch this rail already killed once. So a stamp from the future is refused
+    # on its own terms as well.
+    d_mtime="$(stat -c %Y "$DEFER_FILE" 2>/dev/null || echo 0)"
+    d_ok=0
+    case "${d_epoch:-}" in
+      ''|*[!0-9]*) : ;;
+      *) d_skew=$(( d_epoch > d_mtime ? d_epoch - d_mtime : d_mtime - d_epoch ))
+         if [ "$d_skew" -le 300 ] && [ "$d_epoch" -le "$now_e" ]; then d_ok=1; fi ;;
+    esac
+    if [ "${d_ver:-}" = "$OFFERED" ] && [ "$d_ok" -eq 1 ]; then
       waited=$(( (now_e - d_epoch) / 3600 ))
     else
       printf '%s %s\n' "$OFFERED" "$now_e" > "$DEFER_FILE"
@@ -372,14 +626,77 @@ log info "applying release ${OFFERED} from ${OFFERED_TAG} (carrying ${CARRIED})"
 # Keeping the previous stage is also what a failed apply converges back to. That
 # is not a rollback, because the provisioning script is convergent rather than
 # transactional and no wrapper makes it so.
-rm -rf "${FLEET_STAGE}.previous"
-# if/fi rather than an AND-list, for legibility rather than for safety. A claw
-# taking its FIRST release has no stage to move aside, which is the ordinary
-# path and not an error. An AND-list would also survive that, because bash
-# exempts a failing test in that position from set -e; checked rather than
-# assumed, because the reverse is a common belief and writing it down as a
-# reason would have put a false sentence in this file.
-if [ -d "$FLEET_STAGE" ]; then mv "$FLEET_STAGE" "${FLEET_STAGE}.previous"; fi
+# ONLY A STAGE THAT APPLIED MAY BECOME THE ONE WE CONVERGE BACK TO.
+#
+# This rotated unconditionally, and that destroyed the thing it exists to keep.
+# The first failed tick correctly moved the good stage aside. The second one
+# deleted it and put the FAILED release there instead, so an hour after a bad
+# release landed, the artifact this rail names as the way back was the bad
+# release itself. Under an hourly retry nobody had read the journal yet.
+#
+# The verdict recorded by the previous run is what decides. A claw with no
+# previous stage rotates normally, which is the ordinary first-release path.
+# ONLY A VERDICT THAT SAYS THE STAGE FAILED MAY KEEP THE OLD ONE.
+#
+# The first cut of this gate asked whether the last verdict was `applied`, and
+# that is the wrong question on every claw alive today: none of them carries a
+# `last_verdict` field yet, because this script is what introduces it.
+#
+# THE VERDICT STRING IS RETIRED AS THE TEST, and this is the third defect that
+# gate has carried. It rotated unconditionally and destroyed the way back. Then
+# it read `applied`, which no existing claw records. Then a refusal on a path
+# that never reaches an apply -- a digest mismatch -- began writing its own word
+# into the same field, so a tag recut after a failed apply read as "not a
+# failure" and promoted the FAILED stage. One global string, written by several
+# writers, asked to describe one particular directory.
+#
+# So the stage carries its own answer. A marker file is written INTO the stage
+# before the apply starts and removed when the apply succeeds, so its presence
+# means "an apply into this stage began and did not finish". It travels with the
+# directory, no other path can write it, and it needs nothing from the state file.
+#
+# WRITTEN BEFORE AND CLEARED AFTER, rather than written on success. Measured on
+# the fleet this morning: every claw carries a stage AND a `.previous`, and none
+# carries a verdict field, so a marker written only on success would be absent on
+# all of them and the first release after this ships would take the keep branch
+# and delete the stage holding the release the box is running. That is the same
+# defect again. Absent therefore has to mean rotate. Writing the marker first
+# also survives the case a success-marker was meant to catch: a run killed part
+# way leaves the marker in place, which is the honest answer.
+# THE MARKER IS PLACED WHILE THE TREE IS STILL IN THE TEMPORARY DIRECTORY, so it
+# arrives WITH the stage rather than a moment after it.
+#
+# Writing it after the arrival left a window: a run killed between the stage
+# landing and the marker being written leaves a stage that never applied and
+# carries no marker, which the next tick reads as a way back and promotes. The
+# move is one operation, so a marker already inside the tree cannot arrive late.
+# This also drops the assumption that the move is atomic, which depends on the
+# staging directory and the fleet prefix sharing a filesystem and is not
+# something this script can check.
+: > "${TOP}/release/${APPLY_INCOMPLETE}"
+
+if [ ! -f "${FLEET_STAGE}/${APPLY_INCOMPLETE}" ]; then
+  # THE DELETION LIVES INSIDE THE GUARD. It used to run first and unconditionally,
+  # so a run killed between it and the move left the claw with no previous stage
+  # at all: the way back was deleted to make room for something that had not
+  # arrived. Nothing is removed until there is something to put in its place.
+  #
+  # if/fi rather than an AND-list, for legibility rather than for safety. A claw
+  # taking its FIRST release has no stage to move aside, which is the ordinary
+  # path and not an error. An AND-list would also survive that, because bash
+  # exempts a failing test in that position from set -e; checked rather than
+  # assumed, because the reverse is a common belief and writing it down as a
+  # reason would have put a false sentence in this file.
+  if [ -d "$FLEET_STAGE" ]; then
+    rm -rf "${FLEET_STAGE}.previous"
+    mv "$FLEET_STAGE" "${FLEET_STAGE}.previous"
+  fi
+else
+  # The stage standing here carries its own unfinished-apply marker, so it is not
+  # a way back for anybody. The good one is already at .previous and stays there.
+  log info "keeping the existing ${FLEET_STAGE}.previous: the stage being replaced carries an unfinished-apply marker, so it is not the way back"
+  rm -rf "$FLEET_STAGE"
+fi
 mv "${TOP}/release" "$FLEET_STAGE"
 RELEASE_META="${FLEET_STAGE}/release.json"
 
@@ -402,23 +719,50 @@ cp "${STAGE}/run.json" "${RUN_LOG_DIR}/apply-$(date -u +%Y%m%dT%H%M%SZ).json" 2>
 
 if [ "$apply_rc" -ne 0 ]; then
   VERDICT="apply failed"
-  log err "the provisioning run exited ${apply_rc} applying ${OFFERED}. The carried version is NOT advanced. The previous plane is at /root/plane-previous and re-applying it converges this claw back. Its result JSON is in ${RUN_LOG_DIR}"
+
+  # THE COUNT IS KEYED TO THE VERSION, so a different release starts at one.
+  if [ "$FAILING_VERSION" = "$OFFERED" ]; then
+    FAILURE_COUNT=$(( FAILURE_COUNT + 1 ))
+  else
+    FAILURE_COUNT=1
+  fi
+  write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
+              "apply failed" "$OFFERED" "$FAILURE_COUNT"
+
+  # THE MESSAGE NAMES A PATH ONLY WHEN THE PATH IS THERE.
+  #
+  # It used to send the operator to /root/plane-previous, which nothing on any
+  # claw creates: the constant is FLEET_STAGE and the copy is FLEET_STAGE.previous.
+  # This is the one row where the rail names a human as the repair mechanism, and
+  # it was pointing them at an empty directory while the rotation above was
+  # deleting the real one. A promise about an artifact is checked against the
+  # artifact before it is made.
+  local_hint="No previous stage is kept on this claw yet, so there is nothing to converge back to; the repair is a newer release or an operator ride"
+  if [ -d "${FLEET_STAGE}.previous" ]; then
+    local_hint="The previous plane is at ${FLEET_STAGE}.previous and re-applying it converges this claw back"
+  fi
+
+  remaining=$(( MAX_APPLY_FAILURES - FAILURE_COUNT ))
+  if [ "$remaining" -gt 0 ]; then
+    tries_hint="${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} attempts used; ${remaining} left before this claw stops retrying it"
+  else
+    tries_hint="${FAILURE_COUNT} of ${MAX_APPLY_FAILURES} attempts used; this claw will NOT retry ${OFFERED} again on its own"
+  fi
+
+  log err "the provisioning run exited ${apply_rc} applying ${OFFERED}. The carried version is NOT advanced and this claw still carries ${CARRIED}. ${tries_hint}. ${local_hint}. Its result JSON is in ${RUN_LOG_DIR}"
   exit 1
 fi
 
 # ---------------------------------------------------------------- record
 STEP="record"
-cat > "$STATE" <<EOF
-{
-  "version": "${OFFERED}",
-  "tag": "${OFFERED_TAG}",
-  "tree_digest": "${GOT_DIGEST}",
-  "channel": "${CHANNEL}",
-  "applied_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "previous": "${CARRIED}"
-}
-EOF
-chmod 0644 "$STATE"
+# AN APPLY THAT PASSED CLEARS THE FAILURE RECORD. The count exists to stop one
+# release being retried forever; a release that landed has nothing left to count.
+write_state "$OFFERED" "$OFFERED_TAG" "$GOT_DIGEST" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CARRIED" \
+            "applied" "" "0"
+
+# THE APPLY PASSED, so this stage becomes a way back. Clearing the marker is the
+# only thing that makes it one, and nothing else on the claw writes this file.
+rm -f "${FLEET_STAGE}/${APPLY_INCOMPLETE}"
 
 # The wait belonged to a release that has now landed.
 rm -f "${DEFER_DIR}/deferred" 2>/dev/null || true

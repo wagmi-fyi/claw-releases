@@ -476,17 +476,20 @@ want_phase() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 # shellcheck source=version-compare.sh
 . "${SCRIPT_DIR}/version-compare.sh"
 
-# The persistent-session core answers `--version` with "2.1.227 (Claude Code)",
-# so the version is the FIRST field.
+# ------------------------------------------------------- core version read
 #
-# Read AS THE PERSON, from a login shell. That core installs into the person's
-# own home and reaches PATH through their profile, so the same probe run as root
-# finds nothing and returns an empty string -- which the comparison would refuse,
-# reporting a broken core on a claw where the core is fine.
-claude_version_for() {
-  sudo -u "$1" -H bash -lc 'command -v claude >/dev/null 2>&1 && claude --version' \
-    </dev/null 2>/dev/null | awk '{print $1}' || true
+# ONE COPY, beside this file. The updater asks the same question this script
+# asks -- what version does this person carry -- and it asks it of every member
+# per offered release. A second copy would drift on how much of somebody's home
+# a routine check opens.
+#
+# Guarded here rather than at preflight because the sourcing happens first.
+[ -r "${SCRIPT_DIR}/core-version.sh" ] || {
+  printf 'missing sibling: %s/core-version.sh -- copy the whole skill directory\n' "$SCRIPT_DIR" >&2
+  exit 1
 }
+# shellcheck source=core-version.sh
+. "${SCRIPT_DIR}/core-version.sh"
 
 # Name shapes, and the SECOND pattern in each is what decides.
 #
@@ -626,6 +629,84 @@ conf_says() {
   local key="$1" want="$2" got
   got="$(sed -n "s/^${key}=//p" "$CONF" 2>/dev/null || true)"
   [ "$got" = "$want" ]
+}
+
+# The same read, answering with the value instead of a verdict.
+conf_value() { sed -n "s/^${1}=//p" "$CONF" 2>/dev/null | head -1 || true; }
+
+# ---------------------------------------------------------------- identity
+
+# IDENTITY BELONGS TO A BUILD, NEVER TO AN UPDATE.
+#
+# Six values make up a claw's identity: the name the machine answers to, the
+# clock, and the four fields the backup repository is composed from. A run that
+# passes a different one does not correct this box, it MOVES it. The clock takes
+# the seat-check hour, the backup timer and the prune gate with it, and none of
+# those three name the timezone anywhere. A changed bucket, endpoint or vault
+# repoints the destination, and `commonclaw-backup.sh` composes the repository
+# from exactly those values, so the next backup either stops or lands somewhere
+# nobody is looking.
+#
+# Nothing compared a passed value to the box before writing it. The read-back
+# control proves the file RECORDS what was passed, which is equally true when
+# the value was never meant, so it could not have caught this.
+#
+# THE BOX'S OWN CONFIG DECIDES, and it needs no flag and no mode to say so. Its
+# ABSENCE is a first build: the arguments become this claw's identity. Its
+# PRESENCE is every later run: they have to match what is already recorded. The
+# unattended case cannot be got wrong, because the updater reads these values off
+# the box and hands them straight back, so agreement is the ordinary path and a
+# mismatch means something composed a value nobody chose.
+#
+# A FIELD THE CONFIG DOES NOT RECORD IS NOT A MISMATCH. Claws built before the
+# timezone was written down fall back to what the machine itself holds, which is
+# what the record would have said.
+#
+# REFUSED, NOT QUIETLY REPAIRED. Converging to the box's own values instead would
+# leave the caller believing a change landed. Re-identifying a claw is a decision
+# taken with the consequences in view, so this stops the run and names the file.
+IDENTITY_DIVERGED=0
+identity_one() {                     # identity_one <label> <recorded> <passed>
+  local label="$1" have="$2" want="$3"
+  [ -n "$have" ] || return 0
+  [ -n "$want" ] || return 0
+  if [ "$have" = "$want" ]; then
+    ok "identity: ${label} matches what this claw already records (${have})"
+  else
+    bad "identity: ${label} passed as '${want}' but this claw records '${have}' -- REFUSING to change it. Identity belongs to a build. If this claw really is being re-identified, change ${CONF} deliberately and ride it by hand"
+    IDENTITY_DIVERGED=1
+  fi
+}
+
+identity_guard() {
+  head1 "0" "the identity this claw already carries"
+
+  if [ ! -r "$CONF" ]; then
+    ok "no ${CONF}: this is a first build, and this run's arguments become this claw's identity"
+    return 0
+  fi
+
+  local tz_recorded vault_recorded
+  # Written down since this guard existed; before that, the machine's own clock
+  # is the record, and it is the value the updater reads and passes back.
+  tz_recorded="$(conf_value TIMEZONE)"
+  [ -n "$tz_recorded" ] || tz_recorded="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  # The vault is not a config field. It reaches the claw inside the manager
+  # references in backup.env, so that file is where the claw records it.
+  vault_recorded="$(sed -n 's|^RESTIC_PASSWORD=op://\([^/]*\)/.*|\1|p' "$ENV_FILE" 2>/dev/null | head -1 || true)"
+
+  identity_one "project"     "$(conf_value PROJECT)"      "$PROJECT"
+  identity_one "hostname"    "$(conf_value BOX_HOSTNAME)" "$TARGET_HOSTNAME"
+  identity_one "timezone"    "$tz_recorded"               "$TIMEZONE"
+  identity_one "bucket"      "$(conf_value B2_BUCKET)"    "$B2_BUCKET"
+  identity_one "s3 endpoint" "$(conf_value S3_ENDPOINT)"  "$S3_ENDPOINT"
+  identity_one "vault"       "$vault_recorded"            "$VAULT"
+
+  if [ "$IDENTITY_DIVERGED" -eq 1 ]; then
+    say ""
+    say "  REFUSED before anything was changed. No phase has run."
+    finish
+  fi
 }
 
 # ---------------------------------------------------------------- digests
@@ -790,7 +871,7 @@ phase_1_preflight() {
   local s g missing_payload=""
   for s in commonclaw-backup.sh commonclaw-seat-check.sh render-template.sh \
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
-           commonclaw-update.sh; do
+           core-version.sh commonclaw-update.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
   for g in "${GRANTED_SCRIPTS[@]}"; do
@@ -960,6 +1041,11 @@ phase_2_box_identity() {
   run install -d -m 0755 "$ETC_ROOT"
   run install -d -m 0700 "$CRED_DIR"
 
+  # The timezone is written down because it is identity and the guard above needs
+  # a record to hold a later run to. Three schedules read local time -- the
+  # seat-check cron hour, the backup timer and the prune gate -- and not one of
+  # them names the timezone, so before this the only trace of it was the machine
+  # setting a run could silently move.
   if [ "$DRY_RUN" -eq 0 ]; then
     cat > "$CONF" <<CONFEOF
 # Firm-VM config. Written by provision-claw.sh. NO SECRETS HERE.
@@ -968,6 +1054,7 @@ SRV_ROOT=${SRV_ROOT}
 WORKSPACE_ROOT=${WORKSPACE_ROOT}
 CONNECTIONS_ROOT=${CONNECTIONS_ROOT}
 BOX_HOSTNAME=${TARGET_HOSTNAME}
+TIMEZONE=${TIMEZONE}
 B2_BUCKET=${B2_BUCKET}
 S3_ENDPOINT=${S3_ENDPOINT}
 CRED_DIR=${CRED_DIR}
@@ -2581,6 +2668,21 @@ phase_14_core_observables() {
   # why. So the same probe is read twice, from two placements, and the two
   # counts must DIFFER. One placement alone proves nothing -- a count that never
   # moves is not measuring the directory.
+  #
+  # A COST THIS CONTROL CANNOT GIVE UP, NAMED HERE SO IT CLASSIFIES ON SIGHT.
+  # The second placement is the LIVE machine-wide tier, the same directory every
+  # shipped skill is linked into, and a member session starting while the probe
+  # sits there loads it. That window is the measurement: reading a directory that
+  # is not the live tier would prove something about a directory nobody uses, and
+  # the whole defect this control exists to catch is the live tier going unread.
+  # So the window is accepted rather than removed, and it is bounded three ways
+  # -- the probe is planted immediately before the read and removed immediately
+  # after, the read is capped by the `timeout` below, and the probe's own
+  # description tells a core that loads it to ignore it.
+  #
+  # ANY APPEARANCE OF `zz-commonclaw-pathcontrol` IN A MEMBER'S SESSION LOG IS
+  # THIS PHASE. It is a provisioning artifact, not a finding, and not a skill
+  # anybody shipped.
   probe_wrong="${WRONG_MACHINE_SKILLS}/${probe_name}"          # the segment dropped
   probe_right="${CLAUDE_MACHINE_SKILLS}/${probe_name}"         # the real path
   rm -rf -- "$probe_wrong" "$probe_right"
@@ -2799,6 +2901,13 @@ TIMEOF
 trap on_exit EXIT
 
 phase_1_preflight
+
+# ABOVE THE PHASE GATE ON PURPOSE. Phase 2 asserts this claw's identity and phase
+# 11 composes the backup repository out of it, so a guard living inside phase 2
+# would leave `--only 11` free to repoint the destination with nothing checking.
+# A guard a single argument can step around is not a guard.
+identity_guard
+
 if want_phase 2;  then phase_2_box_identity; fi
 if want_phase 3;  then phase_3_packages;     fi
 if want_phase 4;  then phase_4_auto_upgrades;fi
