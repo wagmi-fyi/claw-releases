@@ -1,8 +1,8 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "wagmi",
-  "version": "1.1.1",
-  "tag": "v1.1.1",
-  "tree_digest": "21902c8e4a8e9a855da97bf4250f7a1257534e80d689e65c0c931dde4c175ad0",
-  "note": "Promoted from the staging tier, which applied it attended, then rode an armed timer through an unattended tick that no-opped and left its recorded release untouched. The digest was re-computed from the tag before this pointer was written."
+  "version": "1.1.3",
+  "tag": "v1.1.3",
+  "tree_digest": "c34eda527a74e99977bac183af154c30e6f47b6cdd3ae778cbb93684cfc231be",
+  "note": "Promoted from the staging tier, which has carried it since 2026-08-16 through 48 hours of clean hourly ticks with no failure. The digest was re-computed from the tag before this pointer was written."
 }
