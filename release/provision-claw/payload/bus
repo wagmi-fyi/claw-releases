@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""session-bus — a tiny file-backed message bus for coordinating multiple
+Claude Code sessions on one machine (orchestrator <-> workers, or peer mesh).
+
+Design properties (see reference/session-bus.md + reference/substrate.md):
+  - Directed mailboxes: a session reads only its OWN inbox by default, so it
+    never burns tokens on other sessions' traffic. Cross-verify is on-demand
+    (`bus read <other>` / `bus log`), never a default firehose.
+  - Read-cursor: `bus inbox` returns only the unread delta and is idempotent
+    (nothing-new == a cheap no-op) -- which makes early/duplicate wakes safe.
+  - Pointers, not blobs: put a big prompt/report in prompts/ and send a --ref;
+    inbox lines stay tiny, so a poke/check costs almost nothing.
+  - Append-only log.jsonl mirrors every message for audit / cross-verification.
+  - Shared-safe: a bus whose root is setgid and group-writable is one several
+    unix accounts use. The root's own mode decides the mode of everything
+    created under it, so a member's umask cannot lock their peers out; a handle
+    records the account that registered it and is REFUSED to a second claimant;
+    every message records the account the send ran as, beside the `from` handle
+    the sender typed.
+
+Invoke:  /opt/commonclaw/bin/bus <cmd> ... on a claw, where provisioning installs
+         this file. The orchestrate skill reaches the same program through a
+         symlink at ~/.claude/skills/orchestrate/scripts/bus. Not on PATH.
+"""
+import sys, os, json, uuid, argparse, time, re, pwd
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(os.environ.get("SESSION_BUS_DIR", str(Path.home() / ".claude" / "session-bus")))
+INBOX, PROMPTS, CURSORS, PROCESSED = ROOT / "inbox", ROOT / "prompts", ROOT / "cursors", ROOT / "processed"
+LOG, HANDLES, LOCKS = ROOT / "log.jsonl", ROOT / "handles.json", ROOT / "locks"
+HANDLES_LOCK = ROOT / ".handles.lock"
+
+
+def me():
+    """The unix account this process runs as. On a shared bus it is the only
+    thing that says whose registration a handle is."""
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        return os.environ.get("USER", "") or str(os.geteuid())
+
+
+# ── modes: the bus root decides what everything under it may be ──
+# A bus with more than one unix user on it is only usable if every member can
+# append to every file. Depending on the caller's umask for that does not work:
+# a member whose umask is 022 writes 0644 files, and the next member's send
+# fails on a bus that was correct until they touched it. So the root's own
+# permission bits are read once and applied to everything created beneath it.
+# A personal bus keeps its private mode by exactly the same rule.
+DEFAULT_DIR_MODE = 0o700
+
+
+def root_dir_mode():
+    try:
+        return ROOT.stat().st_mode & 0o7777
+    except OSError:
+        return DEFAULT_DIR_MODE
+
+
+def file_mode_for(dir_mode):
+    return dir_mode & 0o666          # 02770 -> 0660,  0700 -> 0600
+
+
+def is_shared_bus():
+    """A bus more than one unix account can write. Setgid plus group-write is
+    what makes that true and is what provisioning sets on a claw bus, so the
+    mode is read rather than a flag being trusted."""
+    m = root_dir_mode()
+    return bool(m & 0o2000) and bool(m & 0o070)
+
+
+def chmod_quiet(path, mode):
+    """Set a mode, and carry on if it cannot be set.
+
+    The ordinary reason it fails is that the file belongs to another member,
+    which means it already carries the mode that member's own run gave it.
+    Only the owner may chmod, and the owner already did."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def ensure_dirs():
+    dmode = root_dir_mode()
+    for d in (ROOT, INBOX, PROMPTS, CURSORS, PROCESSED):
+        if not d.exists():
+            d.mkdir(parents=True, exist_ok=True)
+            chmod_quiet(d, dmode)       # mkdir's mode is filtered by umask; this is not
+
+
+def touch_shared(path):
+    """Create a file if absent and give it the mode the bus root implies."""
+    existed = path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    if not existed:
+        chmod_quiet(path, file_mode_for(root_dir_mode()))
+
+
+def now_iso():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+try:                                    # POSIX (macOS/Linux): real advisory lock
+    import fcntl
+    def _lock(f):   fcntl.flock(f, fcntl.LOCK_EX)
+    def _unlock(f): fcntl.flock(f, fcntl.LOCK_UN)
+except ImportError:                     # Windows: best-effort lockfile (no fcntl/flock)
+    def _lock(f):
+        f._lk = f.name + ".lock"
+        for _ in range(50):
+            try:
+                os.close(os.open(f._lk, os.O_CREAT | os.O_EXCL | os.O_WRONLY)); return
+            except FileExistsError:
+                time.sleep(0.05)
+        f._lk = None                    # gave up; single-line appends are near-atomic on local FS
+    def _unlock(f):
+        lk = getattr(f, "_lk", None)
+        if lk:
+            try: os.remove(lk)
+            except OSError: pass
+
+
+def append_line(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    with open(path, "a", encoding="utf-8") as f:
+        _lock(f)                                # atomic append across concurrent senders
+        try:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            f.flush(); os.fsync(f.fileno())
+        finally:
+            _unlock(f)
+    if not existed:
+        chmod_quiet(path, file_mode_for(root_dir_mode()))
+
+
+def lines_of(path):
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def read_handles():
+    try:
+        return json.loads(HANDLES.read_text())
+    except Exception:
+        return {}
+
+
+def write_handles(d):
+    # The temp name carries the pid. Two members registering in the same second
+    # would otherwise stage through one path and one of them would read the
+    # other's half-written file. Hold handles_lock() across read + write.
+    tmp = HANDLES.with_name(f".handles.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(d, indent=2))
+    chmod_quiet(tmp, file_mode_for(root_dir_mode()))
+    tmp.replace(HANDLES)
+
+
+class handles_lock:
+    """Serializes the read-modify-write of handles.json across every session on
+    the bus. Without it a registration is a lost update: two sessions read the
+    same board, each writes its own entry onto it, and the first one vanishes.
+    A vanished registration is a session that believes it joined and cannot be
+    addressed, which is the exact failure the auto-join exists to remove."""
+
+    def __enter__(self):
+        ensure_dirs()
+        touch_shared(HANDLES_LOCK)
+        self.f = open(HANDLES_LOCK, "r+", encoding="utf-8")
+        _lock(self.f)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            _unlock(self.f)
+        finally:
+            self.f.close()
+        return False
+
+
+def cursor_of(handle):
+    c = CURSORS / f"{handle}.cursor"
+    try:
+        return int(c.read_text() or "0")
+    except Exception:
+        return 0
+
+
+def set_cursor(handle, n):
+    c = CURSORS / f"{handle}.cursor"
+    existed = c.exists()
+    c.write_text(str(n))
+    if not existed:
+        chmod_quiet(c, file_mode_for(root_dir_mode()))
+
+
+def fmt(m):
+    sender = m.get("sender", "")
+    frm = m.get("from", "?")
+    # Shown only when it adds something: a handle already qualified with the
+    # sending account repeats itself, and a line nobody reads is a line that
+    # hides the case where the two disagree.
+    if sender and not frm.startswith(f"{sender}-") and frm != sender:
+        frm = f"{frm} [{sender}]"
+    out = f"[{m.get('ts','')}] {frm} -> {m.get('to','?')}  ({m.get('id','')})\n"
+    out += f"  subject: {m.get('subject','')}\n"
+    if m.get("body"):
+        out += f"  body: {m['body']}\n"
+    if m.get("ref"):
+        out += f"  ref: {m['ref']}  (read this file for the full payload)\n"
+    return out
+
+
+def cmd_init(a):
+    ensure_dirs()
+    who = me()
+    pane = a.pane or os.environ.get("TMUX_PANE", "")
+    if pane == "-":
+        pane = ""       # "-" is how a caller SAYS "no pane"; it is not a pane id, so it
+                        # must not claim one, and must not evict another handle's claim.
+
+    with handles_lock():
+        h = read_handles()
+        prior = h.get(a.handle)
+
+        # ── A HANDLE IS REFUSED TO ITS SECOND CLAIMANT, NEVER TAKEN FROM ITS FIRST ──
+        # On a claw bus the handle space is shared by people, not just by
+        # sessions, so a collision is somebody else's session, live, addressed by
+        # that name. Overwriting the registration would silently redirect every
+        # message meant for them into this session's inbox, and neither side
+        # would see anything go wrong. The owner of record is the unix account
+        # that registered it. A member re-registering their OWN handle is not a
+        # collision: that is a resume, and the session-start hook fires again on
+        # every resume by design.
+        if prior is not None:
+            owner = prior.get("owner", "")
+            if owner and owner != who:
+                print(f"REFUSED: handle '{a.handle}' is registered to unix user '{owner}' "
+                      f"(since {prior.get('started', '?')}), and you are '{who}'.")
+                print(f"  Nothing was changed. Pick a handle of your own — the convention on a "
+                      f"shared bus is '{who}-<something>' — or ask {owner} to release theirs.")
+                sys.exit(1)
+
+        # THE PANE IS EVICTED, THE HANDLE IS NOT, and the two are different
+        # claims. A pane hosts exactly one session, so a second handle claiming
+        # it means the first claim is wrong; it is usually a dead handle whose
+        # pane id got recycled. The eviction is not verified as dead, so it is
+        # reported as a warning rather than announced as cleanup. That handle's
+        # inbox and log are untouched — it stops being a poke target, nothing more.
+        evicted = []
+        if pane:
+            for other, om in h.items():
+                if other != a.handle and om.get("pane") == pane:
+                    om["pane"] = ""
+                    evicted.append(other)
+
+        h[a.handle] = {
+            "pane": pane,
+            "owner": who,
+            "cwd": os.getcwd(),
+            "role": a.role or "",
+            "started": now_iso(),
+        }
+        write_handles(h)
+
+    touch_shared(INBOX / f"{a.handle}.jsonl")
+    if not (CURSORS / f"{a.handle}.cursor").exists():
+        set_cursor(a.handle, 0)
+
+    total = len(lines_of(INBOX / f"{a.handle}.jsonl"))
+    shown = pane or "- (no pane; reach this session through the agent listing)"
+    verb = "re-registered" if prior is not None else "registered"
+    print(f"handle '{a.handle}' {verb} to {who}.  pane={shown}")
+    if evicted:
+        print(f"  WARNING: took pane {pane} from: {', '.join(evicted)}. That handle is now "
+              f"unreachable by pane. If it is live, re-register it from its own pane.")
+    # The naming convention is a warning and not a refusal. `human` is a shared
+    # ledger by design, and a run's own orchestrator handle is named by its
+    # charter; refusing those would break the bus to enforce a convention that
+    # exists to keep members from colliding in the first place.
+    if is_shared_bus() and not a.handle.startswith(f"{who}-") and a.handle != "human":
+        print(f"  note: '{a.handle}' is not qualified with your unix name on a shared bus. "
+              f"'{who}-{a.handle}' cannot collide with another member's.")
+    print(f"inbox: {total - cursor_of(a.handle)} unread / {total} total.")
+
+
+def cmd_send(a):
+    ensure_dirs()
+    # `from` is what the sender TYPED. `sender` is the unix account the send ran
+    # as, which the sender cannot choose. On a shared bus those are two different
+    # facts and only the second one is evidence, so both are recorded.
+    m = {"id": uuid.uuid4().hex[:8], "ts": now_iso(),
+         "from": a.frm, "sender": me(), "to": a.to, "subject": a.subject, "body": a.body or ""}
+    if a.ref:
+        m["ref"] = a.ref
+    append_line(INBOX / f"{a.to}.jsonl", m)
+    append_line(LOG, m)
+    warn = "" if a.to in read_handles() else "   (recipient handle not registered yet -- queued)"
+    print(f"sent {m['id']} -> {a.to}{warn}")
+
+
+def cmd_inbox(a):
+    ensure_dirs()
+    inbox = INBOX / f"{a.handle}.jsonl"
+    if not inbox.exists():
+        print(f"no inbox for '{a.handle}' (run: bus init {a.handle})")
+        return
+    lines = lines_of(inbox)
+    unread = lines[cursor_of(a.handle):]
+    if not unread:
+        print(f"no new messages for '{a.handle}'.")
+        return
+    print(f"{len(unread)} new message(s) for '{a.handle}':\n")
+    for ln in unread:
+        try:
+            print(fmt(json.loads(ln)))
+        except Exception:
+            print("  <unparseable line>")
+    if not a.peek:
+        set_cursor(a.handle, len(lines))
+
+
+def cmd_read(a):   # cross-verify: full inbox of ANY handle, read-only, no cursor change
+    for ln in lines_of(INBOX / f"{a.handle}.jsonl"):
+        try:
+            print(fmt(json.loads(ln)))
+        except Exception:
+            pass
+
+
+def cmd_log(a):    # cross-verify: the global archive
+    lines = lines_of(LOG)
+    if a.tail:
+        lines = lines[-a.tail:]
+    for ln in lines:
+        try:
+            print(fmt(json.loads(ln)))
+        except Exception:
+            pass
+
+
+def cmd_handles(a):
+    h = read_handles()
+    if not h:
+        print("no handles registered")
+        return
+    shared = is_shared_bus()
+    for k, v in h.items():
+        total = len(lines_of(INBOX / f"{k}.jsonl"))
+        owner = f"owner={v.get('owner') or '?':10} " if shared else ""
+        print(f"{k:24}  unread={total - cursor_of(k):<3} total={total:<3} "
+              f"{owner}pane={(v.get('pane') or '-'):11} role={v.get('role','')}")
+
+
+def cmd_pane(a):   # used by the push watcher to find a handle's tmux pane
+    print(read_handles().get(a.handle, {}).get("pane", ""))
+
+
+def cmd_rotate(a): # hygiene: move already-read messages out so inboxes stay small
+    inbox = INBOX / f"{a.handle}.jsonl"
+    lines = lines_of(inbox)
+    cur = cursor_of(a.handle)
+    read_lines, keep = lines[:cur], lines[cur:]
+    if read_lines:
+        with open(PROCESSED / f"{a.handle}.jsonl", "a") as f:
+            f.write("\n".join(read_lines) + "\n")
+    inbox.write_text("\n".join(keep) + ("\n" if keep else ""))
+    set_cursor(a.handle, 0)
+    print(f"rotated {len(read_lines)} read message(s) out; {len(keep)} unread kept.")
+
+
+# ── gc: retire stale handles so the board (bus handles) + the orchestrator survey stay small ──
+def _active_lease_holders():
+    held = set()
+    if not LOCKS.exists():
+        return held
+    now = time.time()
+    for p in LOCKS.glob("*.lock"):
+        try:
+            cur = json.loads(p.read_text())
+        except Exception:
+            continue
+        if now - cur.get("acquired", 0) <= cur.get("ttl", 0):   # still valid → handle is busy
+            held.add(cur.get("holder"))
+    return held
+
+
+def _last_activity(handle, meta):
+    """Most recent touch: the LATER of the final inbox message's ts and the handle's
+    (re)registration ts. `bus init` freshens `started` on every re-registration, so
+    resuming a handle counts as activity — a re-registered session is never idle-retired.
+    None only if neither can be dated (→ keep it, be conservative)."""
+    cands = []
+    lines = lines_of(INBOX / f"{handle}.jsonl")
+    if lines:
+        try:    cands.append(datetime.fromisoformat(json.loads(lines[-1]).get("ts", "")))
+        except Exception: pass
+    try:    cands.append(datetime.fromisoformat(meta.get("started", "")))
+    except Exception: pass
+    return max(cands) if cands else None
+
+
+def cmd_gc(a):
+    # Retire a handle when its inbox is FULLY READ (cursor at end) AND idle > N days.
+    # Never touches `human`, an active lease-holder, or recent handles. Reversible:
+    # inbox lines are archived to processed/ and every message stays in log.jsonl.
+    # Dry run by default; --commit to apply; --if-stale throttles opportunistic auto-calls.
+    ensure_dirs()
+    stamp = ROOT / ".gc-stamp"
+    if a.if_stale:
+        try:    last_run = float(stamp.read_text())
+        except Exception: last_run = 0.0
+        age = time.time() - last_run
+        if age < a.if_stale:
+            print(f"gc: skipped — last ran {int(age // 60)}m ago (< {a.if_stale // 60}m throttle)")
+            return
+    handles = read_handles()
+    held = _active_lease_holders()
+    now = datetime.now().astimezone()
+    who, shared = me(), is_shared_bus()
+    plan, foreign = [], 0
+    for handle, meta in handles.items():
+        if handle == "human" or handle in held:
+            continue
+        # ON A SHARED BUS YOU SWEEP YOUR OWN HANDLES AND NOBODY ELSE'S. The
+        # directory is group-writable, so the delete would succeed; that is
+        # exactly why the refusal has to be here. Another member's idle handle
+        # is not evidence about their session, and retiring it takes their
+        # inbox out from under a session that may be alive and quiet.
+        if shared and meta.get("owner", "") != who:
+            foreign += 1
+            continue
+        n = len(lines_of(INBOX / f"{handle}.jsonl"))
+        if cursor_of(handle) < n:
+            continue                                # unread remains — keep
+        last = _last_activity(handle, meta)
+        if last is None:
+            continue                                # undatable — keep
+        idle_days = (now - last).total_seconds() / 86400
+        if idle_days >= a.days:
+            plan.append((handle, int(idle_days), n))
+    skipped = f"  ({foreign} handle(s) belong to other members and were not considered.)" if foreign else ""
+    if not plan:
+        print(f"gc: nothing to retire (no fully-read handle of yours idle > {a.days}d).")
+        if skipped:
+            print(skipped)
+        if a.commit:
+            stamp.write_text(str(time.time()))
+        return
+    print(f"gc: {'retiring' if a.commit else 'would retire'} {len(plan)} handle(s) — fully read, idle > {a.days}d:")
+    if skipped:
+        print(skipped)
+    for handle, days, n in sorted(plan, key=lambda x: -x[1]):
+        print(f"  {handle:30} idle {days:>3}d   {n} msg archived")
+    if not a.commit:
+        print("\n(dry run — add --commit to apply. human / leased / recent handles are never touched.)")
+        return
+    for handle, _, _ in plan:
+        inbox = INBOX / f"{handle}.jsonl"
+        lines = lines_of(inbox)
+        if lines:
+            with open(PROCESSED / f"{handle}.jsonl", "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        if inbox.exists():
+            inbox.unlink()
+        cur = CURSORS / f"{handle}.cursor"
+        if cur.exists():
+            cur.unlink()
+    # Re-read under the lock rather than writing back the board as it looked
+    # when the plan was made. A session that registered while this sweep was
+    # deciding is on disk now and must survive it.
+    with handles_lock():
+        live = read_handles()
+        for handle, _, _ in plan:
+            live.pop(handle, None)
+        write_handles(live)
+    stamp.write_text(str(time.time()))
+    print(f"\nretired {len(plan)} handle(s) → processed/.  Every message remains in log.jsonl (reversible).")
+
+
+# ── leases: serialize the commitment step (merge/deploy/publish) across concurrent orchestrations ──
+def _lock_path(name):
+    return LOCKS / f"{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.lock"  # ':' -> '_' for Windows-safe filenames
+
+
+def cmd_lock(a):
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    path = _lock_path(a.name)
+    rec = {"name": a.name, "holder": a.holder, "acquired": time.time(), "ttl": a.ttl}
+    try:                                            # atomic create-if-absent
+        with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644), "w") as f:
+            json.dump(rec, f)
+        print(f"acquired '{a.name}' (holder={a.holder}, ttl={a.ttl}s)")
+        return
+    except FileExistsError:
+        pass
+    try:
+        cur = json.loads(path.read_text())
+    except Exception:
+        cur = {}
+    age = time.time() - cur.get("acquired", 0)
+    if cur.get("holder") == a.holder:
+        path.write_text(json.dumps(rec))            # refresh my own
+        print(f"refreshed '{a.name}' (holder={a.holder})")
+    elif age > cur.get("ttl", a.ttl):
+        path.write_text(json.dumps(rec))            # take over a stale lease
+        print(f"acquired '{a.name}' — took over STALE lease (was {cur.get('holder')}, age {int(age)}s > ttl; holder likely dead)")
+    else:
+        print(f"HELD by '{cur.get('holder')}' for {int(age)}s / ttl {cur.get('ttl')}s — NOT acquired. "
+              f"Wait + retry, or `bus unlock {a.name} --steal` if you're sure it's dead.")
+        sys.exit(1)
+
+
+def cmd_unlock(a):
+    path = _lock_path(a.name)
+    if not path.exists():
+        print(f"'{a.name}' not held (nothing to release)")
+        return
+    try:
+        cur = json.loads(path.read_text())
+    except Exception:
+        cur = {}
+    if a.steal or cur.get("holder") == a.holder:
+        path.unlink()
+        stolen = " (STOLEN)" if a.steal and cur.get("holder") != a.holder else ""
+        print(f"released '{a.name}'{stolen}")
+    else:
+        print(f"HELD by '{cur.get('holder')}', not '{a.holder}' — use --steal to force-release.")
+        sys.exit(1)
+
+
+def cmd_locks(a):
+    leases = sorted(LOCKS.glob("*.lock")) if LOCKS.exists() else []
+    if not leases:
+        print("no active leases")
+        return
+    now = time.time()
+    for p in leases:
+        try:
+            cur = json.loads(p.read_text())
+        except Exception:
+            continue
+        age, ttl = int(now - cur.get("acquired", 0)), int(cur.get("ttl", 0))
+        state = "EXPIRED" if age > ttl else "held"
+        print(f"{cur.get('name', p.stem):28} {state:8} holder={cur.get('holder','?'):16} age={age}s / ttl={ttl}s")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="bus", description="session-bus: file-backed inter-session message bus")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("init", help="register this session's handle (call once at launch)")
+    s.add_argument("handle"); s.add_argument("--pane", default=""); s.add_argument("--role", default="")
+    s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("send", help="send a message: bus send <from> <to> <subject> [body] [--ref FILE]")
+    s.add_argument("frm", metavar="from"); s.add_argument("to"); s.add_argument("subject")
+    s.add_argument("body", nargs="?", default=""); s.add_argument("--ref", default="")
+    s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("inbox", help="read MY unread messages (advances cursor)")
+    s.add_argument("handle"); s.add_argument("--peek", action="store_true")
+    s.set_defaults(func=cmd_inbox)
+
+    s = sub.add_parser("read", help="cross-verify: read any handle's full inbox (read-only)")
+    s.add_argument("handle"); s.set_defaults(func=cmd_read)
+
+    s = sub.add_parser("log", help="cross-verify: read the global message archive")
+    s.add_argument("--tail", type=int, default=0); s.set_defaults(func=cmd_log)
+
+    sub.add_parser("handles", help="list registered handles + unread counts").set_defaults(func=cmd_handles)
+
+    s = sub.add_parser("pane", help="print a handle's tmux pane (used by the push watcher)")
+    s.add_argument("handle"); s.set_defaults(func=cmd_pane)
+
+    s = sub.add_parser("rotate", help="move already-read messages out of MY inbox")
+    s.add_argument("handle"); s.set_defaults(func=cmd_rotate)
+
+    s = sub.add_parser("gc", help="retire stale handles (fully-read + idle > N days) so the board stays small")
+    s.add_argument("--days", type=int, default=14, help="idle threshold in days (default 14)")
+    s.add_argument("--commit", action="store_true", help="apply changes (default is a dry run)")
+    s.add_argument("--if-stale", type=int, default=0, metavar="SECS",
+                   help="no-op if a gc already ran within SECS — throttle for the orchestrator's standup auto-call")
+    s.set_defaults(func=cmd_gc)
+
+    s = sub.add_parser("lock", help="acquire a named lease (serialize a commitment: <repo>:mainline, <repo>:deploy, …)")
+    s.add_argument("name"); s.add_argument("--holder", default="?"); s.add_argument("--ttl", type=int, default=1800)
+    s.set_defaults(func=cmd_lock)
+
+    s = sub.add_parser("unlock", help="release a named lease (--steal to force a stale/foreign one)")
+    s.add_argument("name"); s.add_argument("--holder", default="?"); s.add_argument("--steal", action="store_true")
+    s.set_defaults(func=cmd_unlock)
+
+    sub.add_parser("locks", help="list active leases (name, holder, age, ttl)").set_defaults(func=cmd_locks)
+
+    a = p.parse_args()
+    a.func(a)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""claw-bus-join — register the calling session on the claw's shared bus.
+
+Installed machine-wide and run by the harness's session-start hook, so every
+member's session joins the one rail without anybody remembering to. The hook
+passes the session's own facts as JSON on stdin.
+
+THIS PROGRAM NEVER FAILS A SESSION. A join that cannot happen is reported on
+stdout and the exit status stays 0. The bus is how sessions reach each other;
+it is not a precondition for a person getting their work done, and a hook that
+can refuse to start somebody's session is a worse failure than a missing handle.
+
+The handle is qualified with the unix account and the session id:
+`<user>-<first 8 of session id>`. Two members cannot collide, and the same
+member's two sessions cannot either. A resume carries its session id forward,
+so a resumed session re-registers the handle it already had.
+"""
+import json
+import os
+import pwd
+import subprocess
+import sys
+
+BUS = os.environ.get("CLAW_BUS_CLI", "/opt/commonclaw/bin/bus")
+
+
+def whoami():
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        return os.environ.get("USER", "") or str(os.geteuid())
+
+
+def say(msg):
+    print(f"claw-bus-join: {msg}")
+
+
+def main():
+    bus_dir = os.environ.get("SESSION_BUS_DIR", "")
+    if not bus_dir:
+        # The env var is set machine-wide beside this hook. Missing means the
+        # two halves were installed apart, and guessing a path here would build
+        # a second bus that every send succeeds into and nobody reads.
+        say("SESSION_BUS_DIR is not set, so this session did not join a bus. "
+            "The machine-wide settings that install this hook also set it.")
+        return 0
+    if not os.path.isdir(bus_dir):
+        say(f"{bus_dir} does not exist, so this session did not join. "
+            "Provisioning creates the claw bus; report it rather than creating one by hand.")
+        return 0
+    if not os.access(BUS, os.X_OK):
+        say(f"{BUS} is missing or not executable, so this session did not join.")
+        return 0
+
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    sid = str(payload.get("session_id", ""))[:8]
+    user = whoami()
+    if not sid:
+        # NO FALLBACK TO THE BARE ACCOUNT NAME. The session id is the only thing
+        # that separates one of your sessions from another, so without it every
+        # session of yours would take the same address, and the second would
+        # take it from the first as a legitimate re-registration by its owner.
+        # A shared address is worse than no address: messages go somewhere, and
+        # the wrong session reads them.
+        say("the session start payload carried no session id, so there is no address "
+            "this session can hold on its own. It did not join.")
+        return 0
+    handle = f"{user}-{sid}"
+
+    r = subprocess.run(
+        [BUS, "init", handle, "--pane", "-", "--role", "member"],
+        capture_output=True, text=True,
+        env={**os.environ, "SESSION_BUS_DIR": bus_dir},
+    )
+    out = (r.stdout or "").strip()
+    if r.returncode == 0:
+        # Named on purpose. A session that does not know its own handle cannot
+        # be told to check its inbox, and the member reading this line is the
+        # one who will be asked to.
+        say(f"joined the claw bus as '{handle}'.  bus={bus_dir}")
+        if out:
+            print(out)
+    else:
+        say(f"the bus refused this session's handle '{handle}'. "
+            "You can still send and read; nothing can address you until it is registered.")
+        for line in (out + "\n" + (r.stderr or "")).splitlines():
+            if line.strip():
+                print(f"  {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

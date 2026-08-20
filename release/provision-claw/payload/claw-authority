@@ -1,0 +1,338 @@
+#!/bin/bash
+#
+# claw-authority — compose a signed-approval request, and read who holds authority here.
+#
+# MEMBER PLANE. World-executable, world-readable, and it holds no privilege of
+# any kind. It creates nothing on the claw, changes nothing, and renders no
+# verdict about a signature. Everything it reads is already world-readable.
+#
+# USAGE
+#   claw-authority --list
+#   claw-authority --request grant-door    --name <door> --script <path> --group <group>
+#   claw-authority --request revoke-door   --name <door>
+#   claw-authority --request add-admin     --person <user> --key-file <path>
+#   claw-authority --request remove-admin  --person <user>
+#   claw-authority --request transfer-owner --person <user> --key-file <path>
+#
+#   --days <n>   how long the request stays applicable (default 7, at most 30)
+#   --out <path> write the request there instead of stdout
+#
+# THIS IS THE HALF AN AGENT MAY RUN. The whole authority model rests on one
+# claim: an agent can draft a door and can never install one. That claim is not
+# a rule written in a document, it is this file having no way to act. It reaches
+# no root path, it is not in any sudo grant, and the program that does act
+# refuses everything this one produces until a person's signature arrives with
+# it.
+#
+# WHAT A REQUEST IS. A short text document naming one operation, its subject,
+# this claw, and a deadline. A person signs those exact bytes on their own
+# device with the private half of a key this claw already knows, and the
+# signature travels back beside the document. Nothing secret is created here and
+# nothing secret is needed to run this.
+#
+# WHY THE DOCUMENT CARRIES MORE THAN A HASH. The approval is over a door
+# script's exact content, and the hash is what carries that. It sits inside a
+# document that also names the claw, the operation and a deadline, because a
+# signature over a bare hash is a signature over nothing else: it would approve
+# the same bytes on every claw the firm owns, under any operation that happened
+# to take a hash, for as long as the key lives. The hash still decides which
+# bytes may be installed. The rest decides where, as what, and until when.
+#
+# IT RENDERS NO VERDICT. This program will not tell you whether a signature is
+# good. That judgment lives in exactly one place, inside the root-owned door,
+# because a second copy of it would drift and the drift would be silent and the
+# verdict it drifts on is whether somebody may run code as root. Use the door's
+# own dry run to check a signature without acting.
+#
+# --list IS A QUESTION, NOT AN ACT. It reads the registry and records nothing,
+# for the reason every other door's list mode records nothing.
+#
+set -euo pipefail
+
+AUTHORITY_ROOT="/etc/commonclaw/authority"
+OWNER_FILE="${AUTHORITY_ROOT}/owner"
+ADMINS_FILE="${AUTHORITY_ROOT}/admins"
+DOORS_DIR="${AUTHORITY_ROOT}/doors"
+
+# The signature namespace. It is a fixed string on every claw and it is not a
+# hostname to resolve: ssh-keygen treats a namespace as an opaque label, and the
+# `name@domain` shape is the convention its own manual recommends for keeping
+# one domain of use from colliding with another. What separates one claw from
+# another is the `claw:` line inside the document, not this.
+#
+# IT MUST MATCH THE DOOR'S COPY. Two spellings mean every signature this program
+# instructs somebody to make is refused, so the door's own value is the one that
+# decides and this file is the copy that has to follow it.
+NAMESPACE="claw-authority@commonclaw"
+
+# The document version. A door reads it and refuses anything else, so a later
+# format cannot be interpreted by an older door under the older rules.
+DOC_VERSION="commonclaw-authority-request v1"
+
+# What a door may be granted to. Two values, both groups this claw already has,
+# and the request names one so the person signing decides who gets to run the
+# thing they are approving. There is no default: a blank here would make the
+# widest answer the quiet one.
+GROUP_MEMBERS="claw-members"
+GROUP_ADMIN="claw-admin"
+
+# THE DOOR CARRIES THIS NUMBER TOO, AND THE DOOR'S COPY IS THE ONE THAT BINDS.
+# This program holds no privilege, appears in no sudo grant, and nothing requires
+# anybody to use it: a request is a short text document a person can type. So the
+# refusal below is a courtesy that stops a drafter wasting a signer's time, and it
+# is not what keeps an approval from outliving the memory of it. Keep the two
+# values the same character for character, the same as `NAMESPACE` above.
+MAX_DAYS=30
+DEFAULT_DAYS=7
+
+# A bound on what may become a door. A tenant door is an operation, not a
+# payload, and something past this size is being shipped rather than written.
+MAX_SCRIPT_BYTES=262144
+
+# Where a door script may be drafted from. The tenant's own plane, which is
+# where members write. The door repeats this refusal; it is here as well so a
+# drafter is told at the moment they can still move the file.
+WORKSPACE_ROOT="/srv/workspaces"
+
+MODE=""; OPERATION=""; NAME=""; SCRIPT=""; GROUP=""; PERSON=""; KEY_FILE=""
+DAYS="$DEFAULT_DAYS"; OUT=""
+
+usage() {
+  awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2
+  exit 2
+}
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# `shift N` returns non-zero when fewer than N arguments remain, and under
+# `set -e` that ends the script with status 1 and nothing printed. The count is
+# checked first so a missing value is named rather than swallowed.
+need() {
+  [ "$1" -ge "$2" ] || { printf '%s needs %s value(s)\n' "$3" "$(( $2 - 1 ))" >&2; usage; }
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --list)     MODE="list"; shift ;;
+    --request)  need $# 2 "--request <operation>"; MODE="request"; OPERATION="$2"; shift 2 ;;
+    --name)     need $# 2 "--name <door>";          NAME="$2";     shift 2 ;;
+    --script)   need $# 2 "--script <path>";        SCRIPT="$2";   shift 2 ;;
+    --group)    need $# 2 "--group <group>";        GROUP="$2";    shift 2 ;;
+    --person)   need $# 2 "--person <user>";        PERSON="$2";   shift 2 ;;
+    --key-file) need $# 2 "--key-file <path>";      KEY_FILE="$2"; shift 2 ;;
+    --days)     need $# 2 "--days <n>";             DAYS="$2";     shift 2 ;;
+    --out)      need $# 2 "--out <path>";           OUT="$2";      shift 2 ;;
+    -h|--help)  usage ;;
+    *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
+  esac
+done
+
+[ -n "$MODE" ] || { printf 'pick one: --list or --request\n' >&2; usage; }
+
+# ---------------------------------------------------------------- the list
+
+print_signers() {   # print_signers <file> <label>
+  local file="$1" label="$2" principal type rest count=0
+  if [ ! -f "$file" ]; then
+    printf '  (no %s recorded -- this claw carries no authority registry yet)\n' "$label"
+    return 0
+  fi
+  while read -r principal type rest; do
+    case "$principal" in ''|'#'*) continue ;; esac
+    [ -n "$rest" ] || continue
+    count=$((count+1))
+    printf '  %-16s %s %s...\n' "$principal" "$type" "${rest:0:20}"
+  done < "$file"
+  [ "$count" -gt 0 ] || printf '  (none)\n'
+}
+
+if [ "$MODE" = "list" ]; then
+  printf 'Authority on %s\n\n' "$(hostname)"
+  printf 'OWNER -- exactly one, never deleted, moved only by the owner signing a transfer\n'
+  print_signers "$OWNER_FILE" "owner"
+  printf '\nADMINS -- appointed and removed by the owner alone, and an admin cannot appoint one\n'
+  print_signers "$ADMINS_FILE" "admins"
+  printf '\nGRANTED DOORS -- what this claw runs as root on one of the above signing for it\n'
+  if [ -d "$DOORS_DIR" ]; then
+    shopt -s nullglob
+    found=0
+    for rec in "$DOORS_DIR"/*.json; do
+      found=1
+      name="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      grp="$(sed -n 's/.*"group": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      sha="$(sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      by="$(sed -n 's/.*"approved_by": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      tier="$(sed -n 's/.*"approved_tier": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      when="$(sed -n 's/.*"approved_at": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+      printf '  %-20s runnable by %-14s approved by %s (%s) on %s\n' "$name" "$grp" "$by" "$tier" "$when"
+      printf '  %-20s sha256 %s\n' "" "$sha"
+    done
+    shopt -u nullglob
+    [ "$found" = 1 ] || printf '  (none)\n'
+  else
+    printf '  (none)\n'
+  fi
+  printf '\nEvery act these keys approve is recorded in /etc/commonclaw/admin-log.md.\n'
+  exit 0
+fi
+
+# ---------------------------------------------------------------- the request
+
+case "$OPERATION" in
+  grant-door|revoke-door|add-admin|remove-admin|transfer-owner) : ;;
+  *) die "'${OPERATION}' is not an operation. Pick one: grant-door, revoke-door, add-admin, remove-admin, transfer-owner." ;;
+esac
+
+case "$DAYS" in
+  ''|*[!0-9]*) die "--days takes a whole number of days, not '${DAYS}'." ;;
+esac
+[ "$DAYS" -ge 1 ] || die "--days must be at least 1."
+[ "$DAYS" -le "$MAX_DAYS" ] || die "--days is at most ${MAX_DAYS}. A request that stays applicable for longer is an approval nobody remembers giving."
+
+# Two case patterns per name, and the second one is the control. A shell case
+# pattern is anchored at both ends, so the positive form alone validates the
+# first character and says nothing about the rest.
+check_unix_name() {   # check_unix_name <value> <what>
+  case "$1" in
+    [a-z]*) : ;;
+    *) die "'$1' is not a usable ${2}: it must start with a lowercase letter." ;;
+  esac
+  case "$1" in
+    *[!a-z0-9_-]*) die "'$1' is not a usable ${2}: use lowercase letters, digits, hyphen and underscore only." ;;
+  esac
+  [ "${#1}" -le 32 ] || die "'$1' is longer than 32 characters."
+}
+
+check_door_name() {   # check_door_name <value>
+  case "$1" in
+    [a-z]*) : ;;
+    *) die "'$1' is not a usable door name: it must start with a lowercase letter." ;;
+  esac
+  case "$1" in
+    *[!a-z0-9-]*) die "'$1' is not a usable door name: use lowercase letters, digits and hyphen only." ;;
+  esac
+  [ "${#1}" -le 48 ] || die "'$1' is longer than 48 characters."
+}
+
+# One public key line, read from a file rather than an argument.
+#
+# A KEY ARRIVES AS A FILE BECAUSE THE OTHER WAY LOSES IT. A key pasted onto a
+# command line is one shell quoting accident from being split, and the accident
+# is silent: what lands is a truncated line that no longer matches anything.
+#
+# A PRIVATE KEY OFFERED HERE IS REFUSED, by the structural test the onboarding
+# door runs, for the reason measured on 2026-08-11: `ssh-keygen -l -f` prints a
+# fingerprint for a private key and exits 0, so a program trusting that exit
+# status will happily carry a secret into a world-readable document.
+KEY_TYPES=(
+  "ssh-ed25519"
+  "ecdsa-sha2-nistp256"
+  "sk-ssh-ed25519@openssh.com"
+  "sk-ecdsa-sha2-nistp256@openssh.com"
+)
+
+read_key_file() {   # read_key_file <path> -> prints the one key line
+  local path="$1" lines line type ok=0 t
+  [ -n "$path" ] || die "this operation needs --key-file <path>: the public half of the key that will speak for this person."
+  [ -f "$path" ] || die "no such key file: '${path}'."
+  [ ! -L "$path" ] || die "'${path}' is a symlink. Point at the key file itself."
+  # THE PRIVATE-KEY TEST READS THE WHOLE FILE AND COMES FIRST. A private key is
+  # several lines, so a line-count refusal would fire on it and tell somebody
+  # their file has too many lines while they hold a secret in their hand. The
+  # more important refusal is the one that has to be said.
+  if grep -q "PRIVATE KEY" "$path" 2>/dev/null; then
+    die "REFUSED: '${path}' looks like a PRIVATE key. Send the public half, the file ending in .pub. Nothing about this design needs a private key anywhere but on your own machine."
+  fi
+  lines="$(grep -c '' "$path" 2>/dev/null || true)"
+  [ "${lines:-0}" = "1" ] || die "'${path}' holds ${lines:-0} lines. A public key is one line; a file with more is a keyring."
+  line="$(head -1 "$path")"
+  type="${line%% *}"
+  for t in "${KEY_TYPES[@]}"; do
+    [ "$type" = "$t" ] && { ok=1; break; }
+  done
+  [ "$ok" = 1 ] || die "'${line%% *}' is not a key type this claw accepts. Accepted: ${KEY_TYPES[*]}"
+  ssh-keygen -l -f "$path" >/dev/null 2>&1 || die "'${path}' is not a public key the key tool can read."
+  printf '%s' "$line"
+}
+
+# The subject lines, per operation. Each operation names exactly the fields the
+# door reads for it, and the door refuses a document carrying any other field:
+# a request whose extra line nobody interprets is a line the signer read and the
+# machine did not.
+SUBJECT=""
+case "$OPERATION" in
+  grant-door)
+    [ -n "$NAME" ] || die "--request grant-door needs --name <door>."
+    [ -n "$SCRIPT" ] || die "--request grant-door needs --script <path>."
+    [ -n "$GROUP" ] || die "--request grant-door needs --group: ${GROUP_MEMBERS} or ${GROUP_ADMIN}. There is no default, because the widest answer must never be the quiet one."
+    check_door_name "$NAME"
+    case "$GROUP" in
+      "$GROUP_MEMBERS"|"$GROUP_ADMIN") : ;;
+      *) die "'${GROUP}' is not a group a door may be granted to. Pick ${GROUP_MEMBERS} or ${GROUP_ADMIN}." ;;
+    esac
+    [ -f "$SCRIPT" ] || die "no such script: '${SCRIPT}'."
+    [ ! -L "$SCRIPT" ] || die "'${SCRIPT}' is a symlink. Name the file whose bytes are being approved, because a link is a name for bytes that can change under it."
+    case "$(cd "$(dirname "$SCRIPT")" && pwd -P)/" in
+      "${WORKSPACE_ROOT}"/*) : ;;
+      *) die "'${SCRIPT}' is outside ${WORKSPACE_ROOT}. A door is drafted in the tenant's own plane, which is also the plane the backup rail keeps." ;;
+    esac
+    size="$(stat -c %s "$SCRIPT")"
+    [ "$size" -le "$MAX_SCRIPT_BYTES" ] || die "'${SCRIPT}' is ${size} bytes, past the ${MAX_SCRIPT_BYTES} a door may be. A door is an operation, not a payload."
+    [ "$size" -gt 0 ] || die "'${SCRIPT}' is empty."
+    sha="$(sha256sum "$SCRIPT" | cut -d' ' -f1)"
+    SUBJECT="$(printf 'name: %s\ngroup: %s\nsha256: %s' "$NAME" "$GROUP" "$sha")"
+    ;;
+  revoke-door)
+    [ -n "$NAME" ] || die "--request revoke-door needs --name <door>."
+    check_door_name "$NAME"
+    SUBJECT="$(printf 'name: %s' "$NAME")"
+    ;;
+  add-admin|transfer-owner)
+    [ -n "$PERSON" ] || die "--request ${OPERATION} needs --person <user>."
+    check_unix_name "$PERSON" "username"
+    key="$(read_key_file "$KEY_FILE")"
+    SUBJECT="$(printf 'person: %s\nkey: %s' "$PERSON" "$key")"
+    ;;
+  remove-admin)
+    [ -n "$PERSON" ] || die "--request remove-admin needs --person <user>."
+    check_unix_name "$PERSON" "username"
+    SUBJECT="$(printf 'person: %s' "$PERSON")"
+    ;;
+esac
+
+# The request id. It is what makes a request usable once: the door records every
+# id it has applied and refuses a repeat, so a document somebody kept cannot be
+# replayed to undo a later decision. Time plus randomness, because two drafts in
+# the same second are ordinary.
+RID="$(date -u +%Y%m%dT%H%M%SZ)-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+NOT_AFTER="$(date -u -d "+${DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+BY="$(id -un)"
+
+DOC="$(printf '%s\nclaw: %s\noperation: %s\nrequest-id: %s\ndrafted-by: %s\ndrafted-at: %s\nnot-after: %s\n%s\n' \
+  "$DOC_VERSION" "$(hostname)" "$OPERATION" "$RID" "$BY" "$NOW" "$NOT_AFTER" "$SUBJECT")"
+
+if [ -n "$OUT" ]; then
+  printf '%s' "$DOC" > "$OUT"
+  printf 'request written to %s\n' "$OUT" >&2
+else
+  printf '%s' "$DOC"
+fi
+
+TARGET="${OUT:-<the file you saved this in>}"
+{
+  printf '\n'
+  printf -- '---- what happens next ----\n'
+  printf 'This claw can do nothing with the document above. It is a request.\n\n'
+  printf 'Send it to the owner or to an admin. On THEIR OWN machine, with the private\n'
+  printf 'half of the key this claw holds for them, they run:\n\n'
+  printf '  ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n %s %s\n\n' "$NAMESPACE" "$TARGET"
+  printf 'That writes %s.sig beside it. Nothing secret leaves their machine:\n' "$TARGET"
+  printf 'a signature is public, and the private half never moves.\n\n'
+  printf 'Both files come back here, and a claw-admin applies them:\n\n'
+  printf '  sudo /opt/commonclaw/provision-claw/scripts/manage-claw-authority.sh \\\n'
+  printf -- '      --apply %s %s %s.sig\n\n' "$OPERATION" "$TARGET" "$TARGET"
+  printf 'The signature is over the exact bytes above. Change one character and it\n'
+  printf 'stops verifying, which is the point.\n'
+  printf 'This request stops being applicable at %s.\n' "$NOT_AFTER"
+} >&2

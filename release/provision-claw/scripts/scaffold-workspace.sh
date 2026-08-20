@@ -15,7 +15,9 @@
 #
 # CREATES the workspace layout, with the symlink rule applied:
 #   {workspace}/
-#     .workspace.yaml                 the manifest: this is what says it is one
+#     .workspace.yaml                 the manifest: this is what says it is one,
+#                                     and where the workspace declares which
+#                                     shared runtimes its work needs
 #     CLAUDE.md                       canonical instructions, authored
 #     AGENTS.md -> CLAUDE.md          the other convention, symlinked
 #     .claude/skills/                 authored skills directory
@@ -239,6 +241,11 @@ claw: $(hostname)
 created: $(date -I)
 # The chat channel bound to this workspace. Empty until somebody binds it.
 channel:
+# The shared language runtimes this workspace's work needs, for example
+# [node-22]. Provisioning converges the claw to the union of every workspace's
+# list. Empty is the honest default: the runtime is the machine's, and this line
+# is where a workspace says it needs one. /etc/commonclaw/runtimes.md says how.
+runtimes: []
 MANEOF
   chgrp "$WS_GROUP" "$WS_MANIFEST"; chmod 0660 "$WS_MANIFEST"
 fi
@@ -347,6 +354,17 @@ if [ -z "$man_missing" ]; then
   ok "manifest carries every field (name, group, claw, created, channel)"
 else
   bad "manifest is missing field(s):$man_missing"
+fi
+
+# `runtimes` is checked SEPARATELY and its absence is a note, not a failure.
+# A manifest this script wrote always carries it; a workspace made before the
+# field existed does not, and that workspace is not broken -- it declares no
+# runtime, which is what an empty list means anyway. Failing here would make
+# every re-run over an older claw report a defect that is really a birth date.
+if grep -qE '^runtimes:' "$WS_MANIFEST" 2>/dev/null; then
+  ok "manifest carries the runtimes declaration"
+else
+  warn "this manifest predates the runtimes field. It declares no runtime, which is the same as an empty list. Add 'runtimes: []' if you want the field there."
 fi
 
 # the symlink rule, verified as links rather than assumed

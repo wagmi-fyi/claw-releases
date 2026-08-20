@@ -158,6 +158,55 @@ Work through these. If all five pass, you are done.
 
 That last one is the good part. The work lives on the claw, so it keeps going whether or not you are at your desk.
 
+## If you are the owner, or an admin
+
+Most people can stop at the checklist above. Read this part if we told you that
+you hold the claw, or that you are one of its admins.
+
+Your firm can add operations to its own claw — a script your team writes that
+runs with full rights, and that your staff can then run without us in the loop.
+Nothing like that gets installed unless somebody in your firm approves it, and
+approving means signing for it with the key you made in step 2.
+
+Here is what that looks like in practice. Somebody drafts the operation. They
+send you a short document, and it names what the script is, who may run it, and
+a fingerprint of its exact contents. You read the script. If you want it, you run
+one command on your own laptop:
+
+```bash
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n claw-authority@commonclaw request.txt
+```
+
+That makes a signature file beside it. Send both back, and it gets installed.
+
+Three things worth knowing about that.
+
+**Nothing secret leaves your machine.** A signature is public, and your private
+key never moves. That is the whole reason the approval happens on your laptop
+rather than on the claw: there is no secret on the claw for anyone to take.
+
+**An assistant can prepare the request and cannot approve it.** Your agents can
+draft an operation, read it, explain it, and hand it to you. They cannot sign it,
+because signing needs the private key that is on your machine and nowhere else.
+That is a property of how the thing is built, not a policy anyone is trusting.
+
+**You are agreeing to the exact contents.** Change one character in the script
+afterwards and the claw refuses to run it, every time, not just at install. So
+read what you sign, the same way you would read anything you put your name to.
+
+If you hold the claw, you are also the only person who can appoint or remove an
+admin, and the only person who can hand the claw to somebody else. Those take the
+same signature.
+
+Your claw carries the full detail at `/etc/commonclaw/claw-authority.md`, and
+your assistant can read it to you.
+
+One thing to plan for now rather than later: if you lose the laptop holding that
+key, you cannot approve anything, and getting your claw back is a written request
+to us rather than something anyone can fix on the machine. That is by design.
+Keep the private half in your password manager, as step 4 describes, and it is a
+short problem instead of a long one.
+
 ## If something does not work
 
 **The mobile app rejects your key.** Almost always the format. Redo step 3 exactly — a key from `ssh-keygen` alone will not be accepted.

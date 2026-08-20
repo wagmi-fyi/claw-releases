@@ -10,6 +10,8 @@
 #   commonclaw-backup.sh backup            the scheduled run
 #   commonclaw-backup.sh restore <dest>    restore to a scratch path
 #   commonclaw-backup.sh snapshots         list snapshots
+#   commonclaw-backup.sh targets           print what this rail captures. Reads no
+#                                          credential, so anything may ask.
 #
 # CREDENTIALS. One credential rests on this claw: the manager's service-account
 # token, as a systemd encrypted credential. Everything else resolves from the
@@ -40,6 +42,31 @@ ENV_FILE=/etc/commonclaw/backup.env
 # shellcheck disable=SC1090
 . "$CONF"
 
+CONSISTENT=/var/backups/commonclaw/consistent
+STATE=/var/lib/commonclaw
+
+# --- what this rail captures, in one list -----------------------------------
+#
+# The four paths restic is pointed at, named once. `cmd_backup` passes this
+# array and nothing else, so what is captured and what a reader is told is
+# captured cannot disagree.
+#
+# ONE READER OUTSIDE THIS SCRIPT DEPENDS ON IT. The agents-vault token rests at
+# a path chosen for being outside every one of these, and the door that writes
+# it asks THIS script where they are rather than carrying a copy of the answer.
+# A copy would go stale on the day somebody adds a fifth target, and the failure
+# is silent: the credential keeps working, and every snapshot inside the
+# retention window quietly starts holding it.
+BACKUP_TARGETS=("$SRV_ROOT" /home /etc/commonclaw "$CONSISTENT")
+
+# The list, printed, ABOVE the credential re-exec below. Asking where a secret
+# may not rest must not itself need a secret, and this branch reads no
+# credential, opens no repository and writes nothing.
+if [ "${1:-}" = "targets" ]; then
+  printf '%s\n' "${BACKUP_TARGETS[@]}"
+  exit 0
+fi
+
 # --- resolve credentials once, then re-exec under the manager ---------------
 # op run puts the referenced values in this process's environment and masks
 # them in child output. The re-exec keeps every restic call below inside it.
@@ -57,8 +84,6 @@ fi
 : "${AWS_SECRET_ACCESS_KEY:?FATAL: manager did not resolve AWS_SECRET_ACCESS_KEY}"
 export RESTIC_REPOSITORY="s3:${S3_ENDPOINT}/${B2_BUCKET}/${BOX_HOSTNAME}"
 
-CONSISTENT=/var/backups/commonclaw/consistent
-STATE=/var/lib/commonclaw
 PRUNE_STAMP="${STATE}/last-prune"
 # Below the tick spacing subtracted from a day. At 24 the stamp is written a
 # minute after the tick, the same tick tomorrow measures just under 24 hours and
@@ -106,11 +131,31 @@ consistency_pass() {
   [ "$failed" -eq 0 ]
 }
 
+# REPRODUCIBLE TOOLCHAIN TREES ARE A CLASS, and the class is excluded rather
+# than the paths that happen to exist today.
+#
+# Every entry below is bytes that reproduce from something else that IS captured:
+# a virtual environment from its requirements, `node_modules` from a lock file, a
+# workspace toolchain from the vendor URL it was fetched from. Storing them buys
+# nothing a restore needs and costs the object store on every snapshot, on every
+# claw, forever. One workspace's `.tooling` measured 463M of vendor binaries.
+#
+# `.tooling` is the workspace-local toolchain convention. It is here even though
+# the shared runtimes now live at machine level, because a project that pins
+# tighter than a major keeps its own copy on purpose, and that copy is exactly
+# as reproducible as the shared one.
+#
+# THE SHARED RUNTIMES ARE NOT NAMED HERE and do not need to be: they live under
+# /opt/commonclaw, which is outside the three roots this rail captures. What DOES
+# ride is /etc/commonclaw/admin-log.md, which holds the URL and the hash of every
+# runtime this claw was given. A restored claw carries the pins and a provisioning
+# ride puts the binaries back.
 write_excludes() {
   cat > "$1" <<'EXEOF'
 **/.venv
 **/__pycache__
 **/.cache
+**/.tooling
 **/.local/share/claude/versions
 **/node_modules
 *-wal
@@ -154,8 +199,17 @@ reclaim() {
     log info "reclaim due: ${age}s since the last one, interval ${PRUNE_INTERVAL_HOURS}h"
   fi
 
+  # 0755, AND NOT THE 0700 THIS USED TO SET. `install -d` applies its mode to a
+  # directory that already exists, so this line owned the mode of a state root
+  # three components now write under. It reset it on every reclaim, and one of
+  # the other two is the claw's shared session bus, which members reach by
+  # traversing this directory. Every member's bus went unreachable one backup
+  # after provisioning installed it, and their sessions kept reporting a
+  # healthy join into a path they could no longer open. Nothing secret has ever
+  # been here; this file writes a timestamp. Whoever creates this root next
+  # agrees with 0755 or the bus dies on a schedule.
   if restic prune --retry-lock 5m; then
-    if install -d -m 0700 "$STATE" && printf '%s\n' "$now" > "$PRUNE_STAMP"; then
+    if install -d -m 0755 "$STATE" && printf '%s\n' "$now" > "$PRUNE_STAMP"; then
       log info "reclaim complete"
     else
       log err "reclaim complete but the stamp at ${PRUNE_STAMP} did not write; the next run reclaims again"
@@ -195,7 +249,7 @@ cmd_backup() {
   ex="$(mktemp)"
   write_excludes "$ex"
   restic backup --retry-lock 5m --exclude-file "$ex" --tag commonclaw \
-         "$SRV_ROOT" /home /etc/commonclaw "$CONSISTENT"
+         "${BACKUP_TARGETS[@]}"
   rc=$?
   rm -f "$ex"
   if [ "$rc" -ne 0 ]; then log err "restic backup exited ${rc}"; exit "$rc"; fi
@@ -239,5 +293,5 @@ case "${1:-backup}" in
   # Derived, never a line number. The header grew by five lines when the reclaim
   # gate was fixed and the hardcoded range then cut the help mid-sentence.
   -h|--help) awk 'NR==1{next} /^#/{print; next} {exit}' "$0" ;;
-  *) echo "usage: $0 {init|backup|restore <dest>|snapshots}"; exit 2 ;;
+  *) echo "usage: $0 {init|backup|restore <dest>|snapshots|targets}"; exit 2 ;;
 esac

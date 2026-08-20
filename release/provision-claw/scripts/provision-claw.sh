@@ -27,6 +27,17 @@
 #                          role: the firm's own responsible people. They get a
 #                          narrow sudo grant on the claw's own scaffold script,
 #                          and nothing wider. They are NOT put in the sudo group.
+#                          IGNORED on a claw that carries an authority registry:
+#                          there the roster is the registry's, and it moves only
+#                          by somebody signing for the change.
+#   --owner <user>         the one person who holds authority over this claw.
+#                          BUILD INPUT, SEEDED ONCE. It lays the authority
+#                          registry from that person's own login keys and is
+#                          never re-asserted: after the first run the owner moves
+#                          only by the current owner signing a transfer, so a
+#                          later run naming a different person is refused rather
+#                          than obeyed. Without it the claw carries no registry
+#                          and no tenant door can be approved.
 #   --skills-manifest <f>  the fleet skills manifest. Declares which skills every
 #                          claw carries. Without it the machine-wide skill tier
 #                          is left alone and the phase reports itself not run.
@@ -96,12 +107,18 @@
 #                    known template generation byte for byte, so the second run
 #                    finds every one of them already current and writes nothing.
 #                    A member-authored briefing is never written at all.
-#                    groupadd -f for the members group. The CLAW-WIDE briefing is
+#                    groupadd -f for the members group and for the credential
+#                    group. The CLAW-WIDE briefing is
 #                    seeded only into an absence; where it exists its bytes are
 #                    never touched and only its group and mode converge.
 #   8  users         useradd guarded; each key line, each home symlink, and each
 #                    pointer line guarded, never doubled. gpasswd -a is a
-#                    no-op on a person already in the members group.
+#                    no-op on a person already in a group. The credential loader
+#                    is rewritten only when its bytes differ. NO CREDENTIAL
+#                    VALUE: the claw's agents token is a file a door writes, and
+#                    this phase reads its mode and never its contents. The git
+#                    identity is written into an absence, so a chosen address
+#                    survives every re-run.
 #   9  codex         skipped when the installed version is AT OR ABOVE the floor.
 #                    When it does install it replaces the binaries; a running
 #                    session keeps its handle, a new exec takes the new binary.
@@ -130,6 +147,28 @@
 #                    manifest no longer declares are removed, which is what makes
 #                    the declaration the truth rather than a high-water mark. The
 #                    dropped-segment directory converges to absent.
+#   16 session bus  the state root is converged to 0755 and the run SAYS which
+#                    it did: adopted a matching mode, or moved a divergent one
+#                    and named the old value. That directory is the traverse a
+#                    member needs for both the bus and the claw's agents token,
+#                    so the phase reads it back as the member rather than
+#                    inferring it. The bus home and the programs are overwritten;
+#                    handles on the board are not.
+#   17 runtimes      the roots, the PATH drop-in and the member doc are written
+#                    to an end state. The convergence installs only what a
+#                    manifest declares, only what the member-plane log already
+#                    records a URL and a hash for, and only what is not already
+#                    on disk, so the ordinary run fetches nothing. It never
+#                    removes a runtime a declaration has dropped: that is a
+#                    decision and it has its own door.
+#   18 authority     the registry is STATE and is seeded once, never rewritten:
+#                    it is the firm's own record of who may approve an act here,
+#                    and it moves only by somebody signing for the change. The
+#                    tenant door plane under /opt is DERIVED and is rebuilt from
+#                    that registry every ride, because /etc is inside the backed
+#                    up roots and /opt is not. A `--owner` naming somebody other
+#                    than the recorded owner fails the run rather than being
+#                    ignored.
 # No phase deletes user data. No phase depends on being the first run.
 #
 set -euo pipefail
@@ -141,6 +180,7 @@ VAULT=""                         # defaults to {hostname}-machine once arguments
 B2_BUCKET="wagmi-fleet-backups"  # default; confirm it exists before the first run
 S3_ENDPOINT="s3.us-east-005.backblazeb2.com"
 CLAW_ADMINS_ARG=""
+OWNER_ARG=""
 SKILLS_MANIFEST=""; SKILLS_ROOT=""
 ONLY=""; DRY_RUN=0
 
@@ -178,6 +218,10 @@ WARN_DAYS_DEFAULT=14
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${SCRIPT_DIR}/../templates"
+# Programs that run on the MEMBER plane rather than the provisioning one. They
+# are staged here so the phase that installs them names one source directory,
+# the way the templates do.
+PAYLOAD_DIR="${SCRIPT_DIR}/../payload"
 
 # The workspace-template substitution, sourced from the one file that holds it.
 # Phase 7 reproduces an existing briefing to decide whether a member has edited
@@ -192,6 +236,18 @@ TEMPLATE_DIR="${SCRIPT_DIR}/../templates"
 }
 # shellcheck source=render-template.sh
 . "${SCRIPT_DIR}/render-template.sh"
+
+# Where a person's agents-vault token rests, what loads it into their session,
+# and where that loader is hooked. Phase 8 makes that plane for every person a
+# build creates; onboard-person.sh makes it for everybody who arrives later, and
+# install-agents-token.sh fills it. One copy, because the verdict the three
+# would drift on is whether a person's session resolves anything at all.
+[ -r "${SCRIPT_DIR}/agents-plane.sh" ] || {
+  printf 'missing sibling: %s/agents-plane.sh -- copy the whole skill directory\n' "$SCRIPT_DIR" >&2
+  exit 1
+}
+# shellcheck source=agents-plane.sh
+. "${SCRIPT_DIR}/agents-plane.sh"
 
 usage() {
   awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2
@@ -208,6 +264,7 @@ while [ $# -gt 0 ]; do
     --bucket)      B2_BUCKET="${2:-}"; shift 2 ;;
     --s3-endpoint) S3_ENDPOINT="${2:-}"; shift 2 ;;
     --claw-admins) CLAW_ADMINS_ARG="${2:-}"; shift 2 ;;
+    --owner)       OWNER_ARG="${2:-}"; shift 2 ;;
     --skills-manifest) SKILLS_MANIFEST="${2:-}"; shift 2 ;;
     --skills-root)     SKILLS_ROOT="${2:-}"; shift 2 ;;
     --release-repo)    RELEASE_REPO="${2:-}"; shift 2 ;;
@@ -306,16 +363,22 @@ GRANTED_SCAFFOLD="${INSTALL_PREFIX}/scripts/scaffold-workspace.sh"
 GRANTED_RETIRE="${INSTALL_PREFIX}/scripts/retire-seat.sh"
 GRANTED_ONBOARD="${INSTALL_PREFIX}/scripts/onboard-person.sh"
 GRANTED_TOKEN="${INSTALL_PREFIX}/scripts/install-machine-token.sh"
+GRANTED_AGENTS_TOKEN="${INSTALL_PREFIX}/scripts/install-agents-token.sh"
 GRANTED_MODE="${INSTALL_PREFIX}/scripts/set-update-mode.sh"
 GRANTED_DESTROY="${INSTALL_PREFIX}/scripts/destroy-workspace.sh"
 GRANTED_ACCESS="${INSTALL_PREFIX}/scripts/manage-workspace-access.sh"
+GRANTED_PERSON_KEYS="${INSTALL_PREFIX}/scripts/manage-person-keys.sh"
+GRANTED_RUNTIMES="${INSTALL_PREFIX}/scripts/manage-runtimes.sh"
+GRANTED_AUTHORITY="${INSTALL_PREFIX}/scripts/manage-claw-authority.sh"
 
 # ONE list, four uses: what preflight requires beside this script, what the
 # sudoers alias names, what the scope control requires the member's listing to
 # hold, and nothing else. Adding an operation to the member plane is adding its
 # script here; the control then fails until the alias and this list agree.
 GRANTED_SCRIPTS=("$GRANTED_SCAFFOLD" "$GRANTED_RETIRE" "$GRANTED_ONBOARD" "$GRANTED_TOKEN" \
-                 "$GRANTED_MODE" "$GRANTED_DESTROY" "$GRANTED_ACCESS")
+                 "$GRANTED_AGENTS_TOKEN" "$GRANTED_MODE" "$GRANTED_DESTROY" \
+                 "$GRANTED_ACCESS" "$GRANTED_PERSON_KEYS" "$GRANTED_RUNTIMES" \
+                 "$GRANTED_AUTHORITY")
 
 # The adjacent script the grant does NOT name. It is installed deliberately: a
 # refusal only proves scope when the refused path exists, is root-owned, and
@@ -325,6 +388,44 @@ DECOY_SCRIPT="${INSTALL_PREFIX}/scripts/provision-claw.sh"
 
 CLAW_ADMIN_GROUP="claw-admin"
 SUDOERS_DROPIN="/etc/sudoers.d/commonclaw-claw-admin"
+
+# The authority registry: who may approve an act on this claw, and what they
+# have approved. Root-owned, world-readable, and edited only by the signed
+# operations `manage-claw-authority.sh` carries.
+#
+# IT LIVES UNDER /etc/commonclaw BECAUSE THE BACKUP RAIL KEEPS THAT ROOT. A
+# restored claw comes back knowing who its owner is. The running copy of an
+# approved door lives under /opt, which the rail does not keep, so phase 18
+# rebuilds that side from this one.
+#
+# SEEDED ONCE INTO AN ABSENCE, the law the updater's mode file and the seat
+# roster follow, and here it is load-bearing rather than tidy: a run that
+# re-asserted the roster would be the vendor overruling a firm's own signed
+# decision on the firm's own machine.
+AUTHORITY_ROOT="${ETC_ROOT}/authority"
+AUTHORITY_OWNER="${AUTHORITY_ROOT}/owner"
+AUTHORITY_ADMINS="${AUTHORITY_ROOT}/admins"
+AUTHORITY_DOORS="${AUTHORITY_ROOT}/doors"
+
+# Where an approved door runs from, and the drop-in that grants it.
+#
+# A SECOND DROP-IN, NEVER A SHARED ONE. This script rewrites
+# `commonclaw-claw-admin` on every ride, so a tenant's grant written into that
+# file would be erased by the next release with nothing telling the firm. Two
+# files, two writers, and the tenant's is derived from the registry.
+TENANT_DOOR_ROOT="${OPT_ROOT}/tenant-doors"
+TENANT_SUDOERS="/etc/sudoers.d/commonclaw-tenant-doors"
+
+# WHICH WRAPPER, PINNED, and it is the same number `manage-claw-authority.sh`
+# carries. Both programs lay this one file into the door root, and each has to be
+# able to refuse alone: a ride that took the tenant-door wrapper from a tampered
+# templates directory would replace every granted door on the claw with bytes
+# nobody shipped, and the control that was supposed to catch it compared the
+# installed copy against the very file it had been copied from.
+#
+# A wrapper edited without this number edited too goes red in the rig that holds
+# the two together, which is the only place that failure is cheap.
+WRAPPER_SHA256="95a492ed7f583208f3f8c048865a8ce5cfe30db504a91711a37649759d3a6aa4"
 
 # The group every person on this claw belongs to, and the one thing it owns.
 #
@@ -362,6 +463,60 @@ SKILLS_CANON="${OPT_ROOT}/skills"
 CLAUDE_MACHINE_SKILLS="/etc/claude-code/.claude/skills"
 CODEX_MACHINE_SKILLS="/etc/codex/skills"
 
+# ---- the claw's shared session bus ----
+#
+# One rail every member's sessions land on, so an agent of one person can reach
+# an agent of another. A bus inside somebody's home cannot do that: unix keeps
+# the homes apart, which is what homes are for.
+#
+# THE MESSAGES ARE VISIBLE TO EVERY MEMBER, BY DESIGN. The bus home is group
+# `claw-members` and group-writable, so anybody with a login here reads every
+# inbox on it. That is the trust plane this claw already runs on and not a
+# weakening of it. The standing law is unchanged and applies here in full: a
+# credential never goes in a message body. See ${BUS_DOC}.
+STATE_ROOT="/var/lib/commonclaw"
+BUS_HOME="${STATE_ROOT}/bus"
+BUS_DOC="${ETC_ROOT}/session-bus.md"
+
+# The member-facing programs. 0755 root:root beside the skill tree, for the
+# same reason and with the same audience: every member's session runs these,
+# and a program a member can edit is a program a member can rewrite for
+# everybody. The provisioning prefix next door stays 0750 and unreadable.
+CLAW_BIN="${OPT_ROOT}/bin"
+BUS_CLI="${CLAW_BIN}/bus"
+BUS_JOIN_HOOK="${CLAW_BIN}/claw-bus-join"
+
+# The shared language runtimes, and the farm of links that puts them on a
+# member's PATH.
+#
+# ONE COPY PER CLAW, at machine level, because every no-root answer duplicates
+# on some axis: a copy per workspace, or a copy per person. Two workspaces on
+# this claw already need the same Node major and they do not conflict, so the
+# duplication buys no isolation and costs the disk twice.
+#
+# A WORKSPACE DECLARES THE NEED AND THE PLATFORM OWNS THE COPY. The manifest's
+# `runtimes` field is the declaration; phase 17 converges the machine to the
+# union of them. What it may install is bounded by the member-plane log, which
+# holds the URL and the hash of every runtime this claw was ever given, so a
+# declaration can never pull something down from nowhere.
+#
+# NOT INSIDE THE BACKED-UP ROOTS, deliberately. The rail captures /srv, /home
+# and /etc/commonclaw; these trees are vendor bytes that reproduce from the pins
+# in the log, and the log IS in /etc/commonclaw. A restored claw carries the
+# pins and not the binaries, and the convergence phase rebuilds the second from
+# the first.
+RUNTIMES_ROOT="${OPT_ROOT}/runtimes"
+RUNTIMES_FARM="${RUNTIMES_ROOT}/bin"
+RUNTIMES_PROFILE="/etc/profile.d/commonclaw-runtimes.sh"
+RUNTIMES_DOC="${ETC_ROOT}/runtimes.md"
+
+# THE AUTO-JOIN, AND WHY IT IS HERE RATHER THAN IN A BRIEFING. A sentence in a
+# CLAUDE.md asks a model to run something; it lands or it does not, and nothing
+# reports which. The machine-wide harness settings are read by the harness
+# itself on every session start, so the join is a fact about the machine rather
+# than an instruction somebody's session may reinterpret.
+MANAGED_SETTINGS="/etc/claude-code/managed-settings.json"
+
 # The same path with the inner segment DROPPED. It is where the machine-path
 # control plants the probe that must stay invisible, and it is therefore the one
 # directory this script creates on purpose and must not leave behind.
@@ -398,6 +553,27 @@ CONVENTION_POINTER="Workspace conventions for this claw: read ${CONVENTIONS} bef
 # and changelog on the fleet already uses; a pointer naming the link would put a
 # second name for one file into the durable record.
 CLAW_BRIEFING_POINTER="This claw's own briefing: read ${CLAW_BRIEFING} before working under ${WORKSPACE_ROOT}."
+
+# THE GIT IDENTITY, and it is the other half of a contract with
+# scripts/onboard-person.sh. Every workspace here is a git repository the group
+# shares, so a person with no identity either cannot commit or commits as a
+# guess. Git history is the one record on this claw the conventions forbid
+# rewriting, which is why the identity is made with the person rather than left
+# for them to notice.
+#
+# THE DEFAULT IS DERIVED AND IT IS TRUE: person@hostname says which person, on
+# which claw. It reaches no mailbox and nothing here pretends it does. A keys
+# file carries no address and neither does a group, so the derived value is all
+# this side can write; the granted door takes --email and writes what somebody
+# chose. BOTH SIDES WRITE ONLY INTO AN ABSENCE, which is what stops a re-run
+# from replacing a chosen address with the derived one.
+#
+# useConfigOnly goes with them: without it git invents an identity from the
+# hostname when none is configured, so an emptied config produces commits under a
+# name nobody chose. With it, git refuses. A refusal can be fixed and a commit
+# cannot.
+GIT_IDENTITY_KEYS=("user.name" "user.email" "user.useConfigOnly")
+GIT_PROBE_KEY="commonclaw.identityprobe"
 
 # USERS holds one entry per KEY LINE; PEOPLE holds each username once.
 # A real person carries a laptop and a phone, so these two counts differ and
@@ -874,7 +1050,7 @@ phase_1_preflight() {
   local s g missing_payload=""
   for s in commonclaw-backup.sh commonclaw-seat-check.sh render-template.sh \
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
-           core-version.sh commonclaw-update.sh; do
+           core-version.sh commonclaw-update.sh agents-plane.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
   for g in "${GRANTED_SCRIPTS[@]}"; do
@@ -894,6 +1070,35 @@ phase_1_preflight() {
   # the file and would silently skip the seeding on the one that does not.
   [ -r "${TEMPLATE_DIR}/claw-instructions.md" ] \
     || missing_payload="$missing_payload ../templates/claw-instructions.md"
+  # The runtimes phase's two files. Named here rather than only in phase 17
+  # because one of them is what puts the shared runtimes on every member's PATH:
+  # a run that reached the phase without it would install the trees, converge
+  # them, report a clean phase, and leave nobody able to type `node`.
+  [ -r "${TEMPLATE_DIR}/runtimes-profile.sh" ] \
+    || missing_payload="$missing_payload ../templates/runtimes-profile.sh"
+  [ -r "${TEMPLATE_DIR}/runtimes.md" ] \
+    || missing_payload="$missing_payload ../templates/runtimes.md"
+  # The session bus's three pieces. Named here rather than only in phase 16
+  # because the phase installs the machine-wide session-start hook: a run that
+  # reached it with the hook program missing would register a hook pointing at
+  # nothing, on every member's session, and only the members would find out.
+  [ -r "${PAYLOAD_DIR}/bus" ] \
+    || missing_payload="$missing_payload ../payload/bus"
+  [ -r "${PAYLOAD_DIR}/claw-bus-join" ] \
+    || missing_payload="$missing_payload ../payload/claw-bus-join"
+  [ -r "${TEMPLATE_DIR}/session-bus.md" ] \
+    || missing_payload="$missing_payload ../templates/session-bus.md"
+  # The authority plane's three pieces, and the first of them is the one that
+  # fails quietly. The wrapper is what a tenant door's sudo grant names, so a
+  # claw missing it would take an approval, write the registry row, install the
+  # grant, and grant a path with nothing behind it. Named here rather than only
+  # in the door, because the door is granted on a claw this run built.
+  [ -r "${TEMPLATE_DIR}/tenant-door-wrapper.sh" ] \
+    || missing_payload="$missing_payload ../templates/tenant-door-wrapper.sh"
+  [ -r "${PAYLOAD_DIR}/claw-authority" ] \
+    || missing_payload="$missing_payload ../payload/claw-authority"
+  [ -r "${TEMPLATE_DIR}/claw-authority.md" ] \
+    || missing_payload="$missing_payload ../templates/claw-authority.md"
   # At least one RETIRED generation, and this one is not tidiness.
   #
   # The reconcile recognises an unedited briefing by reproducing a retired
@@ -1471,6 +1676,7 @@ reconcile_briefings() {
 claw_briefing() {
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would create group ${MEMBERS_GROUP}"
+    say "  would create group ${CC_AGENTS_GROUP}, the read boundary on ${CC_AGENTS_TOKEN}"
     if [ -e "$CLAW_BRIEFING" ]; then
       say "  would keep ${CLAW_BRIEFING} byte for byte, and set it root:${MEMBERS_GROUP} 0664"
     else
@@ -1482,6 +1688,24 @@ claw_briefing() {
 
   groupadd -f --system "$MEMBERS_GROUP" 2>/dev/null || groupadd -f "$MEMBERS_GROUP"
   check "group ${MEMBERS_GROUP} exists" getent group "$MEMBERS_GROUP"
+
+  # THE CREDENTIAL GROUP, made here and never merged into the one above.
+  #
+  # Two groups because they mean two things. The members group owns the claw's
+  # briefing: everybody here is in it, and it grants nothing. This one is the
+  # read boundary on the claw's agents token, and being in it is the whole
+  # difference between a session that resolves op:// references and one that
+  # does not.
+  #
+  # Merging them would be the one change that quietly undoes this: credential
+  # read would land on everybody who can read the briefing, and no reading
+  # anywhere would show a difference, because everybody would still be green.
+  #
+  # It is created HERE, empty, for the same reason the members group is: a group
+  # needs nobody, the file it guards has to belong to it before that file can
+  # exist, and the people join in phase 8 and in the onboarding door.
+  groupadd -f --system "$CC_AGENTS_GROUP" 2>/dev/null || groupadd -f "$CC_AGENTS_GROUP"
+  check "group ${CC_AGENTS_GROUP} exists" getent group "$CC_AGENTS_GROUP"
 
   if [ -e "$CLAW_BRIEFING" ]; then
     say "  keeping ${CLAW_BRIEFING} -- its content belongs to the people here"
@@ -1564,6 +1788,35 @@ stamp_conventions() {
     || printf '%s\n' "$CLAW_BRIEFING_POINTER" >> "${home}/${PER_TASK_CORE_FILE}"
 }
 
+# The git identity, written BY THE PERSON, through git, into an absence. Each of
+# those three rules out something simpler that is wrong here:
+#
+#   By the person, because a file root creates in somebody's home is a file they
+#   cannot write. git run under their own uid makes it with their ownership and
+#   git's own mode, and this run never has to know which mode that is.
+#
+#   Through git rather than by appending text, because the config format has
+#   sections and an append landing under the wrong one sets nothing while looking
+#   exactly like success.
+#
+#   Into an absence, because every later run reaches the same people. Overwriting
+#   would replace an address the granted door was given with the derived one,
+#   every time this claw is provisioned again.
+stamp_git_identity() {
+  local user="$1" k v
+  for k in "${GIT_IDENTITY_KEYS[@]}"; do
+    sudo -u "$user" -H git config --global --get "$k" >/dev/null 2>&1 && continue
+    case "$k" in
+      user.name)          v="$user" ;;
+      user.email)         v="${user}@${TARGET_HOSTNAME}" ;;
+      user.useConfigOnly) v="true" ;;
+    esac
+    # An attempt, with phase 8's own verify as the verdict. Fatal under errexit,
+    # a refused write would end the run before any phase reported.
+    sudo -u "$user" -H git config --global "$k" "$v" || bad "could not write git ${k} for ${user}"
+  done
+}
+
 # A workspace is root-owned by construction and its gitdir belongs to a member,
 # so git's ownership guard refuses the repository for every caller. Declare the
 # workspace root for each PERSON, never system-wide: a member can write repo
@@ -1572,7 +1825,7 @@ stamp_conventions() {
 phase_8_users() {
   head1 8 "people"
 
-  local entry user line home f cnt user_groups created=0 existing=0
+  local entry user line home f cnt user_groups stat_line no_cred="" cap cap_rc k v created=0 existing=0
 
   # The account and everything that belongs to the PERSON: once each, however
   # many devices they carry. Driving this from the key list instead would
@@ -1603,6 +1856,7 @@ phase_8_users() {
     fi
 
     stamp_conventions "$user" "$home"
+    stamp_git_identity "$user"
 
     # Every person on this claw joins the members group at seat creation, the
     # same way they get their workspace groups. Phase 7 makes the group, because
@@ -1614,6 +1868,34 @@ phase_8_users() {
       gpasswd -a "$user" "$MEMBERS_GROUP" >/dev/null 2>&1 || true
     else
       bad "group ${MEMBERS_GROUP} does not exist -- phase 7 creates it, and this run skipped it"
+    fi
+
+    # THE CREDENTIAL PLANE: the group grant, then the loader. Neither is a
+    # secret, which is why a run makes both and why an UPDATE makes them too. A
+    # plane is not identity, so the rule that an update asserts the box's own
+    # identity and passes no key material is untouched here.
+    #
+    # THE GRANT IS ITS OWN STEP, as it is in the onboarding door. Membership of
+    # this group is what makes the claw's token readable, so a person who lacks
+    # it has an account and resolves nothing, and that has to be a thing a run
+    # DOES rather than a thing that follows from something else.
+    if getent group "$CC_AGENTS_GROUP" >/dev/null 2>&1; then
+      gpasswd -a "$user" "$CC_AGENTS_GROUP" >/dev/null 2>&1 \
+        || bad "could not add ${user} to ${CC_AGENTS_GROUP} -- they will resolve no credentials"
+    else
+      bad "group ${CC_AGENTS_GROUP} does not exist -- phase 7 creates it, and this run skipped it"
+    fi
+
+    # THE VALUE IS NOT PROVISIONING'S TO PUT ANYWHERE. It comes from the firm's
+    # own manager through install-agents-token.sh, which proves the token opens
+    # the agents vault and refuses one that opens the machine vault. A run that
+    # carried a token would be a run that had one, and no release payload or
+    # provisioning argument may ever hold a credential value.
+    if cc_agents_plane_unsafe "$user" "$home" >/dev/null; then
+      cc_agents_plane_install "$user" "$home" \
+        || bad "could not make the loader in ${home} -- ${user} will resolve no credentials"
+    else
+      bad "credential loader refused for ${user}: $(cc_agents_plane_unsafe "$user" "$home")"
     fi
   done
 
@@ -1671,6 +1953,62 @@ phase_8_users() {
     [ "$cnt" = "1" ] || { bad "$user: ${PER_TASK_CORE_FILE} does not carry exactly one claw-briefing pointer (found '${cnt}')"; all_ok=0; }
     cnt="$(grep -cxF "$CLAW_BRIEFING_POINTER" "${home}/${PERSISTENT_CORE_FILE}" 2>/dev/null || true)"
     [ "$cnt" = "0" ] || { bad "$user: ${PERSISTENT_CORE_FILE} must carry ZERO claw-briefing pointers and carries '${cnt}' -- that core walks up to the file already, so the line is always-loaded weight for nothing"; all_ok=0; }
+
+    # THE CREDENTIAL PLANE, read back. The grant is read from the claw's own
+    # group record rather than from the fact that a gpasswd call ran, and the
+    # loader is read for a value it must never carry.
+    cc_agents_reads "$user" || { bad "$user: not in ${CC_AGENTS_GROUP}, so they can read no credential on this claw"; all_ok=0; }
+    cc_agents_paths "$home"
+    stat_line="$(stat -c '%a %U:%G' "$CC_AP_DIR" 2>/dev/null || echo missing)"
+    [ "$stat_line" = "700 ${user}:${user}" ] \
+      || { bad "$user: ${CC_AP_DIR} is ${stat_line}, wanted 700 ${user}:${user}"; all_ok=0; }
+    stat_line="$(stat -c '%a %U:%G' "$CC_AP_ENV" 2>/dev/null || echo missing)"
+    [ "$stat_line" = "600 ${user}:${user}" ] \
+      || { bad "$user: ${CC_AP_ENV} is ${stat_line}, wanted 600 ${user}:${user}"; all_ok=0; }
+    cnt="$(grep -cxF "$CC_AP_HOOK" "${home}/.bashrc" 2>/dev/null || true)"
+    [ "$cnt" = "1" ] \
+      || { bad "$user: .bashrc carries ${cnt} loader hooks, wanted exactly one"; all_ok=0; }
+    if grep -q 'ops_' "$CC_AP_ENV" 2>/dev/null; then
+      bad "$user: ${CC_AP_ENV} carries what looks like a token value -- the loader names a PATH and never a value"; all_ok=0
+    fi
+
+    # NO TOKEN IN THIS HOME. The whole point of one file per claw is that no
+    # home holds the value. A home that holds one is a claw that has not
+    # converged, and this reading is what makes that visible rather than
+    # leaving it to sit in every snapshot the rail takes of /home.
+    if [ -e "$(cc_agents_legacy_token "$home")" ]; then
+      bad "$user: $(cc_agents_legacy_token "$home") is a per-home copy of the claw token. Run ${GRANTED_AGENTS_TOKEN}, which ROTATES the token and removes these in one act -- deleting them alone leaves the value in every snapshot still in retention."; all_ok=0
+    fi
+
+    # WHO RESOLVES NOTHING, named rather than counted.
+    cc_agents_reads "$user" || no_cred="$no_cred $user"
+
+    # THE GIT IDENTITY, read back THROUGH GIT AS THE PERSON. That is the surface
+    # that decides what their commits carry; reading the file with grep would
+    # pass on a config git cannot parse and on one sitting where git does not
+    # look. The name and address are asserted NON-EMPTY rather than equal to the
+    # derived value, because a person the granted door gave a chosen address
+    # keeps it and this run must not report that as wrong.
+    for k in user.name user.email; do
+      v="$(sudo -u "$user" -H git config --global --get "$k" 2>/dev/null || true)"
+      [ -n "$v" ] || { bad "$user: git reads no ${k}, so their commits carry a guess or nothing"; all_ok=0; }
+    done
+    v="$(sudo -u "$user" -H git config --global --get user.useConfigOnly 2>/dev/null || true)"
+    [ "$v" = "true" ] || { bad "$user: user.useConfigOnly reads '${v}' -- git would invent an identity from the hostname"; all_ok=0; }
+
+    # The known-answer control for the three reads above. A read-back that
+    # returned something whatever it was asked would pass all three; this asks
+    # for a key nothing sets and requires nothing back.
+    v="$(sudo -u "$user" -H git config --global --get "$GIT_PROBE_KEY" 2>/dev/null || true)"
+    [ -z "$v" ] || { bad "$user: known-answer control FAILED -- ${GIT_PROBE_KEY} returned '${v}' and nothing sets it"; all_ok=0; }
+  done
+
+  # ONE identity per person means NO identity above them. A name or address at
+  # the system level puts every person on this claw behind one identity, and each
+  # of their own configs still reads correctly when asked on its own.
+  for k in user.name user.email; do
+    v="$(git config --system --get "$k" 2>/dev/null || true)"
+    [ -z "$v" ] || { bad "a system-wide git ${k} is set ('${v}') -- every person here would commit as it"; all_ok=0; }
   done
 
   # every key line present exactly once: a device added must not displace one
@@ -1692,11 +2030,48 @@ phase_8_users() {
   # between a report and a claim.
   if [ "$all_ok" -eq 1 ]; then
     if [ "${#USERS[@]}" -gt 0 ]; then
-      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}; every key present exactly once"
+      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them; every key present exactly once"
     else
-      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}. The key-uniqueness leg is build-only and did NOT run on this update"
+      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them. The key-uniqueness leg is build-only and did NOT run on this update"
     fi
   fi
+
+  if [ -n "$no_cred" ]; then
+    bad "these people are NOT in ${CC_AGENTS_GROUP} and can read no credential:${no_cred}"
+  fi
+
+  # THE CLAW'S OWN TOKEN FILE. One file, so this is one reading for everybody
+  # rather than one per person.
+  #
+  # A FILE WITH NOTHING IN IT IS SAID OUT LOUD, and it is a note rather than a
+  # failure. Provisioning cannot put the value there: the token comes from the
+  # firm's own manager through a door a person opens, and a run that could fill
+  # it would be a run that held a credential. What a run CAN do is refuse to
+  # report every person finished when every op:// reference on the box will
+  # fail, which is what everybody who ever arrived here found for themselves.
+  if [ "$(cc_agents_token_state)" = "present" ]; then
+    stat_line="$(stat -c '%a %U:%G' "$CC_AGENTS_TOKEN" 2>/dev/null || echo missing)"
+    if [ "$stat_line" = "${CC_AGENTS_TOKEN_MODE} ${CC_AGENTS_TOKEN_OWNER}" ]; then
+      ok "this claw's agents token is ${stat_line} at ${CC_AGENTS_TOKEN}, so ${CC_AGENTS_GROUP} reads it and nobody else does"
+    else
+      bad "${CC_AGENTS_TOKEN} is ${stat_line}, wanted ${CC_AGENTS_TOKEN_MODE} ${CC_AGENTS_TOKEN_OWNER} -- that mode and that group are the whole read boundary on this credential"
+    fi
+  else
+    warn "this claw holds NO agents token at ${CC_AGENTS_TOKEN}, so nobody here resolves an op:// reference however correct their groups are"
+    human "install it once, and it covers everybody: drop the token under umask 077 at /run/user/\$(id -u)/commonclaw-agents-token, then run ${GRANTED_AGENTS_TOKEN}"
+  fi
+
+  # WHERE IT RESTS, asked of the backup rail rather than asserted here. This is
+  # the reading that keeps the choice of path true over time: the day somebody
+  # adds a backup target that covers it, this turns red instead of the
+  # credential quietly entering every snapshot for the whole retention window.
+  cap=""; cap_rc=0
+  cap="$(cc_agents_backup_captures "${SCRIPT_DIR}/commonclaw-backup.sh")" || cap_rc=$?
+  case "$cap_rc" in
+    1) ok "${CC_AGENTS_TOKEN} is captured by NO backup target, asked of commonclaw-backup.sh itself" ;;
+    0) bad "${CC_AGENTS_TOKEN} is INSIDE a backup target: $(printf '%s' "$cap" | tr '\n' ' '). Every snapshot would carry this claw's agents token for the whole retention window, and no delete on this box reaches a snapshot." ;;
+    *) bad "commonclaw-backup.sh could not say what it captures, so where this credential rests was NOT measured. An unrun control is not a passed one." ;;
+  esac
 
   # WHAT THE MEMBERS GROUP DOES NOT CARRY, measured rather than asserted.
   #
@@ -2221,6 +2596,37 @@ phase_13_admin_door() {
   groupadd -f --system "$CLAW_ADMIN_GROUP" 2>/dev/null || groupadd -f "$CLAW_ADMIN_GROUP"
   check "group ${CLAW_ADMIN_GROUP} exists" getent group "$CLAW_ADMIN_GROUP"
 
+  # ---- who the roster comes from ----
+  #
+  # ON A CLAW WITH AN AUTHORITY REGISTRY, `--claw-admins` IS IGNORED. The
+  # registry is the firm's own record of who holds authority here, and it moves
+  # only by somebody signing for the change. A run that re-added everybody the
+  # build once named would resurrect an admin the firm had removed, on a tick
+  # nobody watched start, with the argument doing it sitting in a runbook
+  # somebody wrote months earlier.
+  #
+  # The argument is not refused, because a re-run typing it is ordinary and
+  # refusing would make an old runbook fail a whole ride. It is ignored, and the
+  # ignoring is said out loud, because a silently discarded roster reads exactly
+  # like an applied one.
+  #
+  # THE ARRAY IS REPLACED RATHER THAN EMPTIED, and that is the whole reason this
+  # sits above the loops instead of beside the seed in phase 18. Every check
+  # below reads `CLAW_ADMINS` -- the uid floor, the membership pair, the no-sudo
+  # constraint, and the caller the exactly-scoped grant control runs as. Emptying
+  # it would leave all of them with nothing to measure while the run stayed
+  # green, which is the shape this project has paid for more than once.
+  if [ -s "$AUTHORITY_OWNER" ]; then
+    if [ "${#CLAW_ADMINS[@]}" -gt 0 ]; then
+      warn "--claw-admins was given and this claw carries an authority registry, so the argument was IGNORED. The roster is ${AUTHORITY_ROOT}, and it moves only by the owner signing for a change."
+    fi
+    local reg_roster
+    reg_roster="$(awk '!/^#/ && NF {print $1}' "$AUTHORITY_OWNER" "$AUTHORITY_ADMINS" 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ')"
+    # shellcheck disable=SC2206
+    CLAW_ADMINS=($reg_roster)
+    ok "the claw-admin roster comes from the authority registry: ${#CLAW_ADMINS[@]} person(s)"
+  fi
+
   local a gtext uid missing="" roster_ok=1
   for a in "${CLAW_ADMINS[@]:-}"; do
     [ -z "$a" ] && continue
@@ -2357,12 +2763,30 @@ ADMINEOF
 # name constrained rather than escaped, and their key refused unless it is a
 # public key of a named type; a destroy target that must carry a manifest and
 # must still resolve to a directory directly under the workspace root, so a
-# symlink cannot walk the grant out of it) and a second copy of those rules here
+# symlink cannot walk the grant out of it; a key door that acts only on a person
+# already in the members group, refuses to write through a symlink or a second
+# hard link into a home its owner controls, and refuses a revoke that would leave
+# somebody no key at all unless the caller says the lockout is the intent; a
+# runtimes door that takes a name, an https URL and a sha256 together or not at
+# all, compares the bytes against that hash before anything lands, refuses an
+# archive that would write outside its own directory, and never replaces a tree
+# a member may hold a session against) and a second copy of those rules here
 # would drift from the copy the script enforces.
 #
-# One of these takes no path argument at all. The token door composes its drop
+# Two of these take no path argument at all. Each token door composes its drop
 # path from the caller's own uid, because a caller-supplied path would let a
 # member name any file root can read and have it installed and then destroyed.
+# The agents door takes no argument beyond --dry-run: it writes ONE file for the
+# whole claw, so there is no name for a caller to aim it with.
+#
+# THE AUTHORITY DOOR IS GRANTED HERE AND DECIDES NOTHING ON THAT BASIS. Being in
+# this alias only means a claw-admin may start it. What it does is decided by a
+# signature it verifies against the claw's own registry, so an admin holding this
+# grant and no signature can apply nothing at all. The grant is the ignition; the
+# signature is the authority. Tenant doors the firm approves through it are
+# granted in their own drop-in, never in this file, because this one is rewritten
+# on every provisioning ride and a tenant's grant living here would be erased by
+# the next release with nothing telling the firm.
 Cmnd_Alias COMMONCLAW_ADMIN_OPS = $(IFS=,; printf '%s' "${GRANTED_SCRIPTS[*]}")
 
 %${CLAW_ADMIN_GROUP} ALL=(root) NOPASSWD: COMMONCLAW_ADMIN_OPS
@@ -2927,6 +3351,746 @@ TIMEOF
   human "enable commonclaw-update.timer only after the release rail has been ridden on the staging tier and the cost-and-timing must-fix list is closed"
 }
 
+# ---------------------------------------------------------------- phase 16
+
+phase_16_session_bus() {
+  head1 16 "the claw's shared session bus"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would converge ${STATE_ROOT} to 0755 root:root and say whether it was adopted or moved,"
+    say "  create ${BUS_HOME} 2770 root:${MEMBERS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
+    say "  register the session-start join in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
+    say "  and read a member's own traverse and write before running the join as them"
+    return 0
+  fi
+
+  # THE GROUP IS THE WHOLE ACCESS MODEL, so its absence is a refusal and not a
+  # warning. Creating the group here would hand the bus to a set of people
+  # nobody has decided on; `claw-members` is written where people are made.
+  if ! getent group "$MEMBERS_GROUP" >/dev/null 2>&1; then
+    bad "no ${MEMBERS_GROUP} group on this claw, so there is nobody to share a bus between -- phase 8 makes it"
+    return 0
+  fi
+
+  # ---- the state root, and the one mode that decides whether any of this works ----
+  #
+  # 0755 BECAUSE MEMBERS MUST TRAVERSE IT. Two readers below this root need to
+  # walk through it and neither is root: a member reaching the bus, and a member
+  # of the credential group reading the claw's agents token. The token's own
+  # 0640 is what refuses everybody else, and the refusal is measured rather than
+  # reasoned about. So a secret DOES rest under this root, deliberately, and the
+  # directory above it is still world-traversable.
+  #
+  # ⚠ commonclaw-backup.sh USED TO RESET THIS DIRECTORY TO 0700 on every run
+  # (`install -d -m 0700`, which applies the mode to a directory that already
+  # exists -- measured 2026-08-14). That silently cut every member off from the
+  # bus one backup after provisioning installed it, and the sessions would have
+  # kept reporting a healthy join into a directory they could no longer reach.
+  # The backup rail now creates this root at the same mode.
+  #
+  # FOUR THINGS WRITE UNDER THIS ROOT and only two of them can move its mode.
+  # `install -d -m MODE a/b` applies MODE to the LAST component alone; a parent
+  # it has to create gets the caller's default instead -- measured 2026-08-19,
+  # GNU coreutils 9.4. So the notify rail's 0700 dedupe directory and the
+  # updater's defer directory cannot tighten this root even when it is absent.
+  # This phase and the backup rail are the two that name the root itself, and
+  # they agree. A fifth writer that names the root agrees with them or the bus
+  # and the token both die on a schedule.
+  #
+  # THE CONVERGENCE IS REPORTED, NOT SILENT (Q62). A hand-set mode that already
+  # matches is adopted and said so; one that differs is converged and the old
+  # value is named. Without the reading above the write, a run that repaired a
+  # broken claw and a run that found it correct print the same sentence, and the
+  # operator who has to know which cannot tell.
+  local root_before="missing"
+  [ -d "$STATE_ROOT" ] && root_before="$(stat -c '%a %U:%G' "$STATE_ROOT")"
+  install -d -m 0755 -o root -g root "$STATE_ROOT"
+  case "$root_before" in
+    missing)        say "  ${STATE_ROOT} created 0755 root:root" ;;
+    "755 root:root") say "  ${STATE_ROOT} was already 0755 root:root and was adopted unchanged" ;;
+    *)              warn "${STATE_ROOT} was ${root_before} and has been converged to 0755 root:root. Anything that set it is a writer this phase does not know about; find it, or the next run of it takes the bus and the claw token away again." ;;
+  esac
+  check "${STATE_ROOT} is 0755 root:root so a member can traverse it to the bus and to the claw token" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$STATE_ROOT')\" = '755 root:root' ]"
+
+  # ---- the bus home ----
+  #
+  # SETGID IS NOT DECORATION HERE. Without it a file abigail creates lands in
+  # her own primary group and jeremiah cannot append to it, so the first
+  # cross-member message fails and every one after it. The setgid bit is what
+  # makes every file on this bus reachable by every member regardless of who
+  # wrote it.
+  install -d -m 2770 -o root -g "$MEMBERS_GROUP" "$BUS_HOME"
+  chmod 2770 "$BUS_HOME"        # install -d honors the umask on some coreutils; this does not
+  check "${BUS_HOME} is 2770 root:${MEMBERS_GROUP} -- setgid, group-writable, closed to the world" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_HOME')\" = '2770 root:${MEMBERS_GROUP}' ]"
+
+  # Default ACLs, the same instrument a workspace uses. The setgid bit carries
+  # the group down; it does not carry the group's WRITE bit down, and a member
+  # running with a 022 umask would create files their peers cannot append to.
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -d -m "g:${MEMBERS_GROUP}:rwx" -m "g:${MEMBERS_GROUP}:rwx" "$BUS_HOME" 2>/dev/null \
+      && ok "default ACL on ${BUS_HOME}: a member's umask cannot lock their peers out of a file they create" \
+      || warn "could not set the default ACL on ${BUS_HOME} -- the bus still works, but a member with a 022 umask can write a file their peers cannot append to"
+  else
+    warn "setfacl absent, so ${BUS_HOME} has no default ACL"
+  fi
+
+  # ---- the two programs every member's session runs ----
+  install -d -m 0755 -o root -g root "$CLAW_BIN"
+  local p missing=""
+  for p in bus claw-bus-join; do
+    [ -r "${PAYLOAD_DIR}/${p}" ] || missing="$missing $p"
+  done
+  if [ -n "$missing" ]; then
+    bad "payload missing from ${PAYLOAD_DIR}:${missing} -- copy the whole skill directory"
+    return 0
+  fi
+  # `payload/bus` IS the bus program. A fleet program every claw runs belongs to
+  # the release rather than to one person's skill tree, which would drift the
+  # first time that tree is reorganized for its own reasons. The orchestrate
+  # skill reaches this same file through a symlink, so the tree carries one copy
+  # and this phase installs the original.
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus" "$BUS_CLI"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-bus-join" "$BUS_JOIN_HOOK"
+  check "${BUS_CLI} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_CLI')\" = '755 root:root' ]"
+  check "${BUS_JOIN_HOOK} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_JOIN_HOOK')\" = '755 root:root' ]"
+
+  # ---- the join, registered where the harness reads it ----
+  #
+  # MERGED, NEVER OVERWRITTEN. This file is the machine's policy tier and the
+  # firm may have put other things in it. Two keys are ours; the rest is
+  # somebody else's decision and survives this run untouched.
+  install -d -m 0755 -o root -g root "$(dirname "$MANAGED_SETTINGS")"
+  local existing='{}' merged
+  [ -s "$MANAGED_SETTINGS" ] && existing="$(cat "$MANAGED_SETTINGS")"
+  if ! merged="$(printf '%s' "$existing" | jq \
+        --arg dir "$BUS_HOME" --arg hook "$BUS_JOIN_HOOK" '
+        .env = ((.env // {}) + {SESSION_BUS_DIR: $dir})
+        | .hooks = ((.hooks // {}) + {SessionStart:
+            (((.hooks.SessionStart // []) | map(select(
+                 [.hooks[]?.command] | index($hook) | not)))
+             + [{hooks: [{type: "command", command: $hook}]}])})' 2>/dev/null)"; then
+    bad "${MANAGED_SETTINGS} is not readable as JSON, so the session-start join was NOT registered. Sessions will not auto-join. Fix the file by hand."
+  else
+    printf '%s\n' "$merged" > "$MANAGED_SETTINGS"
+    chmod 0644 "$MANAGED_SETTINGS"; chown root:root "$MANAGED_SETTINGS"
+    check "${MANAGED_SETTINGS} sets SESSION_BUS_DIR to ${BUS_HOME}" \
+      bash -c "[ \"\$(jq -r '.env.SESSION_BUS_DIR // empty' '$MANAGED_SETTINGS')\" = '$BUS_HOME' ]"
+    check "${MANAGED_SETTINGS} runs ${BUS_JOIN_HOOK} on SessionStart, once" \
+      bash -c "[ \"\$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command == \"$BUS_JOIN_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    check "${MANAGED_SETTINGS} is 0644 root:root -- a member who could edit it could redirect every session's bus" \
+      bash -c "[ \"\$(stat -c '%a %U:%G' '$MANAGED_SETTINGS')\" = '644 root:root' ]"
+  fi
+
+  # ---- the member's own copy of what this is ----
+  if [ -r "${TEMPLATE_DIR}/session-bus.md" ]; then
+    install -m 0644 -o root -g root "${TEMPLATE_DIR}/session-bus.md" "$BUS_DOC"
+    ok "member-facing bus reference installed at ${BUS_DOC}"
+  else
+    bad "no ../templates/session-bus.md, so members have nothing that says what the bus is or what is public on it"
+  fi
+
+  # ---- does a member actually join? ----
+  #
+  # THE ONLY CHECK THAT ANSWERS THE QUESTION THE PHASE EXISTS FOR. Every check
+  # above measures a file. This one runs the join as an unprivileged member,
+  # against the real bus, exactly as the harness will.
+  local member="${PEOPLE[0]:-}"
+  if [ -z "$member" ]; then
+    warn "join NOT PROVEN: this claw carries nobody to run it as"
+    return 0
+  fi
+  # The session id the probe claims, and the handle the hook will derive from
+  # it: the first eight characters, qualified with the member's unix name.
+  local probe_sid="provisionprobe$$" probe_handle
+  probe_handle="${member}-${probe_sid:0:8}"
+  # THE REACH IS MEASURED BEFORE THE JOIN, AND AS THE MEMBER.
+  #
+  # The join below is one verdict with one message, and it has two failure modes
+  # that need different repairs: a member who cannot TRAVERSE the state root, and
+  # a member who cannot ENTER the bus home. Both come out of the hook as the same
+  # silence. This claw has already had the first one -- the state root sat 0700
+  # and every member's bus went with it, with nothing in any run naming the mode
+  # as the reason. A run that reports a failure it cannot locate sends the
+  # operator to the wrong file.
+  #
+  # `-x` on a directory IS the traverse permission and `-w` IS the write bit, so
+  # these read the exact bits the hook consumes rather than standing in for them.
+  # They are asked of a FRESH process running as the member, because a live login
+  # holds the group set it started with and would answer for an older claw.
+  local reach_root=1 reach_bus=1 reach_write=1
+  sudo -u "$member" -H bash -c "[ -x '$STATE_ROOT' ]"  || reach_root=0
+  sudo -u "$member" -H bash -c "[ -x '$BUS_HOME' ]"    || reach_bus=0
+  sudo -u "$member" -H bash -c "[ -w '$BUS_HOME' ]"    || reach_write=0
+  [ "$reach_root" -eq 1 ] \
+    && ok "${member} can traverse ${STATE_ROOT}, which is what stands between a member and the bus" \
+    || bad "${member} CANNOT traverse ${STATE_ROOT} (it is $(stat -c '%a %U:%G' "$STATE_ROOT" 2>/dev/null || echo missing)). Nothing under it is reachable to them, the bus and the claw's agents token included. This phase sets that mode; something else moved it after."
+  [ "$reach_bus" -eq 1 ] \
+    && ok "${member} can enter ${BUS_HOME}" \
+    || bad "${member} CANNOT enter ${BUS_HOME} (it is $(stat -c '%a %U:%G' "$BUS_HOME" 2>/dev/null || echo missing)). Check they are in ${MEMBERS_GROUP} and that the directory is 2770 root:${MEMBERS_GROUP}."
+  [ "$reach_write" -eq 1 ] \
+    && ok "${member} can write in ${BUS_HOME}, so their session can register a handle" \
+    || bad "${member} CANNOT write in ${BUS_HOME}. A member who can read the bus and not write it joins nothing and reports no error of their own."
+
+  local out=""
+  out="$(printf '{"session_id":"%s","hook_event_name":"SessionStart","source":"startup"}' "$probe_sid" \
+        | sudo -u "$member" -H env SESSION_BUS_DIR="$BUS_HOME" "$BUS_JOIN_HOOK" 2>&1)" || true
+  case "$out" in
+    *"joined the claw bus as '${probe_handle}'"*)
+      ok "${member} joined the bus through the installed hook, as ${probe_handle}" ;;
+    *)
+      bad "${member} did NOT join through the installed hook. It said: ${out:-nothing}" ;;
+  esac
+
+  # The probe handle is this run's and comes off the board by name.
+  #
+  # NOT `bus gc --days 0`, WHICH WOULD TAKE EVERY MEMBER'S LIVE HANDLE WITH IT:
+  # idle is always at least zero, so a zero threshold matches every fully-read
+  # handle on the claw, including the sessions of people who are working right
+  # now. Named removal, or none.
+  local board="${BUS_HOME}/handles.json"
+  if [ -s "$board" ] && jq -e --arg h "$probe_handle" 'has($h)' "$board" >/dev/null 2>&1; then
+    local pruned
+    if pruned="$(jq --arg h "$probe_handle" 'del(.[$h])' "$board")"; then
+      printf '%s\n' "$pruned" > "$board"
+      chgrp "$MEMBERS_GROUP" "$board" 2>/dev/null || true
+      chmod 0660 "$board" 2>/dev/null || true
+    fi
+  fi
+  rm -f "${BUS_HOME}/inbox/${probe_handle}.jsonl" \
+        "${BUS_HOME}/cursors/${probe_handle}.cursor" 2>/dev/null || true
+  check "the provisioning probe left no handle on the board" \
+    bash -c "! jq -e --arg h '$probe_handle' 'has(\$h)' '$board' >/dev/null 2>&1"
+}
+
+# ---------------------------------------------------------------- phase 17
+
+phase_17_runtimes() {
+  head1 17 "the shared language runtimes"
+
+  local door="${SCRIPT_DIR}/manage-runtimes.sh"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would create ${RUNTIMES_ROOT} and ${RUNTIMES_FARM} 0755 root:root,"
+    say "  install ${RUNTIMES_PROFILE} and ${RUNTIMES_DOC},"
+    say "  and converge this claw to what the workspace manifests declare"
+    return 0
+  fi
+
+  # ---- the roots ----
+  #
+  # 0755 and world-readable, unlike the provisioning prefix beside it. Every
+  # member's shell resolves a program through the farm and executes a binary in
+  # the tree, so both have to be reachable by everybody. Nothing secret is here:
+  # these are vendor bytes whose URL and hash are already in a world-readable
+  # log.
+  install -d -m 0755 -o root -g root "$RUNTIMES_ROOT"
+  install -d -m 0755 -o root -g root "$RUNTIMES_FARM"
+  check "${RUNTIMES_ROOT} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$RUNTIMES_ROOT')\" = '755 root:root' ]"
+  check "${RUNTIMES_FARM} is 0755 root:root -- a member who could write it would rewrite what node means for everybody" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$RUNTIMES_FARM')\" = '755 root:root' ]"
+
+  # ---- the PATH ----
+  #
+  # A DROP-IN RATHER THAN AN EDIT. /etc/profile is the distro's file and a claw
+  # that appended to it would fight the next package upgrade. The drop-in is
+  # ours, it is overwritten on every run, and that is how a change to it reaches
+  # a claw.
+  if [ -r "${TEMPLATE_DIR}/runtimes-profile.sh" ]; then
+    install -m 0644 -o root -g root "${TEMPLATE_DIR}/runtimes-profile.sh" "$RUNTIMES_PROFILE"
+    check "${RUNTIMES_PROFILE} is 0644 root:root" \
+      bash -c "[ \"\$(stat -c '%a %U:%G' '$RUNTIMES_PROFILE')\" = '644 root:root' ]"
+    check "the PATH drop-in parses" bash -n "$RUNTIMES_PROFILE"
+    # THE CHECK THAT ANSWERS THE QUESTION THE FILE EXISTS FOR, run as a member
+    # in a real login shell rather than read out of the file. A drop-in that
+    # parses and does not take is indistinguishable from one that works, until
+    # somebody types `node`.
+    local member="${PEOPLE[0]:-}"
+    if [ -n "$member" ]; then
+      check "${member}'s login shell carries ${RUNTIMES_FARM} on PATH" \
+        bash -c "sudo -u '$member' -H bash -lc 'case \":\$PATH:\" in *:${RUNTIMES_FARM}:*) exit 0 ;; *) exit 1 ;; esac' </dev/null"
+    else
+      warn "PATH NOT PROVEN: this claw carries nobody to run a login shell as"
+    fi
+  else
+    bad "no ../templates/runtimes-profile.sh, so nothing puts ${RUNTIMES_FARM} on a member's PATH"
+  fi
+
+  # ---- the member's own copy of what this is ----
+  if [ -r "${TEMPLATE_DIR}/runtimes.md" ]; then
+    install -m 0644 -o root -g root "${TEMPLATE_DIR}/runtimes.md" "$RUNTIMES_DOC"
+    ok "member-facing runtimes reference installed at ${RUNTIMES_DOC}"
+  else
+    bad "no ../templates/runtimes.md, so members have nothing that says how to declare a runtime or where the shared copy lives"
+  fi
+
+  check "the runtimes door is installed where the grant names it" test -x "$GRANTED_RUNTIMES"
+
+  # ---- convergence ----
+  #
+  # WHAT A DECLARATION CAN AND CANNOT DO. It can bring back a runtime this claw
+  # has already been given, because the member-plane log holds the URL and the
+  # hash of every install it ever took. It cannot pull something down from
+  # nowhere: a declaration with no recorded pin is reported and left, and a
+  # claw-admin gives it a source once, by hand, through the door.
+  #
+  # THE COST, NAMED. This phase runs on every ride, including an unattended one
+  # under the updater, and a satisfiable-but-absent declaration means a download
+  # of vendor bytes on that tick. It is bounded: only what a manifest declares,
+  # only what the log already records, only what is not already on disk, and the
+  # door caps a single payload. The steady state is zero fetches, because the
+  # runtime is already there.
+  if [ ! -x "$door" ]; then
+    bad "no ${door} beside this script, so nothing can converge this claw to its declarations"
+    return 0
+  fi
+
+  local listing declared id pin_url pin_sha
+  listing="$("$door" --list 2>/dev/null || true)"
+  if ! declared="$(printf '%s' "$listing" | jq -r '.declared[]?' 2>/dev/null)"; then
+    bad "the runtimes door did not return readable JSON, so this claw's declarations could not be read"
+    return 0
+  fi
+
+  if [ -z "$declared" ]; then
+    ok "no workspace declares a runtime, so there is nothing to converge"
+    return 0
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if [ -d "${RUNTIMES_ROOT}/${id}" ]; then
+      ok "${id} is declared and installed"
+      continue
+    fi
+    # THE PIN COMES OUT OF THE RECORD, and it is read by the door rather than by
+    # this phase. The row's shape is the door's; a second reader of it here
+    # would be a second answer to "where did this runtime come from", and the
+    # two would drift on the day the row changes.
+    pin_url="$(printf '%s' "$listing" | jq -r --arg id "$id" '.pins[]? | select(.runtime == $id) | .url' 2>/dev/null | tail -1 || true)"
+    pin_sha="$(printf '%s' "$listing" | jq -r --arg id "$id" '.pins[]? | select(.runtime == $id) | .sha256' 2>/dev/null | tail -1 || true)"
+    if [ -z "$pin_url" ] || [ -z "$pin_sha" ]; then
+      bad "${id} is declared by a workspace, is not installed, and has never been installed on this claw -- nothing here knows where to get it"
+      human "give ${id} a source once: sudo ${GRANTED_RUNTIMES} --install ${id} --url <link> --sha256 <hash>. Every ride after that converges it from the record."
+      continue
+    fi
+    say "  converging ${id} from the recorded pin (${pin_url})"
+    warn "${id} was declared and absent, so this run fetched it. On an unattended tick that is a download nobody watched start."
+    if "$door" --install "$id" --url "$pin_url" --sha256 "$pin_sha" >/dev/null 2>&1; then
+      ok "${id} converged from the pin recorded in ${ADMIN_LOG}"
+    else
+      bad "${id} is declared but could not be converged from its recorded pin -- run the door by hand and read what it refuses"
+    fi
+  done <<< "$declared"
+
+  # INSTALLED AND UNDECLARED IS A NOTE, NEVER A REMOVAL. A runtime nobody
+  # declares may still be under somebody's open session, and a converging run
+  # that deleted it would take a member's toolchain away on a schedule. The
+  # removal is a decision, and there is a door for it.
+  local installed
+  installed="$(printf '%s' "$listing" | jq -r '.installed[]?' 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    case $'\n'"${declared}"$'\n' in
+      *$'\n'"${id}"$'\n'*) : ;;
+      *) warn "${id} is installed and no workspace declares it. Nothing was removed: that is a decision, and ${GRANTED_RUNTIMES} --remove is where it is made." ;;
+    esac
+  done <<< "$installed"
+}
+
+# ---------------------------------------------------------------- phase 18
+
+# THE NUMBER SKIPS 17 DELIBERATELY. The shared-runtimes phase is 17 on its own
+# branch and rides the same release as this one. Two phases numbered 17 would
+# merge into a file where `--only 17` runs one of them and the reader cannot see
+# which, so this one takes the next free number rather than the next number.
+
+# READ ONE PERSON'S OWN LOGIN KEYS AND WRITE THEM AS REGISTRY LINES.
+#
+# ONE RULE, USED TWICE. The owner seed and the admin adoption below both turn a
+# person into registry lines. Two copies of that rule would drift in one of them
+# and nothing would say so: the copy that took a key type the other refused, or
+# the copy that stopped skipping a line carrying options.
+#
+# WHAT IT SKIPS, AND WHY THAT MATTERS MORE THAN IT LOOKS. An `authorized_keys`
+# line can carry options in front of the key -- `command="..." ssh-ed25519 ...`.
+# The patterns below anchor on the key type at the start of the line, so such a
+# line is not taken. An allowed-signers file reads that same leading position as
+# its own options with their own meaning, so a line copied across whole would
+# turn a restriction on somebody's login into an instruction about their
+# signature.
+#
+# Appends to <outfile>, prints how many keys it took, and answers with a distinct
+# status for each way it can find none:
+#   2  no such person here
+#   3  their home or authorized_keys is a symlink, so the keys are not certainly theirs
+#   4  no readable authorized_keys
+#   5  readable, and carrying no key of a type this claw accepts
+authority_keys_for() {   # authority_keys_for <person> <outfile>
+  local who="$1" out="$2" whome ak line n=0
+  getent passwd "$who" >/dev/null 2>&1 || return 2
+  whome="$(getent passwd "$who" | cut -d: -f6)"
+  ak="${whome}/.ssh/authorized_keys"
+  if [ -L "$whome" ] || [ -L "$ak" ]; then return 3; fi
+  [ -r "$ak" ] || return 4
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      ssh-ed25519\ *|ecdsa-sha2-nistp256\ *|sk-ssh-ed25519@openssh.com\ *|sk-ecdsa-sha2-nistp256@openssh.com\ *)
+        printf '%s %s\n' "$who" "$line" >> "$out"
+        n=$((n+1)) ;;
+    esac
+  done < "$ak"
+  [ "$n" -gt 0 ] || return 5
+  printf '%s\n' "$n"
+  return 0
+}
+
+phase_18_authority() {
+  head1 18 "the authority registry and the tenant doors"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would create ${AUTHORITY_ROOT}, install ${CLAW_BIN}/claw-authority and ${ETC_ROOT}/claw-authority.md"
+    [ -n "$OWNER_ARG" ] && say "  would seed the owner as ${OWNER_ARG} from their own login keys, only if no owner is recorded"
+    [ -n "$OWNER_ARG" ] && say "  and, only on that same first laying, would adopt this claw's existing ${CLAW_ADMIN_GROUP} members into the registry from their own login keys"
+    say "  would converge ${TENANT_DOOR_ROOT} and ${TENANT_SUDOERS} from the registry"
+    return 0
+  fi
+
+  install -d -m 0755 -o root -g root "$AUTHORITY_ROOT"
+  install -d -m 0755 -o root -g root "$AUTHORITY_DOORS"
+
+  # ---- the member-plane program and the member-facing doc ----
+  #
+  # THE PROGRAM THAT DRAFTS AN APPROVAL HOLDS NO PRIVILEGE, and that is the
+  # whole reason it is installed here beside `bus` rather than inside the
+  # provisioning prefix. The design's central claim is that an agent can draft a
+  # door and can never install one. That claim is not a rule somebody wrote down;
+  # it is this file being world-executable, reaching no root path, and appearing
+  # in no sudo grant.
+  install -d -m 0755 -o root -g root "$CLAW_BIN"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-authority" "${CLAW_BIN}/claw-authority"
+  check "${CLAW_BIN}/claw-authority is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '${CLAW_BIN}/claw-authority')\" = '755 root:root' ]"
+  # The claim, measured rather than asserted: the drafting program is in no
+  # sudoers file on this claw. It is the one control that says an agent's reach
+  # stops at a request.
+  if grep -rsqF "${CLAW_BIN}/claw-authority" /etc/sudoers /etc/sudoers.d/ 2>/dev/null; then
+    bad "a sudoers file names ${CLAW_BIN}/claw-authority -- the drafting program must carry no grant, because an agent runs it"
+  else
+    ok "no sudoers file names the drafting program: composing a request reaches no privilege"
+  fi
+
+  install -m 0644 -o root -g root "${TEMPLATE_DIR}/claw-authority.md" "${ETC_ROOT}/claw-authority.md"
+  check "the authority doc is world-readable at ${ETC_ROOT}/claw-authority.md" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '${ETC_ROOT}/claw-authority.md')\" = '644 root:root' ]"
+
+  # ---- the owner, seeded once into an absence ----
+  #
+  # A CLAW HAS EXACTLY ONE OWNER AND THIS RUN CAN ONLY EVER LAY THE FIRST. After
+  # that the owner moves by the current owner signing a transfer, so a later run
+  # naming somebody else is a runbook disagreeing with the firm, and it is
+  # refused rather than obeyed. Refused, not ignored: a hostname or a bucket
+  # passed wrong is a mistake, and an owner passed wrong is somebody taking a
+  # claw.
+  #
+  # THE KEYS COME FROM THE PERSON'S OWN AUTHORIZED KEYS, because the claw already
+  # holds them and a second key to distribute is a second key to lose. What opens
+  # their login is what speaks for them at the moment the registry is laid. From
+  # then on the two records are separate, which is stated in the member doc: a
+  # device lost by an admin needs the key door for the login and a signed
+  # remove-admin for the authority.
+  # Whether THIS run is the one that laid the registry. The adoption below turns
+  # on it and on nothing else, so it is set in exactly one place: the branch that
+  # writes the owner file into an absence.
+  local OWNER_SEEDED_NOW=0
+
+  if [ -s "$AUTHORITY_OWNER" ]; then
+    local have_owner
+    have_owner="$(awk '!/^#/ && NF {print $1; exit}' "$AUTHORITY_OWNER")"
+    if [ -n "$OWNER_ARG" ] && [ "$OWNER_ARG" != "$have_owner" ]; then
+      bad "--owner names ${OWNER_ARG} and this claw's owner is ${have_owner}. Ownership moves by ${have_owner} signing a transfer, never by an argument to a provisioning run."
+    else
+      ok "this claw's owner is ${have_owner}, recorded before this run and untouched by it"
+    fi
+  elif [ -n "$OWNER_ARG" ]; then
+    local okeys orc=0
+    : > "${AUTHORITY_OWNER}.tmp"
+    okeys="$(authority_keys_for "$OWNER_ARG" "${AUTHORITY_OWNER}.tmp")" || orc=$?
+    case "$orc" in
+      0)
+        install -m 0644 -o root -g root "${AUTHORITY_OWNER}.tmp" "$AUTHORITY_OWNER"
+        ok "authority registry seeded: ${OWNER_ARG} is this claw's owner, with ${okeys} of their own key(s)"
+        warn "the owner approves from their own device and nothing they need rests on this claw. A lost owner is a break-glass request to the vendor, in writing -- reference/claw-conventions.md carries it."
+        OWNER_SEEDED_NOW=1 ;;
+      2) bad "--owner names ${OWNER_ARG} and there is no such person on this claw" ;;
+      3) bad "${OWNER_ARG}'s home or authorized_keys is a symlink, so the keys this run would read are not certainly theirs. The registry was not seeded." ;;
+      4) bad "${OWNER_ARG} has no readable $(getent passwd "$OWNER_ARG" | cut -d: -f6)/.ssh/authorized_keys, so there is no key to record for them" ;;
+      5) bad "${OWNER_ARG} carries no key of a type this claw accepts, so the registry was not seeded" ;;
+      *) bad "the owner seed for ${OWNER_ARG} failed for a reason this run does not have a name for (${orc})" ;;
+    esac
+    rm -f "${AUTHORITY_OWNER}.tmp"
+  else
+    warn "no --owner and no registry: this claw has no authority model, so no tenant door can be approved on it. Pass --owner on a build to lay one."
+  fi
+
+  [ -f "$AUTHORITY_ADMINS" ] || : > "$AUTHORITY_ADMINS"
+  chmod 0644 "$AUTHORITY_ADMINS"; chown root:root "$AUTHORITY_ADMINS"
+
+  # ---- the admins this claw already had, adopted at the first laying ----
+  #
+  # THE STATE THIS CLOSES. The registry is authoritative for `claw-admin`, and it
+  # was authoritative upward only: everybody the registry names goes into the
+  # group, and somebody in the group the registry does not name is reported and
+  # left, because an unattended tick must not take a firm's own admin's access
+  # away.
+  #
+  # Every claw already running carries `claw-admin` members and no registry. A
+  # first laying seeded from `--owner` alone therefore produced, on the morning
+  # after the upgrade, a claw where every existing admin held every door the
+  # group holds and no signature could take them out: a signed remove-admin acts
+  # on the registry, and the registry had never heard of them.
+  #
+  # So the first laying adopts them, with their own login keys, by the same rule
+  # `--owner` is seeded by. After it the registry names who is in the group and
+  # each of them is removable by one signed remove-admin, which is the whole
+  # point.
+  #
+  # ONLY AT THE FIRST LAYING, and that bound is the load-bearing half. A claw
+  # that already has a registry has the firm's own signed decisions in it, and a
+  # later ride reading the group back into the file would mean anybody who could
+  # reach the group could put themselves in the registry -- a provisioning run
+  # quietly undoing a signed remove-admin. After this one moment the group
+  # follows the registry and never the reverse.
+  #
+  # THE OWNER IS NOT ADOPTED AS AN ADMIN. A person holds one tier, and the door
+  # refuses an add-admin naming the owner for the same reason.
+  #
+  # ADOPTION IS NOT APPOINTMENT. Nothing here decides that somebody may approve
+  # an act; the firm decided that when it put them in `claw-admin`, and this
+  # writes down what is already true so that it can be changed by signature.
+  if [ "$OWNER_SEEDED_NOW" -eq 1 ] && [ ! -s "$AUTHORITY_ADMINS" ]; then
+    local a auid arc akeys adopted="" skipped=""
+    : > "${AUTHORITY_ADMINS}.tmp"
+    for a in $(getent group "$CLAW_ADMIN_GROUP" 2>/dev/null | cut -d: -f4 | tr ',' ' '); do
+      [ -n "$a" ] || continue
+      [ "$a" != "$OWNER_ARG" ] || continue
+      # EXISTENCE FIRST, THEN THE UID RULE. A name in the group with no passwd
+      # entry has no uid to read, and `id -u` answering nothing would have it
+      # reported as a system account -- a true refusal with a false reason, which
+      # sends the firm to look at the wrong thing.
+      if ! getent passwd "$a" >/dev/null 2>&1; then
+        skipped="${skipped} ${a}(in the group and no such person here)"; continue
+      fi
+      auid="$(id -u "$a" 2>/dev/null || echo 0)"
+      if [ "$auid" -lt 1000 ]; then
+        skipped="${skipped} ${a}(system account, uid ${auid})"; continue
+      fi
+      arc=0
+      akeys="$(authority_keys_for "$a" "${AUTHORITY_ADMINS}.tmp")" || arc=$?
+      case "$arc" in
+        0) adopted="${adopted} ${a}(${akeys} key(s))" ;;
+        2) skipped="${skipped} ${a}(in the group and no such person here)" ;;
+        3) skipped="${skipped} ${a}(home or authorized_keys is a symlink)" ;;
+        4) skipped="${skipped} ${a}(no readable authorized_keys)" ;;
+        5) skipped="${skipped} ${a}(no key of a type this claw accepts)" ;;
+        *) skipped="${skipped} ${a}(unnamed failure ${arc})" ;;
+      esac
+    done
+    if [ -s "${AUTHORITY_ADMINS}.tmp" ]; then
+      install -m 0644 -o root -g root "${AUTHORITY_ADMINS}.tmp" "$AUTHORITY_ADMINS"
+      ok "adopted into the authority registry at its first laying:${adopted}. Each of them is now removable by a signed remove-admin."
+    else
+      ok "no admin to adopt: ${CLAW_ADMIN_GROUP} held nobody but the owner when the registry was laid"
+    fi
+    rm -f "${AUTHORITY_ADMINS}.tmp"
+    # SAID LOUDLY RATHER THAN LEFT IN THE COUNT. Somebody in the group this run
+    # could not adopt keeps every door the group opens and stays outside the
+    # registry, which is exactly the state the adoption exists to end. They are
+    # named here and named again by the stray report below, and the firm's remedy
+    # is a key for them and a signed add-admin.
+    [ -z "$skipped" ] || warn "in ${CLAW_ADMIN_GROUP} and NOT adopted:${skipped}. They keep the group's doors and no signature can take them out until the owner signs an add-admin for them."
+  fi
+
+  if [ ! -s "$AUTHORITY_OWNER" ]; then
+    warn "phase 18 stopped after the plane: with no owner recorded there is no registry to converge from, and an unrun control is not a passed one"
+    return 0
+  fi
+
+  check "the owner file is 0644 root:root -- a registry its subject can edit is not a registry" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$AUTHORITY_OWNER')\" = '644 root:root' ]"
+  check "the owner file holds exactly one person" \
+    bash -c "[ \"\$(awk '!/^#/ && NF {print \$1}' '$AUTHORITY_OWNER' | sort -u | wc -l)\" = '1' ]"
+
+  # ---- the group follows the registry ----
+  #
+  # CONVERGED UPWARD, REPORTED DOWNWARD. Everybody the registry names is put in
+  # the group, because a tier that opens nothing is a tier in name. Somebody in
+  # the group the registry does not name is REPORTED and left, because this run
+  # cannot tell a stale membership from a claw that predates its registry, and
+  # taking a firm's own admin's access away on a tick nobody watched start is the
+  # wrong side to be wrong on. The signed remove-admin is what takes a person
+  # out, and it does.
+  local roster p gtext stray=""
+  roster="$(awk '!/^#/ && NF {print $1}' "$AUTHORITY_OWNER" "$AUTHORITY_ADMINS" 2>/dev/null | LC_ALL=C sort -u)"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    getent passwd "$p" >/dev/null 2>&1 || { bad "the registry names ${p} and there is no such person on this claw"; continue; }
+    gtext=" $(id -nG "$p" 2>/dev/null || true) "
+    case "$gtext" in
+      *" ${CLAW_ADMIN_GROUP} "*) : ;;
+      *) gpasswd -a "$p" "$CLAW_ADMIN_GROUP" >/dev/null 2>&1 || bad "could not put ${p} in ${CLAW_ADMIN_GROUP}" ;;
+    esac
+  done <<< "$roster"
+  for p in $(getent group "$CLAW_ADMIN_GROUP" 2>/dev/null | cut -d: -f4 | tr ',' ' '); do
+    grep -qxF "$p" <<< "$roster" || stray="$stray $p"
+  done
+  if [ -n "$stray" ]; then
+    warn "in ${CLAW_ADMIN_GROUP} and not in the authority registry:${stray}. Nothing was removed. A signed remove-admin is what takes somebody out; this run will not do it on its own."
+  else
+    ok "${CLAW_ADMIN_GROUP} holds exactly the people the registry names"
+  fi
+
+  # ---- the tenant doors ----
+  #
+  # THE RUNNING COPY IS REBUILT FROM THE RECORD, EVERY RIDE. `/etc/commonclaw` is
+  # inside the roots the backup rail keeps and `/opt/commonclaw` is not, so a
+  # restored claw comes back holding every approval and none of the binaries the
+  # approvals point at. This loop is what closes that gap, and it is also what
+  # repairs a wrapper somebody deleted.
+  #
+  # NOTHING HERE APPROVES ANYTHING. It lays what a signature already approved.
+  # A door with no record is removed; a record with no approved bytes is
+  # reported and its grant is dropped, because a grant naming a path this run did
+  # not lay is a grant waiting for whatever appears there next.
+  install -d -m 0755 -o root -g root "$OPT_ROOT"
+  install -d -m 0750 -o root -g root "$TENANT_DOOR_ROOT"
+
+  # DECIDED FIRST, PARSED SECOND, LAID THIRD, and the order is the same repair the
+  # door itself carries. A ride that installed the bytes and then discovered the
+  # grant file would not parse left a claw holding wrappers and scripts for doors
+  # it had just been told were not granted, and the sweep below had already
+  # removed whatever the previous ride laid. Deciding on paper costs nothing and
+  # a half-converged door plane costs a firm its doors.
+  local tmp_sudo rec name grp sha granted="" broken="" accepted=""
+  tmp_sudo="$(mktemp)"
+  {
+    printf '# Managed by manage-claw-authority.sh and re-derived by provision-claw.sh.\n'
+    printf '# Do not edit on the claw: it is rewritten whole from %s.\n' "$AUTHORITY_DOORS"
+    printf '#\n'
+    printf '# Every entry names a wrapper, never a tenant script. The wrapper re-checks\n'
+    printf '# the approved content hash on every run and writes the member-plane row.\n'
+    printf '\n'
+  } > "$tmp_sudo"
+
+  shopt -s nullglob
+  for rec in "$AUTHORITY_DOORS"/*.json; do
+    name="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+    grp="$(sed -n 's/.*"group": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+    sha="$(sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' "$rec" | head -1)"
+    case "$name" in ''|*[!a-z0-9-]*) bad "a door record at ${rec} carries an unusable name -- skipped, and its grant was not written"; continue ;; esac
+    case "$grp" in "$MEMBERS_GROUP"|"$CLAW_ADMIN_GROUP") : ;; *) bad "door '${name}' names group '${grp}', which is not a group a door may be granted to -- skipped"; continue ;; esac
+    if [ ! -f "${AUTHORITY_DOORS}/${name}.sh" ]; then
+      broken="$broken ${name}"; continue
+    fi
+    if [ "$(sha256sum "${AUTHORITY_DOORS}/${name}.sh" | cut -d' ' -f1)" != "$sha" ]; then
+      bad "the recorded bytes of door '${name}' do not hash to what its record says was approved -- not laid, not granted"
+      broken="$broken ${name}"; continue
+    fi
+    printf '%%%s ALL=(root) NOPASSWD: %s/%s\n' "$grp" "$TENANT_DOOR_ROOT" "$name" >> "$tmp_sudo"
+    accepted="${accepted}${name} "
+  done
+  shopt -u nullglob
+
+  [ -z "$broken" ] || bad "approved door(s) with no usable bytes on this claw:${broken}. The approval survives and the grant does not, which is what a restore looks like before the source is put back."
+
+  # THE PARSE, WHILE NOTHING HAS BEEN LAID. A file that will not parse ends the
+  # convergence here: this claw's door plane and its grant file are both left
+  # exactly as the last good ride left them, which is a state the firm has seen
+  # before and can still use.
+  if ! visudo -cf "$tmp_sudo" >/dev/null 2>&1; then
+    bad "the tenant grant file FAILED visudo -- nothing was laid, nothing was removed, and this claw's tenant doors are as the last ride left them"
+    visudo -cf "$tmp_sudo" 2>&1 | sed 's/^/    /' >&2 || true
+    rm -f "$tmp_sudo"
+    return 0
+  fi
+
+  # THE WRAPPER IS CHECKED BEFORE IT IS LAID, and only when this ride is going to
+  # lay one. Every door in `$accepted` becomes a copy of this single file, so
+  # wrong bytes here are wrong bytes in every granted door on the claw at once.
+  # Checking it on a ride that lays nothing would be a guard measuring something
+  # its own run does not consume.
+  if [ -n "$accepted" ]; then
+    local wrap_sha
+    wrap_sha="$(sha256sum "${TEMPLATE_DIR}/tenant-door-wrapper.sh" 2>/dev/null | cut -d' ' -f1 || true)"
+    if [ "$wrap_sha" != "$WRAPPER_SHA256" ]; then
+      bad "the tenant-door wrapper in this release's templates is not the wrapper this run expects (${wrap_sha:-missing}, wanted ${WRAPPER_SHA256}) -- nothing was laid, and this claw's tenant doors are as the last ride left them"
+      rm -f "$tmp_sudo"
+      return 0
+    fi
+    ok "the tenant-door wrapper about to be laid is the one this release ships"
+  fi
+
+  for name in $accepted; do
+    install -m 0750 -o root -g root "${AUTHORITY_DOORS}/${name}.sh" "${TENANT_DOOR_ROOT}/${name}.script"
+    install -m 0750 -o root -g root "${TEMPLATE_DIR}/tenant-door-wrapper.sh" "${TENANT_DOOR_ROOT}/${name}"
+    granted="$granted ${name}"
+  done
+
+  # Anything in the door root the registry does not name comes out. A leftover
+  # wrapper is inert once its grant is gone, and a leftover script beside a name
+  # somebody re-grants later is bytes nobody approved sitting where approved
+  # bytes go.
+  local f base sweep=""
+  shopt -s nullglob
+  for f in "$TENANT_DOOR_ROOT"/*; do
+    base="$(basename "$f")"; base="${base%.script}"
+    case " $granted " in
+      *" $base "*) : ;;
+      *) rm -f "$f"; sweep="$sweep $(basename "$f")" ;;
+    esac
+  done
+  shopt -u nullglob
+  [ -z "$sweep" ] || warn "removed from ${TENANT_DOOR_ROOT}, named by no approval:${sweep}"
+
+  if [ -z "$granted" ]; then
+    rm -f "$TENANT_SUDOERS"
+    ok "no tenant door is approved on this claw, so ${TENANT_SUDOERS} is absent rather than empty"
+  else
+    install -m 0440 -o root -g root "$tmp_sudo" "$TENANT_SUDOERS"
+    ok "the grant file that was parsed before anything was laid is the one now installed:${granted}"
+  fi
+  rm -f "$tmp_sudo"
+
+  # ---- what the tenant plane must never be ----
+  #
+  # THE PAIR THAT MAKES THE GRANT MEAN SOMETHING. Every granted path is the
+  # wrapper byte for byte, and no tenant script carries a grant of its own. A
+  # grant on the script instead of the wrapper would run with no hash check and
+  # write no row, and from the outside the two look identical.
+  #
+  # THE READ-BACK IS AGAINST THE PINNED NUMBER, not against the template this run
+  # just copied from. Comparing a copy to its own source can only ever catch a
+  # copy that failed, and the sentence it printed told the firm something much
+  # stronger: that every granted path is the wrapper this release ships.
+  local n bad_wrapper="" bad_direct=""
+  for n in $granted; do
+    [ "$(sha256sum "${TENANT_DOOR_ROOT}/${n}" 2>/dev/null | cut -d' ' -f1 || true)" = "$WRAPPER_SHA256" ] \
+      || bad_wrapper="$bad_wrapper ${n}"
+    grep -qF "NOPASSWD: ${TENANT_DOOR_ROOT}/${n}.script" "$TENANT_SUDOERS" 2>/dev/null && bad_direct="$bad_direct ${n}"
+  done
+  if [ -n "$granted" ]; then
+    [ -z "$bad_wrapper" ] && ok "every granted path is the wrapper this release ships, byte for byte" \
+                          || bad "granted path(s) that are not the wrapper:${bad_wrapper}"
+    [ -z "$bad_direct" ]  && ok "no tenant script carries a grant of its own, so nothing reaches one except through its wrapper" \
+                          || bad "tenant script(s) granted directly:${bad_direct}"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -2962,6 +4126,9 @@ if want_phase 12; then phase_12_seat_check;  fi
 if want_phase 13; then phase_13_admin_door;  fi
 if want_phase 14; then phase_14_skill_plane; fi
 if want_phase 15; then phase_15_release_rail; fi
+if want_phase 16; then phase_16_session_bus;  fi
+if want_phase 17; then phase_17_runtimes;     fi
+if want_phase 18; then phase_18_authority;    fi
 
 # ---------------------------------------------------------------- the record
 #

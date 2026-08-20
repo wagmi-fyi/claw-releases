@@ -8,9 +8,12 @@
 #   sudo ./onboard-person.sh --person alice --key "ssh-ed25519 AAAA... alice@laptop"
 #   sudo ./onboard-person.sh --person alice --key-file ./alice.pub
 #
-#   --dry-run    print the plan, change nothing
+#   --email             the git address for this person. Defaults to person@hostname.
+#   --full-name         the name their commits carry. Defaults to the username.
+#   --no-agents-cred    make a person who resolves no credentials, deliberately
+#   --dry-run           print the plan, change nothing
 #
-# WHAT IT MAKES. The five things provisioning gives a person who was in the keys
+# WHAT IT MAKES. The seven things provisioning gives a person who was in the keys
 # file at build time, so somebody arriving later gets the same claw:
 #   the unix account, with a home and a shell
 #   the home at 0750, .ssh at 0700, authorized_keys at 0600 carrying their key
@@ -18,6 +21,45 @@
 #   the convention pointer in each core's global instructions file, and the
 #     claw-briefing pointer in the per-task core's file alone
 #   membership of the claw's members group, which owns the claw-wide briefing
+#   the agents credential plane: membership of the credential group, plus the
+#     loader and the hook that starts it, so their sessions resolve op://
+#   their git identity, so their first commit is theirs
+#
+# THE SIXTH THING IS A GROUP GRANT AND A LOADER, and neither is a secret, so
+# this door does both and holds no value at any point. The claw's agents token
+# is ONE root-owned file that `install-agents-token.sh` writes; what makes it
+# readable is membership of the credential group, and what turns it into an
+# exported variable is the loader in this person's own home.
+#
+# THE GRANT IS AN EXPLICIT STEP, NOT A SIDE EFFECT. It is made here, said out
+# loud, read back, and written into the admin log as its own act. A grant folded
+# into some other step is a grant a person can silently lack: that is exactly
+# how somebody has arrived here with an account, a home, correct keys, and every
+# credential lookup in their session failing with nothing in their onboarding
+# saying why.
+#
+# AND IT IS NEVER THE MEMBERS GROUP. Two groups, two meanings, and collapsing
+# them would put credential read on everybody who can read the briefing. The
+# members group owns the briefing and nothing else; the credential group's one
+# meaning is who may read the token.
+#
+# THE GIT IDENTITY IS PART OF MAKING A PERSON, not a thing they configure later.
+# Every workspace on this claw is a git repository the group shares, so a person
+# with no identity either cannot commit or commits as a guess. Both cost more
+# than setting it here: git history is the one record on the claw that the
+# conventions forbid rewriting, so a wrong name in it is wrong permanently.
+#
+# THE DEFAULT IS DERIVED AND IT IS TRUE. person@hostname says which person, on
+# which claw. It resolves to no mailbox, and nothing here pretends it does: the
+# address is git's identity key, and the claw is the system of record. Somebody
+# who wants their commits attributed on a mirror passes --email and gets that
+# instead. There is no claw-wide default address, because inventing one means
+# inventing a domain this claw does not own.
+#
+# useConfigOnly IS SET WITH IT. Without it git invents an identity from the
+# hostname when none is configured, so a person whose config is later emptied
+# starts committing under a name nobody chose and nothing announces. With it,
+# git refuses instead. A refusal is recoverable and a wrong commit is not.
 #
 # THE MEMBERS GROUP IS NOT ACCESS. It carries no grant and owns one file: the
 # briefing at the workspace root that every session on this claw reads. Joining
@@ -57,20 +99,42 @@
 # idempotent and this one is not, which is deliberate: converging onto a name
 # that already exists would graft a new key onto somebody else's login. That is
 # the exact failure this door has to prevent, so a re-run says so and stops.
-# Adding a second device to a person who already exists is a different act with
-# no door today; `operations/lifecycle.md` carries it by hand.
+# Adding a second device to a person who already exists is a different act and
+# has its own door: `manage-person-keys.sh --add-key`. That door adds and revokes
+# keys and creates nobody, which is the same split this one keeps by refusing.
 #
-# THE CONTRACT WITH PROVISIONING. The home mode, the symlink target and the two
-# pointer sentences below belong to phase 8 of provision-claw.sh. Both sides name
-# them and neither may move one alone. A pointer written in different words is a
-# SECOND pointer, and the next provisioning run leaves the claw carrying both.
-# The same contract covers WHERE each one goes: the conventions pointer in both
-# cores' files, the claw-briefing pointer in the per-task core's file only, with
-# its absence from the other asserted on both sides.
+# THE CONTRACT WITH PROVISIONING. The home mode, the symlink target, the two
+# pointer sentences and the git identity below belong to phase 8 of
+# provision-claw.sh. Both sides name them and neither may move one alone. A
+# pointer written in different words is a SECOND pointer, and the next
+# provisioning run leaves the claw carrying both. The same contract covers WHERE
+# each one goes: the conventions pointer in both cores' files, the claw-briefing
+# pointer in the per-task core's file only, with its absence from the other
+# asserted on both sides.
+#
+# The identity half of that contract has one asymmetry, and it is not drift.
+# Phase 8 takes its people from a keys file or from a group, neither of which
+# carries an address, so it can only write the derived default. This door takes
+# arguments, so it can write what somebody chose. BOTH SIDES WRITE ONLY INTO AN
+# ABSENCE. That is what makes them agree: a person the door gave a chosen address
+# keeps it through every later provisioning run, and a person created any other
+# way gets the derived one from whichever side reaches them first.
 #
 set -euo pipefail
 
-PERSON=""; KEY=""; KEY_FILE=""; DRY_RUN=0
+PERSON=""; KEY=""; KEY_FILE=""; DRY_RUN=0; AGENTS_CRED=1; EMAIL=""; FULL_NAME=""
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# Where the claw's token rests, which group reads it, and what loads it, in one
+# copy that phase 8, this door and the token door all read. A missing sibling
+# fails the run rather than being skipped.
+# shellcheck source=agents-plane.sh
+[ -r "${SCRIPT_DIR}/agents-plane.sh" ] \
+  || { printf 'no agents-plane.sh beside this script\n' >&2; exit 1; }
+. "${SCRIPT_DIR}/agents-plane.sh"
+
+TOKEN_DOOR="${SCRIPT_DIR}/install-agents-token.sh"
 
 # The contract with the provisioning plane. Phase 8 writes these exact values.
 WORKSPACE_ROOT="/srv/workspaces"
@@ -79,6 +143,13 @@ CONVENTION_POINTER="Workspace conventions for this claw: read ${CONVENTIONS} bef
 ADMIN_LOG="/etc/commonclaw/admin-log.md"
 MEMBERS_GROUP="claw-members"
 CLAW_BRIEFING="${WORKSPACE_ROOT}/CLAUDE.md"
+
+# Phase 8 writes these same three settings, into the same absence.
+GIT_IDENTITY_KEYS=("user.name" "user.email" "user.useConfigOnly")
+# A key nothing on this claw ever sets. It exists so the read-back below can be
+# shown to return "absent" for something absent, which is the only thing that
+# makes a read-back of a value we did set into evidence.
+GIT_PROBE_KEY="commonclaw.identityprobe"
 
 # The two global instructions files, and the second pointer that goes in exactly
 # one of them. The per-task core does not walk up to ${CLAW_BRIEFING}, so it is
@@ -112,6 +183,9 @@ while [ $# -gt 0 ]; do
     --person)   PERSON="${2:-}"; shift 2 ;;
     --key)      KEY="${2:-}"; shift 2 ;;
     --key-file) KEY_FILE="${2:-}"; shift 2 ;;
+    --no-agents-cred) AGENTS_CRED=0; shift ;;
+    --email)    EMAIL="${2:-}"; shift 2 ;;
+    --full-name) FULL_NAME="${2:-}"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
     -h|--help)  usage ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
@@ -119,7 +193,7 @@ while [ $# -gt 0 ]; do
 done
 
 CHK_DESC=(); CHK_OK=(); NOTES=(); FAILED=0
-ACTION="none"; FINGERPRINT=""; HOME_DIR=""
+ACTION="none"; FINGERPRINT=""; HOME_DIR=""; AGENTS_PLANE="absent"
 
 say()  { printf '%s\n' "$*" >&2; }
 ok()   { printf '  OK    %s\n' "$*" >&2; CHK_DESC+=("$*"); CHK_OK+=(true); return 0; }
@@ -142,6 +216,9 @@ emit_json() {
   printf '  "person": "%s",\n' "$(json_esc "$PERSON")"
   printf '  "home": "%s",\n' "$(json_esc "$HOME_DIR")"
   printf '  "key_fingerprint": "%s",\n' "$(json_esc "$FINGERPRINT")"
+  printf '  "agents_plane": "%s",\n' "$(json_esc "$AGENTS_PLANE")"
+  printf '  "agents_cred": %s,\n' "$(cc_agents_reads "$PERSON" && echo true || echo false)"
+  printf '  "claw_token": "%s",\n' "$(json_esc "$(cc_agents_token_state)")"
   printf '  "action": "%s",\n' "$(json_esc "$ACTION")"
   printf '  "checks": [\n'
   for i in "${!CHK_DESC[@]}"; do
@@ -294,8 +371,62 @@ if ! FINGERPRINT="$(ssh-keygen -l -f "${KEY_TMP}/offered" 2>/dev/null)"; then
   exit 1
 fi
 
+# ---- the identity ----
+#
+# The derived default. This door reads the box; phase 8 uses the hostname it was
+# given as an argument. They agree because phase 2 sets the box's hostname to
+# that same value and checks it, so there is one name and two ways of reaching
+# it. `hostname -s` rather than the full name: the short form is the fleet's own
+# word for a claw, and the long one carries whatever the network decided.
+CLAW_HOST="$(hostname -s 2>/dev/null || true)"
+[ -n "$CLAW_HOST" ] || { say "this box reports no hostname, so no address can be derived. Pass --email."; exit 1; }
+[ -n "$EMAIL" ] || EMAIL="${PERSON}@${CLAW_HOST}"
+[ -n "$FULL_NAME" ] || FULL_NAME="$PERSON"
+
+# The address is CONSTRAINED, the same way the username is and for the same
+# reason: it is a value from a human that ends up in a record nobody may rewrite.
+case "$EMAIL" in
+  *[$'\n\r']*) say "the address must be one line"; exit 1 ;;
+esac
+case "$EMAIL" in
+  *@*@*) say "'${EMAIL}' has more than one @" ; exit 1 ;;
+  *@*)   : ;;
+  *)     say "'${EMAIL}' has no @, so git will not read it as an address"; exit 1 ;;
+esac
+case "$EMAIL" in
+  @*) say "'${EMAIL}' has nothing before the @"; exit 1 ;;
+  *@) say "'${EMAIL}' has nothing after the @"; exit 1 ;;
+esac
+case "$EMAIL" in
+  *[!A-Za-z0-9.@_%+-]*) say "'${EMAIL}' carries a character an address here may not: use letters, digits, and . _ % + - @"; exit 1 ;;
+esac
+[ "${#EMAIL}" -le 254 ] || { say "the address is longer than 254 characters"; exit 1; }
+
+# The NAME is not charset-constrained, and that is a deliberate difference from
+# both the username and the address above. A username lands in useradd and in
+# filesystem paths; an address lands in a machine-read key. A display name lands
+# in one quoted argument and in git's ident line, so the only characters that can
+# break anything are the ones git's own ident grammar uses. Refusing more than
+# those would refuse real people's real names, which is a worse failure than any
+# it would prevent.
+case "$FULL_NAME" in
+  *[$'\n\r']*) say "the name must be one line"; exit 1 ;;
+  *"<"*|*">"*) say "the name may not carry < or >, which git reads as the address delimiters"; exit 1 ;;
+esac
+case "$FULL_NAME" in
+  *[[:cntrl:]]*) say "the name carries a control character"; exit 1 ;;
+esac
+[ -n "${FULL_NAME//[[:space:]]/}" ] || { say "the name is only whitespace"; exit 1; }
+[ "${#FULL_NAME}" -le 64 ] || { say "the name is longer than 64 characters"; exit 1; }
+
 # ---- the claw ----
 [ -d "$WORKSPACE_ROOT" ] || { say "no workspace root at ${WORKSPACE_ROOT} -- run the provisioning plane first"; exit 1; }
+command -v git >/dev/null 2>&1 || {
+  say "no git on this claw, so this person could be created and never commit."
+  say "Every workspace here is a git repository from the moment it is scaffolded, so an absence"
+  say "means the provisioning plane did not finish. Run it rather than working around this."
+  exit 1
+}
 [ -f "$ADMIN_LOG" ] || {
   say "no member-plane record at ${ADMIN_LOG}, so this act has nowhere to be written down."
   say "The log is seeded by provisioning. Run the provisioning plane rather than creating it here."
@@ -322,8 +453,16 @@ WHEN="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 say ""
 say "=== onboard ${PERSON} ==="
 say "  key:  ${FINGERPRINT}"
+say "  git:  ${FULL_NAME} <${EMAIL}>"
 say "  by:   ${BY}"
 say ""
+
+# Whether this claw has a token at all, read BEFORE anything is written so the
+# dry run says what the real run will do. This opens no file and prints no byte
+# of one: it asks whether a token is there. A person joined to the credential
+# group on a claw that holds no token still resolves nothing, and that is a
+# claw-level gap rather than anything wrong with the person.
+CLAW_TOKEN="$(cc_agents_token_state)"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   ACTION="would-onboard"
@@ -332,7 +471,19 @@ if [ "$DRY_RUN" -eq 1 ]; then
   say "  would link ~/workspaces -> ${WORKSPACE_ROOT}"
   say "  would stamp the conventions pointer into ${PERSISTENT_CORE_FILE} and ${PER_TASK_CORE_FILE}"
   say "  would stamp the claw-briefing pointer into ${PER_TASK_CORE_FILE} alone"
+  say "  would set their git identity to ${FULL_NAME} <${EMAIL}>, and refuse a guessed one"
   say "  would add ${PERSON} to ${MEMBERS_GROUP}, which owns ${CLAW_BRIEFING} and nothing else"
+  if [ "$AGENTS_CRED" -eq 0 ]; then
+    say "  would add ${PERSON} to NO credential group: --no-agents-cred was passed, so this person resolves nothing by decision"
+  else
+    say "  would add ${PERSON} to ${CC_AGENTS_GROUP}, which is what makes ${CC_AGENTS_TOKEN} readable, as its own logged step"
+    say "  would make the loader at ~/.config/commonclaw/agent-env.sh and the hook at the top of ~/.bashrc"
+    if [ "$CLAW_TOKEN" = "present" ]; then
+      say "  would leave ${PERSON} resolving op:// references from their next session, because this claw holds a token"
+    else
+      say "  would leave ${PERSON} resolving NOTHING, because this claw holds no token at ${CC_AGENTS_TOKEN} yet"
+    fi
+  fi
   say "  would append one row to ${ADMIN_LOG}"
   say "  would grant NO workspace, NO sudo, NO claw-admin"
   warn "dry run: nothing was written"
@@ -368,15 +519,103 @@ done
 grep -qxF "$CLAW_BRIEFING_POINTER" "${HOME_DIR}/${PER_TASK_CORE_FILE}" \
   || printf '%s\n' "$CLAW_BRIEFING_POINTER" >> "${HOME_DIR}/${PER_TASK_CORE_FILE}"
 
+# ---------------------------------------------------------------- the identity
+#
+# Written BY THE PERSON, through git, into an absence. Three reasons, and each
+# one rules out an alternative that looks simpler:
+#
+#   By the person, because a file root creates in somebody's home is a file they
+#   cannot write. git run under their own uid makes it with their ownership and
+#   git's own mode, and this door never has to know which mode that is.
+#
+#   Through git rather than by appending text, because the config format has
+#   sections and an append that lands under the wrong one sets nothing while
+#   looking exactly like success.
+#
+#   Into an absence, because the same three settings are phase 8's, and a run
+#   that overwrote them would replace an address somebody chose with the derived
+#   one every time the claw is re-provisioned.
+for k in "${GIT_IDENTITY_KEYS[@]}"; do
+  if sudo -u "$PERSON" -H git config --global --get "$k" >/dev/null 2>&1; then
+    warn "${PERSON} already has ${k} set; left alone"
+    continue
+  fi
+  case "$k" in
+    user.name)          v="$FULL_NAME" ;;
+    user.email)         v="$EMAIL" ;;
+    user.useConfigOnly) v="true" ;;
+  esac
+  # The write is an ATTEMPT and the read-back below is the verdict. Left fatal
+  # under errexit, a refused write would take the whole run out before the
+  # structured result was emitted, so the caller would learn that something went
+  # wrong and not what.
+  sudo -u "$PERSON" -H git config --global "$k" "$v" || warn "could not write ${k} for ${PERSON}"
+done
+
 # The claw's own briefing is written by whoever works here, and this person now
 # works here. The group is the only thing that makes that file theirs.
 gpasswd -a "$PERSON" "$MEMBERS_GROUP" >/dev/null
+
+# ------------------------------------------------ the credential group grant
+#
+# ITS OWN STEP, AND ITS OWN LINE OF OUTPUT. This is the grant that decides
+# whether the person can read the claw's agents token, and it is deliberately
+# not folded into the members-group join above. Two groups with two meanings:
+# the members group owns the briefing, this one owns credential read. A person
+# who ends up in one and not the other is then a visible state rather than an
+# invisible one.
+#
+# THE GROUP IS REFUSED, NOT CREATED. Groups belong to provisioning. A door that
+# made one would be a second owner of the claw's access model, and the two would
+# disagree the first time either changed.
+if [ "$AGENTS_CRED" -eq 1 ]; then
+  if getent group "$CC_AGENTS_GROUP" >/dev/null 2>&1; then
+    gpasswd -a "$PERSON" "$CC_AGENTS_GROUP" >/dev/null
+    say "  credential group: added ${PERSON} to ${CC_AGENTS_GROUP}, which is what makes ${CC_AGENTS_TOKEN} readable"
+  else
+    bad "no ${CC_AGENTS_GROUP} group on this claw, so ${PERSON} cannot be granted credential read. Provisioning creates that group; run it, then re-run this door."
+  fi
+else
+  warn "--no-agents-cred: ${PERSON} is NOT in ${CC_AGENTS_GROUP}, so every op:// reference in their session will fail. That is a decision recorded here, not an omission."
+fi
+
+# ------------------------------------------------------- the loader and hook
+#
+# What turns a readable file into an exported variable in this person's own
+# sessions. It carries a PATH and never a value, so it is made unconditionally
+# for anybody who is not deliberately opted out, and a run makes it rather than
+# a human.
+#
+# THE TOKEN IS NEVER THIS DOOR'S TO HANDLE, and now it is never this door's to
+# reach either. The value is one root-owned file for the whole claw, written by
+# `install-agents-token.sh` and by nothing else. Onboarding a person does not
+# touch a credential at any point.
+if [ "$AGENTS_CRED" -eq 1 ]; then
+  if cc_agents_plane_install "$PERSON" "$HOME_DIR"; then
+    say "  loader: made ${CC_AP_ENV} and the hook at the top of ${HOME_DIR}/.bashrc"
+  else
+    bad "could not make the loader in ${HOME_DIR} -- ${PERSON} will resolve no credentials"
+  fi
+fi
+AGENTS_PLANE="$(cc_agents_plane_state "$HOME_DIR")"
 
 # ---------------------------------------------------------------- the record
 
 # One row, one append, one call. Nobody reads this file and writes it back, so
 # no concurrent writer can lose a row to this one.
 printf '| %s | %s | onboarded a person | %s |\n' "$WHEN" "$BY" "$PERSON" >> "$ADMIN_LOG"
+
+# THE CREDENTIAL GRANT GETS ITS OWN ROW. It is a separate act with a separate
+# meaning, so it is separately readable afterwards: who can read this claw's
+# agents token, and when that started, is answerable from this file alone. A
+# grant folded into the onboarding row would be a grant nobody can date.
+if [ "$AGENTS_CRED" -eq 1 ]; then
+  printf '| %s | %s | granted credential read (%s) | %s |\n' \
+    "$WHEN" "$BY" "$CC_AGENTS_GROUP" "$PERSON" >> "$ADMIN_LOG"
+else
+  printf '| %s | %s | onboarded WITHOUT credential read (--no-agents-cred) | %s |\n' \
+    "$WHEN" "$BY" "$PERSON" >> "$ADMIN_LOG"
+fi
 
 # ---------------------------------------------------------------- verify
 
@@ -450,6 +689,81 @@ cnt="$(grep -cxF "$CLAW_BRIEFING_POINTER" "${HOME_DIR}/${PERSISTENT_CORE_FILE}" 
 [ "$cnt" = "0" ] || { bad "${PERSISTENT_CORE_FILE} carries ${cnt} claw-briefing pointers, wanted zero -- that core walks up to the briefing already"; briefing_ptr_ok=0; }
 [ "$briefing_ptr_ok" -eq 1 ] && ok "the claw-briefing pointer is in ${PER_TASK_CORE_FILE} once and absent from ${PERSISTENT_CORE_FILE}"
 
+# --- the git identity ---
+#
+# Read back THROUGH GIT, AS THE PERSON, which is the surface that decides what
+# their commits carry. Reading the file with grep instead would pass on a config
+# git cannot parse and on one sitting where git does not look.
+read_identity() { sudo -u "$PERSON" -H git config --global --get "$1" 2>/dev/null || true; }
+
+got="$(read_identity user.name)"
+if [ "$got" = "$FULL_NAME" ]; then
+  ok "git reads ${PERSON}'s name as '${FULL_NAME}'"
+else
+  bad "git reads ${PERSON}'s name as '${got}', wanted '${FULL_NAME}'"
+fi
+
+got="$(read_identity user.email)"
+if [ "$got" = "$EMAIL" ]; then
+  ok "git reads ${PERSON}'s address as '${EMAIL}'"
+else
+  bad "git reads ${PERSON}'s address as '${got}', wanted '${EMAIL}'"
+fi
+
+got="$(read_identity user.useConfigOnly)"
+if [ "$got" = "true" ]; then
+  ok "git will refuse to invent an identity for ${PERSON} rather than guess one"
+else
+  bad "user.useConfigOnly reads '${got}', so git would invent an identity from the hostname"
+fi
+
+# The known-answer control. Three reads above returned what this door wrote; a
+# read-back that returned the wanted string whatever it was asked would do the
+# same. This one asks for something that was never set and requires nothing back.
+got="$(read_identity "$GIT_PROBE_KEY")"
+if [ -z "$got" ]; then
+  ok "known-answer: ${GIT_PROBE_KEY} reads empty, so the three reads above are reads"
+else
+  bad "known-answer FAILED -- ${GIT_PROBE_KEY} returned '${got}' and nothing set it"
+fi
+
+# The config belongs to the person. A root-owned file in their home would carry
+# their identity until the first time they tried to change it.
+#
+# THE PATH IS ASKED FOR, NOT ASSUMED. git's global config is `~/.gitconfig` on a
+# fresh home and the XDG path on a home that already carries one, so a check
+# naming either filename reports a healthy claw as broken on the other. `git
+# config --show-origin` names the file the value actually came from, which is the
+# only thing worth checking the owner of.
+gitcfg="$(sudo -u "$PERSON" -H git config --global --show-origin --get user.email 2>/dev/null | head -1 || true)"
+gitcfg="${gitcfg%%$'\t'*}"; gitcfg="${gitcfg#file:}"
+if [ -n "$gitcfg" ] && [ -f "$gitcfg" ]; then
+  cfg_stat="$(stat -c '%U %a' "$gitcfg")"
+  case "$cfg_stat" in
+    "${PERSON} "*) ok "the identity comes from ${gitcfg}, which is ${PERSON}'s to write (${cfg_stat})" ;;
+    *) bad "${gitcfg} is ${cfg_stat} -- ${PERSON} cannot change their own identity" ;;
+  esac
+else
+  bad "git names no file as the source of ${PERSON}'s address"
+fi
+
+# --- the exclusion: an identity ABOVE the person would be everybody's ---
+#
+# One unix user per person and no shared accounts is the claw's rule, and a name
+# or address at the system level breaks it silently: every person on the box then
+# commits as one identity, and each of their own configs still reads correctly
+# when asked in isolation.
+sys_ident=""
+for k in user.name user.email; do
+  v="$(git config --system --get "$k" 2>/dev/null || true)"
+  [ -n "$v" ] && sys_ident="${sys_ident} ${k}=${v}"
+done
+if [ -z "$sys_ident" ]; then
+  ok "exclusion: no git identity at the system level, so nobody here commits as somebody else"
+else
+  bad "a system-wide git identity exists (${sys_ident# }) -- every person on this claw would commit as it"
+fi
+
 # --- the control that says what this door did NOT do ---
 #
 # A door that quietly granted access would pass every check above. These read
@@ -478,6 +792,82 @@ if [ "$mg_owns" = "${CLAW_BRIEFING} " ]; then
   ok "${MEMBERS_GROUP} owns one path where ownership grants anything: ${CLAW_BRIEFING}"
 else
   bad "${MEMBERS_GROUP} owns path(s) besides ${CLAW_BRIEFING} where the group is a grant: ${mg_owns}"
+fi
+
+# THE TWO GROUPS STAY TWO, and this is the reading that holds them apart. The
+# members group must not reach the token, and the credential group must not
+# reach anything else. Collapsing either into the other would put credential
+# read on everybody who can read the briefing, which is the single change that
+# would undo the point of a separate group.
+case "$mg_owns" in
+  *"${CC_AGENTS_TOKEN}"*) bad "${MEMBERS_GROUP} owns ${CC_AGENTS_TOKEN} -- that puts credential read on everybody who can read the briefing" ;;
+esac
+ac_owns="$(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \
+                     -o -path /tmp -o -path /var/tmp -o -path /home \) -prune \
+             -o -group "$CC_AGENTS_GROUP" -print 2>/dev/null | LC_ALL=C sort | tr '\n' ' ' || true)"
+case "$ac_owns" in
+  ""|"${CC_AGENTS_TOKEN} ") ok "${CC_AGENTS_GROUP} owns nothing but ${CC_AGENTS_TOKEN}: its one meaning is who reads the claw's agents token" ;;
+  *) bad "${CC_AGENTS_GROUP} owns path(s) besides ${CC_AGENTS_TOKEN}: ${ac_owns} -- that group means credential read and nothing else" ;;
+esac
+
+# --- the credential plane, measured rather than assumed ---
+#
+# THE GRANT IS READ BACK FROM THE CLAW'S OWN RECORD. A gpasswd call that ran is
+# not the same claim as a person who is in the group, and the difference is the
+# whole reason this is a separate step. This is the reading that stops somebody
+# arriving with an account and no credential read and nothing saying so.
+if [ "$AGENTS_CRED" -eq 1 ]; then
+  if cc_agents_reads "$PERSON"; then
+    ok "${PERSON} is in ${CC_AGENTS_GROUP}, read back from the claw's own group record"
+  else
+    bad "${PERSON} is NOT in ${CC_AGENTS_GROUP}. They have an account and can read no credential, which is the state this door exists to stop shipping."
+  fi
+
+  cc_agents_paths "$HOME_DIR"
+  plane_ok=1
+  d="$(stat -c '%a %U:%G' "$CC_AP_DIR" 2>/dev/null || echo missing)"
+  [ "$d" = "700 ${PERSON}:${PERSON}" ] || { bad "${CC_AP_DIR} is ${d}, wanted 700 ${PERSON}:${PERSON}"; plane_ok=0; }
+  e="$(stat -c '%a %U:%G' "$CC_AP_ENV" 2>/dev/null || echo missing)"
+  [ "$e" = "600 ${PERSON}:${PERSON}" ] || { bad "${CC_AP_ENV} is ${e}, wanted 600 ${PERSON}:${PERSON}"; plane_ok=0; }
+  cnt="$(grep -cxF "$CC_AP_HOOK" "${HOME_DIR}/.bashrc" 2>/dev/null || true)"
+  [ "$cnt" = "1" ] || { bad "${HOME_DIR}/.bashrc carries ${cnt} loader hooks, wanted exactly one"; plane_ok=0; }
+  [ "$plane_ok" -eq 1 ] && ok "the loader is there: 0700 directory, 0600 loader, exactly one hook in .bashrc"
+
+  # NO TOKEN IN THIS HOME, and this is a reading rather than a claim. The whole
+  # point of one file per claw is that no home holds the value, so a home that
+  # holds one is a claw that has not converged, or somebody who put a copy back.
+  if [ -e "$(cc_agents_legacy_token "$HOME_DIR")" ]; then
+    bad "$(cc_agents_legacy_token "$HOME_DIR") exists -- a per-home copy of the claw token. The token is ONE file at ${CC_AGENTS_TOKEN}; run install-agents-token.sh, which rotates and removes these together."
+  else
+    ok "no token rests in ${HOME_DIR}: the value is one file for the whole claw and this home holds none of it"
+  fi
+
+  # The loader carries a PATH and never a value, and this is the reading that
+  # says so. It is cheap, and what it catches is somebody editing a token into
+  # the file that every future run of this door would then copy forward.
+  if grep -q 'ops_' "$CC_AP_ENV" 2>/dev/null; then
+    bad "${CC_AP_ENV} carries what looks like a token value -- the loader names a PATH and never a value"
+  else
+    ok "the loader carries no credential value: it names the path and nothing else"
+  fi
+
+  case "$AGENTS_PLANE" in
+    wired) : ;;
+    *)     bad "${PERSON} has no loader at all" ;;
+  esac
+
+  # WHAT THE PERSON ACTUALLY RESOLVES, which is the group AND the claw's file
+  # together. A grant on a claw holding no token still resolves nothing, and
+  # this run says which of the two is missing rather than reporting a person
+  # finished and leaving them to find out.
+  CLAW_TOKEN="$(cc_agents_token_state)"
+  if [ "$CLAW_TOKEN" = "present" ] && cc_agents_reads "$PERSON"; then
+    ok "${PERSON} resolves op:// references from their next session: they are in ${CC_AGENTS_GROUP} and this claw holds a token"
+  elif [ "$CLAW_TOKEN" != "present" ]; then
+    bad "this claw holds NO token at ${CC_AGENTS_TOKEN}, so ${PERSON} resolves nothing however correct their groups are. That is a claw-level gap: run install-agents-token.sh once, and everybody here resolves."
+  fi
+else
+  warn "the credential-plane checks did NOT run: --no-agents-cred was passed. An unrun control is not a passed one, and ${PERSON} resolves nothing until somebody decides otherwise."
 fi
 
 case "$groups_text" in
@@ -517,5 +907,19 @@ say ""
 say "  Next: grant the workspaces this person needs (operations/lifecycle.md), and have"
 say "  them confirm the connection from their own machine. A group change takes effect on"
 say "  next login."
+say ""
+say "  Their commits will read ${FULL_NAME} <${EMAIL}>. That address reaches no mailbox;"
+say "  it is how git tells one person's work from another's. They can change it themselves"
+say "  and nothing here will overwrite it."
+if [ "$AGENTS_CRED" -eq 1 ] && [ "$(cc_agents_token_state)" != "present" ]; then
+  say ""
+  say "  NOBODY ON THIS CLAW RESOLVES CREDENTIALS YET: there is no token at ${CC_AGENTS_TOKEN}."
+  say "  It is one file for the whole claw, so this is done once and it covers everybody"
+  say "  in ${CC_AGENTS_GROUP}, including ${PERSON}:"
+  say ""
+  say "    (umask 077; op read \"op://<this claw>-agents/<this claw>-agents-broker-service-token/credential\" \\"
+  say "       > /run/user/\$(id -u)/commonclaw-agents-token)"
+  say "    sudo ${TOKEN_DOOR}"
+fi
 
 finish

@@ -32,6 +32,7 @@ Each workspace carries `.workspace.yaml` at its root. The manifest is what makes
 | `claw` | the claw it was created on |
 | `created` | the creation date |
 | `channel` | the chat channel bound to this workspace. Empty until somebody binds it. |
+| `runtimes` | the shared language runtimes this work needs, for example `[node-22]`. Empty declares nothing. |
 
 A directory under `/srv/workspaces` with no manifest is unfinished work. Report it; do not treat it as a workspace.
 
@@ -49,6 +50,16 @@ Bind a channel only when its members are the people you would hand this agent to
 | `.git/` | version control, initialized group-shared |
 
 **Never two copies of anything.** One instructions file, one skills directory. The other convention is a symlink to it. Two files drift into two briefings for one directory, and the drift is silent.
+
+## Language runtimes
+
+A runtime is installed once for the whole claw, under `/opt/commonclaw/runtimes`, and every member reaches the same copy. Declare what your work needs in the manifest's `runtimes` field; provisioning converges the machine to what the workspaces declare.
+
+Do not install a runtime into your home or into this workspace. A copy per person helps nobody else, and a copy per workspace is the same waste one directory down.
+
+**Your dependencies are still yours.** `node_modules`, `.venv`, lock files and any project-local toolchain stay inside the project that owns them. They change on your clock; the runtime changes on the machine's. The backup rail excludes the whole class, because it reproduces from what it was installed from.
+
+`/etc/commonclaw/runtimes.md` says how to declare one, what happens the first time a claw is asked for a runtime it has never seen, and why the version on PATH may not be the one a shell already open is using.
 
 ## Access
 
@@ -68,9 +79,35 @@ Resolve what you need from this claw's agents vault, at the moment you use it. C
 
 A connection service is the better shape where a claw has one. It holds a secret under its own service user and hands a calling agent a capability rather than the credential, so the value never enters your process. A claw may have none, and then `/srv/connections/` is empty. That is not a fault.
 
-## Working here
+## Git here
 
-Commit your work. The repository is shared with everyone in the group.
+A workspace is a git repository from the moment it is scaffolded, and the group shares it. What follows holds in every repository on this claw.
+
+**This claw is the system of record.** What is committed here is the work. A copy anywhere else is a mirror of this one.
+
+**Commit before you park.** A session that changed a workspace commits before it stops. Work left uncommitted is invisible to the next session, which cannot build on it and can destroy it without knowing it was there.
+
+**Batch.** One commit for one finished piece of work, not one commit per edit.
+
+**Stage hunks, not the tree.** `git add -A` on a shared tree picks up whatever another session left half-written. Read what you are about to commit, then stage the changes you made.
+
+**One worktree per concurrent editor.** Two sessions in one checkout collide on the index and on each other's unsaved files.
+
+**Never amend, and never force-push, anything another session may already hold.** Rewriting shared history is the one act here with no clean way back.
+
+**`main`, and branches that die young.** A branch that lives a long time diverges, and reconciling it costs more than the isolation bought.
+
+**The repository is local.** Do not add a remote. Whoever operates the claw decides that, one repository at a time, and writes the reason into the repository.
+
+### Who a commit is by
+
+A person commits as themselves. That identity is set when the account is made, so no session has to guess it.
+
+An agent commits as the seat it runs under and adds a `Co-Authored-By` trailer naming the model. The seat records which person is accountable. The trailer records that a model did the writing.
+
+Publishing to a remote is a third identity's job, and it never happens from a workspace.
+
+## Working here
 
 Put expertise in `.claude/skills/`, not in the briefing. Keep running state in `_workpapers/`.
 
