@@ -213,8 +213,58 @@ def fmt(m):
     return out
 
 
+def reject_flag_handle(handle):
+    """A handle beginning with a dash is a flag that reached the wrong argument.
+
+    Proven on this bus: a caller passed a flag the installed script did not
+    have, argparse could not claim it, and it registered as a handle and
+    started a live session under that name. Registration creates durable
+    state, so the refusal belongs here rather than downstream."""
+    if handle.startswith("-"):
+        print(f"REFUSED: '{handle}' begins with a dash, so it is a flag, not a handle.")
+        print(f"  Nothing was registered. This is what a flag the installed version "
+              f"does not have looks like when it reaches the handle argument. Check "
+              f"the version you are calling before renaming anything.")
+        sys.exit(1)
+
+
+def session_identity():
+    """The session this process is running inside, as it identifies itself.
+
+    Read from the environment for the same reason the pane is: the caller is the
+    session, so no lookup is more authoritative than what it was handed. The
+    names are a harness's, the way TMUX_PANE is a multiplexer's; a harness that
+    sets neither yields None and the handle simply carries no session.
+    """
+    pid = os.environ.get("CLAUDE_PID") or ""
+    return {
+        "session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+        "pid": int(pid) if pid.isdigit() else None,
+    }
+
+
+def pid_alive(pid):
+    """True, False, or None when there is no pid to ask about.
+
+    A permission error proves the process exists and belongs to somebody else,
+    which on a shared bus is the normal case and is not an absence.
+    """
+    if not pid:
+        return None
+    if os.path.isdir("/proc/%d" % pid):
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def cmd_init(a):
     ensure_dirs()
+    reject_flag_handle(a.handle)
     who = me()
     pane = a.pane or os.environ.get("TMUX_PANE", "")
     if pane == "-":
@@ -256,12 +306,23 @@ def cmd_init(a):
                     om["pane"] = ""
                     evicted.append(other)
 
+        # ── A HANDLE THAT DOES NOT CARRY ITS SESSION IS A NAME WITH NOTHING
+        # BEHIND IT. `bus init` runs inside the session it is registering, and
+        # that is the only moment the session's own identity is free: it is in
+        # the environment. Derived later it costs a transcript search, and a
+        # wrong answer sends a wake into somebody else's session, where both
+        # legs still look delivered. Absent values stay absent rather than
+        # guessed. A handle registered by hand, or under a harness that
+        # exports neither, records nothing and reads as unknown, never as gone.
+        ident = session_identity()
         h[a.handle] = {
             "pane": pane,
             "owner": who,
             "cwd": os.getcwd(),
             "role": a.role or "",
             "started": now_iso(),
+            "session": ident["session"],
+            "pid": ident["pid"],
         }
         write_handles(h)
 
@@ -350,12 +411,48 @@ def cmd_handles(a):
     for k, v in h.items():
         total = len(lines_of(INBOX / f"{k}.jsonl"))
         owner = f"owner={v.get('owner') or '?':10} " if shared else ""
-        print(f"{k:24}  unread={total - cursor_of(k):<3} total={total:<3} "
+        # A handle outlives its session and nothing in the bus notices, so the
+        # unread count on a dead handle is mail that will never be read by
+        # anyone. `?` is a handle registered before it recorded a session, or by
+        # a caller whose harness names itself differently; it is not a verdict.
+        live = {True: "live", False: "gone", None: "?"}[pid_alive(v.get("pid"))]
+        print(f"{k:24}  {live:4} unread={total - cursor_of(k):<3} total={total:<3} "
               f"{owner}pane={(v.get('pane') or '-'):11} role={v.get('role','')}")
 
 
 def cmd_pane(a):   # used by the push watcher to find a handle's tmux pane
     print(read_handles().get(a.handle, {}).get("pane", ""))
+
+
+def cmd_whois(a):
+    """The session behind a handle, so a wake can be aimed rather than guessed."""
+    v = read_handles().get(a.handle)
+    if v is None:
+        print(f"no handle '{a.handle}' on this bus")
+        sys.exit(1)
+    alive = pid_alive(v.get("pid"))
+    print(json.dumps({
+        "handle": a.handle,
+        "session": v.get("session"),
+        "pid": v.get("pid"),
+        "alive": alive,
+        "owner": v.get("owner"),
+        "cwd": v.get("cwd"),
+        "pane": v.get("pane") or None,
+        "role": v.get("role") or None,
+        "registered": v.get("started"),
+    }, indent=2))
+    # A handle registered before it carried a session, or by a caller whose
+    # harness exports no identity, cannot be resolved to one. Say so, rather
+    # than let an empty field read as a session that ended.
+    sys.stdout.flush()
+    if alive is None:
+        print("  note: this handle carries no session identity. It was registered "
+              "before the handle recorded one, or by a caller whose harness exports "
+              "none. Re-register it from inside its session to fix it.", file=sys.stderr)
+    # 0 the session is alive, 2 it is gone, 3 nothing was recorded to ask about.
+    # Unknown is its own answer: a gate that reads it as gone retires a live handle.
+    sys.exit({True: 0, False: 2, None: 3}[alive])
 
 
 def cmd_rotate(a): # hygiene: move already-read messages out so inboxes stay small
@@ -574,6 +671,9 @@ def main():
 
     s = sub.add_parser("pane", help="print a handle's tmux pane (used by the push watcher)")
     s.add_argument("handle"); s.set_defaults(func=cmd_pane)
+
+    s = sub.add_parser("whois", help="the session behind a handle: id, pid, whether it is alive")
+    s.add_argument("handle"); s.set_defaults(func=cmd_whois)
 
     s = sub.add_parser("rotate", help="move already-read messages out of MY inbox")
     s.add_argument("handle"); s.set_defaults(func=cmd_rotate)

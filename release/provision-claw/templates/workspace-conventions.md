@@ -49,6 +49,8 @@ Bind a channel only when its members are the people you would hand this agent to
 | `.venv/` | the virtual environment. Run python through `.venv/bin/python`. |
 | `.git/` | version control, initialized group-shared |
 
+This table describes a workspace root, and a git repository nested inside a workspace is a project that carries none of it.
+
 **Never two copies of anything.** One instructions file, one skills directory. The other convention is a symlink to it. Two files drift into two briefings for one directory, and the drift is silent.
 
 ## Language runtimes

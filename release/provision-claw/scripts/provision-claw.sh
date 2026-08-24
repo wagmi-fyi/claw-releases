@@ -57,6 +57,12 @@
 #   --release-class <c>    fix | feature | fix and feature | security fix |
 #                          security fix and feature. REQUIRED.
 #   --revision <rev>       the commit this run was staged from. REQUIRED.
+#   --wide-mode <on|off>   whether every member of this claw holds passwordless
+#                          root. THE BOX'S OWN CONFIG CARRIES IT: passing this
+#                          sets it, and a run that does not pass it keeps what
+#                          the claw already records. Absent from both is off,
+#                          which is the shipped default. A release ride passes
+#                          nothing, so it can never flip this switch either way.
 #   --only <phase>         run one phase
 #   --dry-run              print the plan, change nothing
 #
@@ -161,6 +167,11 @@
 #                    on disk, so the ordinary run fetches nothing. It never
 #                    removes a runtime a declaration has dropped: that is a
 #                    decision and it has its own door.
+#   19 wide mode     the drop-in is DERIVED from the recorded setting and
+#                    converges in both directions: on lays one fixed path, off
+#                    removes it. A hand-placed file carrying the same grant is
+#                    adopted and its bytes are not touched; one carrying a
+#                    different grant is converged and the old grant is named.
 #   18 authority     the registry is STATE and is seeded once, never rewritten:
 #                    it is the firm's own record of who may approve an act here,
 #                    and it moves only by somebody signing for the change. The
@@ -183,6 +194,12 @@ CLAW_ADMINS_ARG=""
 OWNER_ARG=""
 SKILLS_MANIFEST=""; SKILLS_ROOT=""
 ONLY=""; DRY_RUN=0
+
+# Wide mode as the CALLER asked for it, which is not the same thing as the
+# setting. Empty means the caller said nothing, and `wide_mode_resolve` below
+# turns that into whatever the claw already records.
+WIDE_MODE_ARG=""
+WIDE_MODE=""
 
 # The changelog entry's three fields. Required, because a run that can finish
 # without an entry is a run whose record depends on somebody remembering, and
@@ -272,6 +289,14 @@ while [ $# -gt 0 ]; do
     --release-notes)   RELEASE_NOTES="${2:-}"; shift 2 ;;
     --release-class)   RELEASE_CLASS="${2:-}"; shift 2 ;;
     --revision)        REVISION="${2:-}"; shift 2 ;;
+    # THE COUNT IS GUARDED BEFORE THE SHIFT, and this one flag is written that
+    # way deliberately. `VAR="${2:-}"; shift 2` with the flag typed last makes
+    # `shift 2` return non-zero, and `set -e` ends the run with nothing printed.
+    # Everywhere else that costs a usage message. Here it would end a run that
+    # was about to decide whether every member of this claw holds root, with no
+    # output saying why, so the newer doors' guard-then-exit-2 shape is used.
+    --wide-mode)   [ $# -ge 2 ] || { printf -- '--wide-mode needs a value: on or off\n' >&2; exit 2; }
+                   WIDE_MODE_ARG="$2"; shift 2 ;;
     --only)        ONLY="${2:-}"; shift 2 ;;
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)     usage ;;
@@ -387,7 +412,18 @@ GRANTED_SCRIPTS=("$GRANTED_SCAFFOLD" "$GRANTED_RETIRE" "$GRANTED_ONBOARD" "$GRAN
 DECOY_SCRIPT="${INSTALL_PREFIX}/scripts/provision-claw.sh"
 
 CLAW_ADMIN_GROUP="claw-admin"
-SUDOERS_DROPIN="/etc/sudoers.d/commonclaw-claw-admin"
+
+# WHERE EVERY GRANT ON THIS CLAW IS WRITTEN. Three files live here and each has
+# its own writer: the admin door's, the tenant doors', and wide mode's. Naming
+# the directory once is what lets an instrument drive any of them against a
+# scratch root without a shim in the code being measured.
+SUDOERS_DIR="/etc/sudoers.d"
+# The file that decides whether anything in that directory is read at all. A
+# drop-in in a directory sudoers does not include is a grant that is written and
+# inert, and the two are indistinguishable from the file itself, so every phase
+# that lays a drop-in reads this rather than assuming it.
+SUDOERS_MAIN="/etc/sudoers"
+SUDOERS_DROPIN="${SUDOERS_DIR}/commonclaw-claw-admin"
 
 # The authority registry: who may approve an act on this claw, and what they
 # have approved. Root-owned, world-readable, and edited only by the signed
@@ -414,7 +450,7 @@ AUTHORITY_DOORS="${AUTHORITY_ROOT}/doors"
 # file would be erased by the next release with nothing telling the firm. Two
 # files, two writers, and the tenant's is derived from the registry.
 TENANT_DOOR_ROOT="${OPT_ROOT}/tenant-doors"
-TENANT_SUDOERS="/etc/sudoers.d/commonclaw-tenant-doors"
+TENANT_SUDOERS="${SUDOERS_DIR}/commonclaw-tenant-doors"
 
 # WHICH WRAPPER, PINNED, and it is the same number `manage-claw-authority.sh`
 # carries. Both programs lay this one file into the door root, and each has to be
@@ -437,10 +473,22 @@ WRAPPER_SHA256="95a492ed7f583208f3f8c048865a8ce5cfe30db504a91711a37649759d3a6aa4
 # puts it out of reach of every session on the claw, and the file is those
 # sessions' own working substrate.
 #
-# IT CARRIES NO PRIVILEGE. No sudoers file names it and it owns exactly one
-# path, which phase 8 proves rather than states. A group that owns one file
-# carries what that file carries.
+# WHAT IT CARRIES DEPENDS ON WIDE MODE, and on nothing else. With wide mode off
+# it carries no privilege at all: no sudoers file names it and it owns exactly
+# one path, which phase 8 proves rather than states. With wide mode on, phase 19
+# writes the ONE file that names it, and phase 8 still refuses every other one.
+# A group that owns one file carries what that file carries.
 MEMBERS_GROUP="claw-members"
+
+# WIDE MODE'S DROP-IN. One fixed name, so turning the switch on and off is
+# idempotent in both directions: the phase either lays this path or removes it,
+# and it can never leave two grants behind under two spellings.
+#
+# A SEPARATE FILE FROM THE OTHER TWO. The admin drop-in grants named scripts to
+# a role most members never hold, and the tenant one is derived from signed
+# approvals. This grants everything to everybody. Three different authorities,
+# three files, so removing one can never disturb another.
+WIDE_SUDOERS="${SUDOERS_DIR}/commonclaw-wide-mode"
 
 # The claw-wide briefing. One file for the whole claw, beside the workspaces
 # rather than inside any of them, with the other core's convention symlinked at
@@ -888,6 +936,81 @@ identity_guard() {
   fi
 }
 
+# ---------------------------------------------------------------- wide mode
+
+# WHETHER EVERY MEMBER OF THIS CLAW HOLDS PASSWORDLESS ROOT.
+#
+# Wide mode is a decision about the machine, so it is recorded on the machine.
+# The resolution has three inputs and one order:
+#
+#   the flag        a caller who passes --wide-mode sets it, and that is the
+#                   only way it moves.
+#   the config      a caller who passes nothing keeps what the claw records.
+#   absent          off. A claw that has never been told is a claw with the
+#                   shipped default, and the shipped default is off.
+#
+# THE CARRY-FORWARD IS THE LOAD-BEARING HALF. A release ride re-runs this script
+# with the arguments the updater composes out of provision.conf, and that set
+# does not include this flag. Without the carry-forward the first release to
+# reach a wide-open claw would silently take root away from every member on it,
+# and the run would report itself green while doing so. With it, a ride cannot
+# move this switch in either direction: only an operator naming it can.
+#
+# A VALUE NEITHER on NOR off ENDS THE RUN. Guessing is not available here. Read
+# as off it takes root away from a box that meant to have it; read as on it
+# hands root to everybody on a box that did not. Both are silent, and both are
+# the reassuring answer. So a typo in the file or on the command line stops the
+# run before any phase, and names where the bad value came from.
+wide_mode_resolve() {
+  head1 "0" "wide mode"
+
+  local recorded; recorded="$(conf_value WIDE_MODE)"
+
+  if [ -n "$WIDE_MODE_ARG" ]; then
+    case "$WIDE_MODE_ARG" in
+      on|off) WIDE_MODE="$WIDE_MODE_ARG" ;;
+      *) say "--wide-mode must be on or off (got '${WIDE_MODE_ARG}')"; exit 2 ;;
+    esac
+    if [ -z "$recorded" ]; then
+      say "  wide mode set to ${WIDE_MODE} by this run; this claw recorded nothing before it"
+    elif [ "$recorded" = "$WIDE_MODE" ]; then
+      say "  wide mode set to ${WIDE_MODE} by this run, which is what this claw already recorded"
+    else
+      warn "wide mode MOVED from ${recorded} to ${WIDE_MODE} by this run's --wide-mode. Turning it on gives every member of ${MEMBERS_GROUP} passwordless root here; turning it off takes it from all of them."
+    fi
+    return 0
+  fi
+
+  case "$recorded" in
+    on|off) WIDE_MODE="$recorded"
+            say "  wide mode is ${WIDE_MODE}, carried forward from ${CONF}; this run passed no --wide-mode" ;;
+    "")     WIDE_MODE="off"
+            say "  wide mode is off: ${CONF} records none, and absent is off" ;;
+    *)      say "${CONF} records WIDE_MODE='${recorded}', which is neither on nor off."
+            say "REFUSED before anything was changed. No phase has run."
+            say "Fix that line by hand, or pass --wide-mode explicitly."
+            exit 2 ;;
+  esac
+}
+
+# The effective grant a sudoers file carries: whole-line comments and blank
+# lines dropped, runs of whitespace collapsed to one space.
+#
+# WHY NOT A BYTE COMPARISON. Adoption has to answer "does this file already
+# grant what wide mode grants", and a hand-placed drop-in is one line somebody
+# typed, never this script's comment block. Compared byte for byte every
+# hand-placed file diverges, so every claw that was opened by hand would be
+# rewritten and reported as converged, and the adoption branch would be
+# unreachable. The grant is what the file DOES, so the grant is what is compared.
+#
+# A trailing `#` is not treated as a comment start. sudoers reads `#1000` as a
+# uid, so stripping from the first `#` on a line would mangle a grant rather
+# than normalize it.
+sudoers_grant_lines() {
+  sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' "$1" 2>/dev/null \
+    | grep -v '^#' | grep -v '^$' || true
+}
+
 # ---------------------------------------------------------------- digests
 #
 # ONE COPY, beside this file. The updater digests a fetched release with the
@@ -1266,6 +1389,12 @@ TIMEZONE=${TIMEZONE}
 B2_BUCKET=${B2_BUCKET}
 S3_ENDPOINT=${S3_ENDPOINT}
 CRED_DIR=${CRED_DIR}
+# WIDE_MODE  on|off. On gives every member of ${MEMBERS_GROUP} passwordless root
+#            here; it is for the current early set of claws only, it must be off
+#            before this plane reaches any box beyond them, and the shipped
+#            default is off. A run that passes no --wide-mode keeps this value,
+#            so a release ride cannot move it.
+WIDE_MODE=${WIDE_MODE}
 CONFEOF
     chmod 0644 "$CONF"
   fi
@@ -1275,6 +1404,13 @@ CONFEOF
   # this config is the only place the destination is written down, and nobody
   # checking backup.env for it will ever find it.
   check "config records B2_BUCKET as ${B2_BUCKET}" conf_says B2_BUCKET "$B2_BUCKET"
+
+  # THE SAME READ-BACK ON THE SWITCH, and it earns it for the same reason the
+  # bucket does. This file is the only place wide mode is written down, and it is
+  # what the NEXT run reads to decide whether every member keeps root. A value
+  # that failed to land here reads as a claw that was never told, which is the
+  # quiet answer and the wrong one.
+  check "config records WIDE_MODE as ${WIDE_MODE}" conf_says WIDE_MODE "$WIDE_MODE"
 
   # The read-back is only worth having if it can refuse. Ask it for a value the
   # config does not hold and require a NO.
@@ -2084,12 +2220,29 @@ phase_8_users() {
   # without this the run dies at the exact moment the group is clean and writes
   # zero bytes of JSON. Measured on staging, not reasoned: this check's pass
   # branch was the unreachable one.
-  local grants owned
-  grants="$(grep -rlsF "$MEMBERS_GROUP" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | LC_ALL=C sort | tr '\n' ' ' || true)"
-  if [ -z "$grants" ]; then
-    ok "no sudoers file names ${MEMBERS_GROUP}: the group carries no grant"
+  #
+  # WIDE MODE MOVES WHAT THIS READING EXPECTS AND DOES NOT SUSPEND IT. With the
+  # switch on, ONE file may name the group and it is the one phase 19 owns. Every
+  # other file naming it is still a failure, so a grant somebody wrote into a
+  # second drop-in is still found on a wide-open claw. A control that went quiet
+  # whenever wide mode was on would be a control that measures nothing on all
+  # five of the claws this ruling is for.
+  local grants owned other
+  grants="$(grep -rlsF "$MEMBERS_GROUP" "$SUDOERS_MAIN" "${SUDOERS_DIR}/" 2>/dev/null | LC_ALL=C sort || true)"
+  if [ "$WIDE_MODE" = "on" ]; then
+    other="$(printf '%s\n' "$grants" | grep -v '^$' | grep -vxF "$WIDE_SUDOERS" | tr '\n' ' ' || true)"
+    if [ -z "$other" ]; then
+      ok "wide mode is on, and ${WIDE_SUDOERS} is the ONLY sudoers file naming ${MEMBERS_GROUP}"
+    else
+      bad "wide mode is on, and sudoers file(s) OTHER than ${WIDE_SUDOERS} name ${MEMBERS_GROUP}: ${other} -- wide mode grants through one file and nothing else may"
+    fi
   else
-    bad "sudoers file(s) name ${MEMBERS_GROUP}: ${grants} -- a group everybody is in must carry no grant"
+    grants="$(printf '%s' "$grants" | tr '\n' ' ')"
+    if [ -z "${grants// /}" ]; then
+      ok "no sudoers file names ${MEMBERS_GROUP}: the group carries no grant"
+    else
+      bad "sudoers file(s) name ${MEMBERS_GROUP}: ${grants} -- with wide mode off, a group everybody is in must carry no grant"
+    fi
   fi
 
   # WHERE OWNERSHIP IS A GRANT, and nowhere else. The pruned trees are pruned
@@ -2808,10 +2961,10 @@ SUDOEOF
 
   # A drop-in is inert unless sudoers includes the directory. Debian ships the
   # line; a claw is not a claim.
-  local sudoers_text; sudoers_text="$(cat /etc/sudoers 2>/dev/null || true)"
+  local sudoers_text; sudoers_text="$(cat "$SUDOERS_MAIN" 2>/dev/null || true)"
   case "$sudoers_text" in
-    *"includedir /etc/sudoers.d"*) ok "sudoers includes the drop-in directory" ;;
-    *) bad "sudoers carries no includedir for /etc/sudoers.d -- the grant is written and inert" ;;
+    *"includedir ${SUDOERS_DIR}"*) ok "sudoers includes the drop-in directory" ;;
+    *) bad "sudoers carries no includedir for ${SUDOERS_DIR} -- the grant is written and inert" ;;
   esac
 
   # ---- the exactly-scoped control ----
@@ -3779,7 +3932,7 @@ phase_18_authority() {
   # The claim, measured rather than asserted: the drafting program is in no
   # sudoers file on this claw. It is the one control that says an agent's reach
   # stops at a request.
-  if grep -rsqF "${CLAW_BIN}/claw-authority" /etc/sudoers /etc/sudoers.d/ 2>/dev/null; then
+  if grep -rsqF "${CLAW_BIN}/claw-authority" "$SUDOERS_MAIN" "${SUDOERS_DIR}/" 2>/dev/null; then
     bad "a sudoers file names ${CLAW_BIN}/claw-authority -- the drafting program must carry no grant, because an agent runs it"
   else
     ok "no sudoers file names the drafting program: composing a request reaches no privilege"
@@ -4091,6 +4244,142 @@ phase_18_authority() {
   fi
 }
 
+# ---------------------------------------------------------------- phase 19
+
+# WIDE MODE, AND THE ONE FILE IT OWNS.
+#
+# The setting is the truth and this drop-in is derived from it, which is what
+# makes the switch idempotent in both directions. On lays one fixed path; off
+# removes that same path. There is no second spelling for either state, so no
+# run can leave a grant behind under a name the next run does not look for.
+#
+# WHAT IT GRANTS, AND WHY IT IS NOT NARROWER. Every member of the members group,
+# any command, no password. A narrower grant would be a list of the repairs
+# somebody thought of in advance, and the whole point of the ruling is that an
+# agent on one of these boxes can repair a wall nobody predicted. A list that
+# has to be edited to cover the next wall is the wall.
+#
+# THE CONTROL PHASE 8 RUNS IS NOT SUSPENDED BY THIS. With wide mode on, exactly
+# ONE sudoers file may name the members group and it is this one. Every other
+# file naming it is still a failure, so a hand-written grant somebody left in a
+# second file is still found, and wide mode never becomes a blanket excuse.
+phase_19_wide_mode() {
+  head1 19 "wide mode: whether every member holds passwordless root here"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$WIDE_MODE" = "on" ]; then
+      say "  would lay ${WIDE_SUDOERS} 0440 root:root granting %${MEMBERS_GROUP} NOPASSWD:ALL, after visudo -c passes on it"
+    else
+      say "  would remove ${WIDE_SUDOERS} if this claw carries one"
+    fi
+    return 0
+  fi
+
+  # ---- off: the file goes, and its absence is the end state ----
+  #
+  # NO GROUP CHECK ON THIS LEG. Removing a grant must work on a claw whose
+  # members group somebody has already taken away, which is exactly the claw
+  # where a leftover grant would be most surprising.
+  if [ "$WIDE_MODE" != "on" ]; then
+    if [ -e "$WIDE_SUDOERS" ]; then
+      rm -f "$WIDE_SUDOERS"
+      warn "wide mode is off and this claw was carrying ${WIDE_SUDOERS}. It has been removed, so no member of ${MEMBERS_GROUP} holds passwordless root here any more."
+    else
+      ok "wide mode is off and ${WIDE_SUDOERS} is absent, so this group carries no grant"
+    fi
+    check "${WIDE_SUDOERS} is absent" bash -c "[ ! -e '$WIDE_SUDOERS' ]"
+    return 0
+  fi
+
+  # ---- on ----
+  #
+  # A GRANT ONTO A GROUP THAT DOES NOT EXIST IS A GRANT ONTO NOBODY, and sudo
+  # says nothing about it: `visudo -c` parses the syntax and resolves no names.
+  # So the group is read here rather than assumed, and its absence is a refusal
+  # instead of a file that looks installed and opens for no one.
+  if ! getent group "$MEMBERS_GROUP" >/dev/null 2>&1; then
+    bad "wide mode is on and there is no ${MEMBERS_GROUP} group on this claw, so the grant would name nobody -- phase 8 makes that group"
+    return 0
+  fi
+
+  local want; want="$(mktemp)"
+  cat > "$want" <<WIDEEOF
+# Managed by provision-claw.sh. Do not edit on the claw.
+#
+# WIDE MODE IS ON HERE. Every member of ${MEMBERS_GROUP} holds passwordless root
+# on this claw, so an agent in a member's own session can repair the machine it
+# is working on without waiting for a person.
+#
+# This is for the current early set of claws only. It must be off before this
+# plane reaches any box beyond them, and the shipped default is off.
+#
+# THIS FILE IS DERIVED FROM A SETTING, and the setting is WIDE_MODE in
+# ${CONF}. Deleting this by hand closes the grant until the
+# next provisioning run, which puts it back. Closing it for good is a run with
+# --wide-mode off.
+%${MEMBERS_GROUP} ALL=(ALL) NOPASSWD: ALL
+WIDEEOF
+
+  # THE PARSE HAPPENS WHILE NOTHING HAS BEEN LAID. A malformed file under
+  # /etc/sudoers.d breaks sudo for every caller on the claw at once, including
+  # whoever holds the only door out. So the temporary file is judged first, and
+  # a failure leaves this claw's grant exactly as the last run left it.
+  if ! visudo -cf "$want" >/dev/null 2>&1; then
+    bad "the wide-mode grant FAILED visudo -- NOT installed, and this claw's wide-mode grant is as the last run left it"
+    visudo -cf "$want" 2>&1 | sed 's/^/    /' >&2 || true
+    rm -f "$want"
+    return 0
+  fi
+  ok "the wide-mode grant parses under visudo before anything is laid"
+
+  # THREE STATES, THREE SENTENCES, which is the reading Q62 requires. Without it
+  # a run that adopted a claw somebody had already opened by hand and a run that
+  # rewrote one somebody had opened DIFFERENTLY print the same words, and the
+  # operator who has to know which cannot tell.
+  local before_grant="" want_grant
+  want_grant="$(sudoers_grant_lines "$want")"
+  if [ -e "$WIDE_SUDOERS" ]; then
+    before_grant="$(sudoers_grant_lines "$WIDE_SUDOERS")"
+  fi
+
+  if [ ! -e "$WIDE_SUDOERS" ]; then
+    install -m 0440 -o root -g root "$want" "$WIDE_SUDOERS"
+    say "  ${WIDE_SUDOERS} created: every member of ${MEMBERS_GROUP} now holds passwordless root here"
+  elif [ "$before_grant" = "$want_grant" ]; then
+    # ADOPTED, AND ITS BYTES ARE NOT TOUCHED. Somebody opened this claw by hand
+    # and wrote the same grant. Rewriting it would change nothing about what the
+    # claw permits and would destroy whatever they wrote around it.
+    say "  ${WIDE_SUDOERS} already grants exactly this and was adopted unchanged"
+  else
+    install -m 0440 -o root -g root "$want" "$WIDE_SUDOERS"
+    warn "${WIDE_SUDOERS} carried a DIFFERENT grant and has been converged. What it held: $(printf '%s' "$before_grant" | tr '\n' '; ')"
+  fi
+  rm -f "$want"
+
+  # The mode and the owner converge on every leg, adoption included. A file
+  # anybody but root can write is a file anybody but root can widen, and a
+  # hand-placed grant is exactly the one likely to have been left at 0644.
+  chmod 0440 "$WIDE_SUDOERS"
+  chown root:root "$WIDE_SUDOERS"
+
+  check "${WIDE_SUDOERS} is 0440 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$WIDE_SUDOERS')\" = '440 root:root' ]"
+  check "the installed file carries the grant this run meant" \
+    bash -c "grep -qxF '%${MEMBERS_GROUP} ALL=(ALL) NOPASSWD: ALL' '$WIDE_SUDOERS'"
+  check "the installed file parses under visudo" visudo -cf "$WIDE_SUDOERS"
+
+  # A drop-in is inert unless sudoers includes the directory. The admin door
+  # reads this too, and both read it rather than assuming it: a claw is not a
+  # claim.
+  local sudoers_text; sudoers_text="$(cat "$SUDOERS_MAIN" 2>/dev/null || true)"
+  case "$sudoers_text" in
+    *"includedir ${SUDOERS_DIR}"*) ok "sudoers includes ${SUDOERS_DIR}, so this grant is live rather than written and inert" ;;
+    *) bad "sudoers carries no includedir for ${SUDOERS_DIR} -- the wide-mode grant is written and inert" ;;
+  esac
+
+  human "wide mode is ON here. It is for the current early set of claws only, and it must be off before this plane reaches any box beyond them."
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -4112,6 +4401,13 @@ phase_1_preflight
 # A guard a single argument can step around is not a guard.
 identity_guard
 
+# ABOVE THE PHASE GATE FOR THE SAME REASON. Phase 2 writes the setting into the
+# config, phase 8 measures what the members group is allowed to carry, and phase
+# 19 lays or removes the grant. All three need the same answer, so it is
+# resolved once, before any of them, and `--only` cannot reach a phase that
+# would have to guess.
+wide_mode_resolve
+
 if want_phase 2;  then phase_2_box_identity; fi
 if want_phase 3;  then phase_3_packages;     fi
 if want_phase 4;  then phase_4_auto_upgrades;fi
@@ -4129,6 +4425,7 @@ if want_phase 15; then phase_15_release_rail; fi
 if want_phase 16; then phase_16_session_bus;  fi
 if want_phase 17; then phase_17_runtimes;     fi
 if want_phase 18; then phase_18_authority;    fi
+if want_phase 19; then phase_19_wide_mode;   fi
 
 # ---------------------------------------------------------------- the record
 #
