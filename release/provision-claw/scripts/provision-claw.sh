@@ -2212,14 +2212,19 @@ phase_8_users() {
   # WHAT THE MEMBERS GROUP DOES NOT CARRY, measured rather than asserted.
   #
   # Everybody on the claw is in this group, so anything it reached would be
-  # reached by everybody. Two readings say it reaches one file and nothing else.
-  # Both fail branches are reachable: a sudoers file naming the group trips the
-  # first, and any second path group-owned by it trips the second.
-  # `|| true` on both, and it is not decoration. Under `set -e` with `pipefail` a
-  # grep that matches NOTHING exits 1, and that is the PASSING world here, so
-  # without this the run dies at the exact moment the group is clean and writes
-  # zero bytes of JSON. Measured on staging, not reasoned: this check's pass
-  # branch was the unreachable one.
+  # reached by everybody. Two readings say it carries no grant and owns only
+  # what this release declares. Both fail branches are reachable: a sudoers file
+  # naming the group trips the first, and any UNDECLARED group-owned path trips
+  # the second.
+  #
+  # `|| true` on the first reading, and it is not decoration. Under `set -e`
+  # with `pipefail` a grep that matches NOTHING exits 1, and that is the PASSING
+  # world here, so without it the run dies at the exact moment the group is
+  # clean and writes zero bytes of JSON. Measured on staging, not reasoned: that
+  # check's pass branch was the unreachable one. The second reading needs no
+  # such guard: its `find` sits in a process substitution whose exit status the
+  # `while` never consumes, so a permission-denied walk cannot kill the run
+  # either.
   #
   # WIDE MODE MOVES WHAT THIS READING EXPECTS AND DOES NOT SUSPEND IT. With the
   # switch on, ONE file may name the group and it is the one phase 19 owns. Every
@@ -2227,7 +2232,7 @@ phase_8_users() {
   # second drop-in is still found on a wide-open claw. A control that went quiet
   # whenever wide mode was on would be a control that measures nothing on all
   # five of the claws this ruling is for.
-  local grants owned other
+  local grants other
   grants="$(grep -rlsF "$MEMBERS_GROUP" "$SUDOERS_MAIN" "${SUDOERS_DIR}/" 2>/dev/null | LC_ALL=C sort || true)"
   if [ "$WIDE_MODE" = "on" ]; then
     other="$(printf '%s\n' "$grants" | grep -v '^$' | grep -vxF "$WIDE_SUDOERS" | tr '\n' ' ' || true)"
@@ -2266,13 +2271,61 @@ phase_8_users() {
   # covering a top-level directory somebody adds later. The exclusions are the
   # trees where the property provably does not hold, so everything else stays in
   # scope by default.
-  owned="$(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \
+  #
+  # WHAT THE RELEASE DECLARES THIS GROUP MAY OWN. Two entries, and the check
+  # compares against them rather than against one hardcoded path:
+  #   ${CLAW_BRIEFING}   one file, laid 0664 root:${MEMBERS_GROUP} by phase 7.
+  #   ${BUS_HOME}        the shared bus, laid 2770 setgid root:${MEMBERS_GROUP}
+  #                      by phase 16, AND EVERYTHING UNDER IT.
+  #
+  # WHY THIS CHANGED. The earlier form asserted the group owned EXACTLY ONE path
+  # anywhere. Phase 16 of the same release creates the bus group-owned, and
+  # phase 8 runs before phase 16, so a first apply passed on a box with no bus
+  # yet and every apply after it failed on the bus the previous run left. That
+  # is not the group reaching something it should not. It is the release's own
+  # artifact, working as designed, measured by a check whose premise stopped
+  # being true when the bus shipped.
+  #
+  # THE BUS IS A TREE AND NOT A PATH, and that is not a convenience. The home is
+  # setgid, so every file written there carries the group by design, and the set
+  # GROWS WITH TRAFFIC: one cursor and one inbox per handle that ever registers,
+  # plus the board, the lock and the log. A declaration naming the directory
+  # alone would pass provisioning and go red at the first `bus init`.
+  #
+  # ACCEPTING THE SUBTREE GRANTS NOTHING THE DIRECTORY DOES NOT ALREADY GRANT.
+  # ${BUS_HOME} is 2770 and group-writable, so a member already creates, reads
+  # and removes files under it. This is the same reasoning the /tmp exclusion
+  # above rests on, applied to a directory this release lays on purpose.
+  #
+  # DECLARED, NOT PRUNED, and the difference is the whole point. Pruning
+  # ${STATE_ROOT} would stop sweeping a tree where the property still matters: a
+  # group-owned file sitting BESIDE the bus under ${STATE_ROOT} is exactly the
+  # quiet grant this check exists to find, and it is still found. Only the bus
+  # subtree is forgiven, and only because the release lays it.
+  #
+  # ONE-DIRECTIONAL, deliberately. A declared path that is ABSENT is not a
+  # failure here. Phase 8 runs before phase 16, so on a first build the bus does
+  # not exist and the briefing is all there is. The property this check defends
+  # is that nothing UNDECLARED carries the group, and an absence cannot violate
+  # it. Each declared path's own existence and mode is checked by the phase that
+  # lays it, which is where that check belongs.
+  #
+  # NO REGEX ON A PATH. The declared entries are matched with `case` against
+  # quoted variables, which compares literally. A grep -v of "^${BUS_HOME}/"
+  # would treat the path as a pattern, and a declared path is data.
+  local undeclared="" swept=""
+  while IFS= read -r swept; do
+    case "$swept" in
+      "$CLAW_BRIEFING"|"$BUS_HOME"|"$BUS_HOME"/*) continue ;;
+    esac
+    undeclared="${undeclared}${swept} "
+  done < <(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \
                      -o -path /tmp -o -path /var/tmp -o -path /home \) -prune \
-             -o -group "$MEMBERS_GROUP" -print 2>/dev/null | LC_ALL=C sort | tr '\n' ' ' || true)"
-  if [ "$owned" = "${CLAW_BRIEFING} " ]; then
-    ok "${MEMBERS_GROUP} owns one path where ownership grants anything: ${CLAW_BRIEFING}"
+             -o -group "$MEMBERS_GROUP" -print 2>/dev/null | LC_ALL=C sort)
+  if [ -z "${undeclared// /}" ]; then
+    ok "${MEMBERS_GROUP} owns only what this release declares: ${CLAW_BRIEFING}, and ${BUS_HOME} with its contents"
   else
-    bad "${MEMBERS_GROUP} owns path(s) besides ${CLAW_BRIEFING} where the group is a grant: ${owned}"
+    bad "${MEMBERS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${undeclared}-- declared: ${CLAW_BRIEFING} and the ${BUS_HOME} tree"
   fi
 
   human "each person completes their own core logins in their own home"
