@@ -107,12 +107,31 @@ done
 [ -r "${PAYLOAD_DIR}/doc/operator-runbook.md" ] || bad "no ${PAYLOAD_DIR}/doc/operator-runbook.md — this script owns the claw's copy of it"
 [ "$FAILED" = 0 ] || { printf '{"ok":false,"stage":"payload"}\n'; exit 1; }
 
+# WHAT THE RAIL RUNS RIGHT NOW, digested before the copy and again after it.
+# An instance holds the program it started with. Replacing the file underneath a
+# running unit changes nothing about the process, so a fix that ships in the
+# payload installs, verifies, and does not run. Measured on staging 2026-09-02:
+# one instance held its pid across two applies while the program moved twice.
+# The digest covers the program and every adapter, because the program loads an
+# adapter at delivery and a corrected adapter is as invisible as a corrected
+# core.
+rail_digest() {
+  {
+    [ -r "${BIN_DIR}/bus-nudge" ] && sha256sum "${BIN_DIR}/bus-nudge"
+    [ -d "${BIN_DIR}/bus-nudge-adapters" ] && find "${BIN_DIR}/bus-nudge-adapters" -type f -print0 \
+      | sort -z | xargs -0 -r sha256sum
+  } 2>/dev/null | sha256sum | cut -c1-16
+}
+RAIL_BEFORE=""; RAIL_AFTER=""
+
 if [ "$MODE" != dry-run ]; then
+  RAIL_BEFORE="$(rail_digest)"
   install -d -m 0755 -o root -g root "$BIN_DIR" "$DOC_DIR" "${BIN_DIR}/bus-nudge-adapters" /etc/commonclaw
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus-nudge" "${BIN_DIR}/bus-nudge"
   for f in "${PAYLOAD_DIR}"/bus-nudge-adapters/*; do
     install -m 0755 -o root -g root "$f" "${BIN_DIR}/bus-nudge-adapters/$(basename "$f")"
   done
+  RAIL_AFTER="$(rail_digest)"
   check "${BIN_DIR}/bus-nudge is 0755 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '${BIN_DIR}/bus-nudge')\" = '755 root:root' ]"
   check "the delivered sentence carries no interpolation but the bus directory" \
@@ -306,7 +325,7 @@ done
 
 # ------------------------------------------------------- one instance per head
 STARTED=()
-state=""; restarts=""
+state=""; restarts=""; was_active=""
 for a in "${ACCOUNTS[@]}"; do
   if [ "$MODE" = dry-run ]; then ok "${DRY}enable and start bus-nudge@${a}"; continue; fi
 
@@ -316,8 +335,18 @@ for a in "${ACCOUNTS[@]}"; do
     warn "bus-nudge@${a}.service is deliberately disabled and was left off"
     continue
   fi
+  # AN INSTANCE ALREADY RUNNING KEEPS THE PROGRAM IT STARTED WITH, and
+  # `enable --now` leaves a running unit alone. So the state is read before the
+  # enable, and an instance that was already up is restarted onto the new bytes
+  # when the digest above moved. An instance that was down is started by the
+  # enable, on the new bytes already, and is never restarted a second time.
+  was_active="$(systemctl is-active "bus-nudge@${a}.service" 2>/dev/null || true)"
   systemctl enable --now "bus-nudge@${a}.service" >/dev/null 2>&1
   systemctl enable --now "bus-nudge@${a}.timer"   >/dev/null 2>&1
+  if [ "$RAIL_BEFORE" != "$RAIL_AFTER" ] && [ "$was_active" = active ]; then
+    systemctl restart "bus-nudge@${a}.service" >/dev/null 2>&1
+    warn "bus-nudge@${a}.service was running the rail at ${RAIL_BEFORE} and this run installed ${RAIL_AFTER}, so it was restarted onto the new bytes"
+  fi
 
   # WHAT THIS COUNTS IS INSTALLED AND ENABLED, NEVER RUNNING.
   #

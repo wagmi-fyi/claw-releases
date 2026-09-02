@@ -92,7 +92,13 @@ def law_fields():
 # environment. Firm is the machine conf. Core is the shipped default, which for
 # the adapter means detection. Nothing left to resolve is an error, never a
 # guess.
-CONF = os.environ.get("BUS_NUDGE_CONF", "/etc/bus-nudge.conf")
+#
+# THE DEFAULT IS THE PATH THE INSTALLER WRITES. The two have to name one file,
+# or a machine's own ruling reaches nothing and the rail runs on the shipped
+# defaults while a conf sits beside it saying otherwise. The answer lives here
+# rather than in the unit file, so a hand run of this program reads the file the
+# service reads. BUS_NUDGE_CONF is the override.
+CONF = os.environ.get("BUS_NUDGE_CONF", "/etc/commonclaw/bus-nudge.conf")
 DEFAULTS = {
     "ENABLED": "yes",
     "ADAPTER": "",
