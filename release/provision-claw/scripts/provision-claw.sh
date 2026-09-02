@@ -63,6 +63,15 @@
 #                          the claw already records. Absent from both is off,
 #                          which is the shipped default. A release ride passes
 #                          nothing, so it can never flip this switch either way.
+#   --delegate-model <m>   which model a spawned orchestration delegate runs on
+#                          this claw. Seeded into /etc/orchestrate.conf on the
+#                          run that creates it and adopted afterwards, so a firm
+#                          that changed it keeps its choice.
+#   --delegate-skip-permissions <true|false>
+#                          whether a spawned delegate runs with permission
+#                          prompts bypassed. Same seeding rule. It is a security
+#                          bypass, so it is stated in the conf rather than
+#                          inherited from whatever a session last saved.
 #   --only <phase>         run one phase
 #   --dry-run              print the plan, change nothing
 #
@@ -95,8 +104,13 @@
 # source the one substitution rule from render-template.sh beside them;
 # phase 11 and 12 install commonclaw-backup.sh and commonclaw-seat-check.sh from
 # beside this file; phase 13 installs every script beside this one into the
-# granted prefix, and grants the four it names. Copy the whole skill directory
-# to the claw. A missing sibling fails the run rather than being skipped.
+# granted prefix, and grants the four it names; phase 21 installs
+# commonclaw-memory-check.sh from beside this file and its unit and timer from
+# ../templates; phase 22 installs commonclaw-notify.sh; phase 23 installs
+# commonclaw-stall-check.sh with its conf and two units from ../templates; and
+# phase 24 runs install-bus-nudge.sh, which reads ../payload and ../templates
+# for itself. Copy the whole skill directory to the claw. A missing sibling
+# fails the run rather than being skipped.
 #
 # IDEMPOTENCY. Safe to re-run; reasoned per phase:
 #   1  preflight     read-only.
@@ -172,6 +186,32 @@
 #                    removes it. A hand-placed file carrying the same grant is
 #                    adopted and its bytes are not touched; one carrying a
 #                    different grant is converged and the old grant is named.
+#   20 memory floor  the swapfile is made ONCE and adopted forever after: active
+#                    swap is taken as it stands whatever its size, because
+#                    resizing means swapoff and that is the one act that could
+#                    finish off a box already under pressure. The fstab line is
+#                    guarded on the path, never doubled. The swappiness drop-in
+#                    and the OOM guard's enablement are end states.
+#   21 memory rail   the script, the conf, the env file, the unit and the timer
+#                    are written to an end state. The conf and the env file carry
+#                    a threshold and a reference, which are the release's
+#                    decision rather than the claw's accumulated state, so a
+#                    re-run rewrites them. NO CREDENTIAL VALUE: the heartbeat URL
+#                    is a reference resolved at invocation.
+#   22 notify rail   the notifier, the conf and the env file are written to an
+#                    end state, and a copy already on the claw is ADOPTED when
+#                    its bytes match and REPLACED with the old digest named when
+#                    they differ. NO CREDENTIAL VALUE: the webhook is a
+#                    reference resolved at invocation.
+#   23 stall check    the script, its conf and its two units take the same
+#                    adoption rule. The timer is installed ENABLED, because the
+#                    beat reads files already on the box.
+#   24 wake rail      install-bus-nudge.sh owns the act and is called, not
+#                    reimplemented; it adopts a conf and an instance somebody
+#                    disabled. The orchestration config is written line by line:
+#                    the bus path and the substrate are facts and are asserted,
+#                    the model and the permissions flag are decisions and are
+#                    kept as the claw records them.
 #   18 authority     the registry is STATE and is seeded once, never rewritten:
 #                    it is the firm's own record of who may approve an act here,
 #                    and it moves only by somebody signing for the change. The
@@ -206,6 +246,16 @@ WIDE_MODE=""
 # that dependency has failed three times in one week.
 RELEASE_NOTES=""; RELEASE_CLASS=""; REVISION=""
 RELEASE_REPO=""; RELEASE_CHANNEL="tenants"
+
+# The orchestration settings, seeded into /etc/orchestrate.conf. Defaults are
+# what the hub runs today, so a claw that says nothing gets the arrangement that
+# has been ridden rather than whatever a session last saved for itself.
+#
+# THESE TWO ARE DECISIONS, and the phase treats them as such: it seeds them once
+# and adopts whatever the claw carries afterwards. The other two values in that
+# file are facts about the machine and the phase asserts them on every run.
+DELEGATE_MODEL="opus"
+DELEGATE_SKIP_PERMISSIONS="true"
 
 # THE CORE VERSION FLOORS. A minimum, never a target: a run guarantees each core
 # is AT LEAST this version and never moves an installed one backwards. At or
@@ -289,6 +339,9 @@ while [ $# -gt 0 ]; do
     --release-notes)   RELEASE_NOTES="${2:-}"; shift 2 ;;
     --release-class)   RELEASE_CLASS="${2:-}"; shift 2 ;;
     --revision)        REVISION="${2:-}"; shift 2 ;;
+    --delegate-model)  DELEGATE_MODEL="${2:-}"; shift 2 ;;
+    --delegate-skip-permissions)
+                       DELEGATE_SKIP_PERMISSIONS="${2:-}"; shift 2 ;;
     # THE COUNT IS GUARDED BEFORE THE SHIFT, and this one flag is written that
     # way deliberately. `VAR="${2:-}"; shift 2` with the flag typed last makes
     # `shift 2` return non-zero, and `set -e` ends the run with nothing printed.
@@ -368,6 +421,52 @@ ADMIN_LOG="${ETC_ROOT}/admin-log.md"
 # and it is deliberately not named here. The updater writes it, because this
 # script is what a release applies and a thing cannot record its own application.
 UPDATER_CONF="${ETC_ROOT}/updater.conf"
+
+# The memory rail. Two files with the split the notification rail already uses:
+# the conf carries the decision and the thresholds, the env file carries the one
+# manager reference and never a value.
+MEMORY_CONF="${ETC_ROOT}/memory.conf"
+MEMORY_ENV="${ETC_ROOT}/memory.env"
+
+# The notification rail: the delivery path every other producer on this claw
+# calls. Same split. The conf declares the rail exists and carries no URL; the
+# env file carries the manager reference the notifier resolves at invocation.
+NOTIFY_BIN="/usr/local/sbin/commonclaw-notify.sh"
+NOTIFY_CONF="${ETC_ROOT}/notify.conf"
+NOTIFY_ENV="${ETC_ROOT}/notify.env"
+
+# The stall check. One conf, and no env file: the check reads buses and posts
+# through the notifier, so it resolves no credential of its own.
+STALL_CHECK="/usr/local/sbin/commonclaw-stall-check.sh"
+STALL_CONF="${ETC_ROOT}/stall-check.conf"
+
+# The orchestration settings this machine rules on.
+#
+# THE PATH IS THE ORCHESTRATE SKILL'S, NOT THIS ONE'S. That skill reads
+# $ORCHESTRATE_CONF and falls back to /etc/orchestrate.conf, and its shipped
+# config.yaml is root-owned under a managed install, so the conf file is the one
+# layer a machine's ruling can be written into. A path of our own choosing would
+# be a file nothing reads.
+ORCHESTRATE_CONF_FILE="/etc/orchestrate.conf"
+
+# The memory floor. Swap and the swappiness drop-in, and the two paths are
+# OVERRIDABLE for exactly one reason: the swap phase cannot be rehearsed against
+# the real fstab or the real swapfile without changing the box, so its controls
+# point these at fixtures. Nothing else sets them, and a run on a claw takes the
+# defaults. Same seam, same reason, as the notifier's NOTIFY_CONF.
+SWAPFILE="${SWAPFILE:-/swapfile}"
+FSTAB="${FSTAB:-/etc/fstab}"
+SYSCTL_SWAP="${SYSCTL_SWAP:-/etc/sysctl.d/60-commonclaw-swap.conf}"
+# How the phase asks the kernel what swap is on. Overridable for the same reason
+# the paths above are: the adoption branch turns on this reading, and a control
+# that could not plant an answer would leave that branch untested.
+SWAPON_CMD="${SWAPON_CMD:-swapon}"
+
+# A modest value, not zero. Zero tells the kernel never to swap a page it could
+# keep, which turns the cushion back into the thing it was added to replace. Ten
+# keeps cold pages of a long-idle session out of the way and leaves the working
+# set in memory.
+SWAPPINESS=10
 
 # The provisioning plane, installed on the claw at a fixed root-owned path.
 #
@@ -655,7 +754,7 @@ BASE_PACKAGES=(
   "python3-venv:python3"     "restic:restic"    "bubblewrap:bwrap"
   "fail2ban:fail2ban-client" "ufw:ufw"          "unattended-upgrades:"
   "gnupg:gpg"                "ca-certificates:" "1password-cli:op"
-  "sudo:visudo"
+  "sudo:visudo"              "earlyoom:earlyoom"
 )
 
 # ---------------------------------------------------------------- output
@@ -687,6 +786,46 @@ check() {
 }
 
 want_phase() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+
+# install_adopting <source> <target> <what> — the Q62 doctrine in one place.
+#
+# A payload file already on a claw was put there by somebody, usually the unit
+# that first needed it before provisioning owned it. Three outcomes, and the run
+# SAYS WHICH:
+#
+#   absent            installed. An ordinary first placement.
+#   digest matches    adopted. Nothing is written, because there is nothing to
+#                     change, and a silent rewrite would report work that was
+#                     not done.
+#   digest differs    replaced, and the old digest is named. The release owns
+#                     this file, so a divergent copy is the older hand-placed
+#                     one and carrying it forward would pin a claw to whatever
+#                     somebody once dropped there.
+#
+# A DIVERGENT COPY IS NAMED RATHER THAN OVERWRITTEN QUIETLY, because the copy on
+# the box may be newer than the release on a claw somebody debugged by hand, and
+# the only way anybody learns that is a line in the run's own output.
+install_adopting() {
+  local src="$1" dst="$2" what="$3" mode="${4:-0755}" prev=""
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would install ${what} to ${dst}, adopting a matching copy"
+    return 0
+  fi
+  if [ -f "$dst" ]; then
+    prev="$(sha256sum "$dst" | cut -d' ' -f1)"
+    if cmp -s "$src" "$dst"; then
+      ok "${what} at ${dst} already matches this release and was adopted, not rewritten (sha256 ${prev:0:16})"
+      chmod "$mode" "$dst"; chown root:root "$dst"
+      return 0
+    fi
+  fi
+  install -m "$mode" -o root -g root "$src" "$dst"
+  if [ -n "$prev" ]; then
+    warn "${what} at ${dst} differed from this release and was REPLACED. The copy this run found was sha256 ${prev:0:16}; if it was newer than the release, it is gone."
+  else
+    ok "${what} installed at ${dst}"
+  fi
+}
 
 # ------------------------------------------------------- version comparison
 #
@@ -1173,7 +1312,9 @@ phase_1_preflight() {
   local s g missing_payload=""
   for s in commonclaw-backup.sh commonclaw-seat-check.sh render-template.sh \
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
-           core-version.sh commonclaw-update.sh agents-plane.sh; do
+           core-version.sh commonclaw-update.sh agents-plane.sh \
+           commonclaw-memory-check.sh commonclaw-notify.sh \
+           commonclaw-stall-check.sh install-bus-nudge.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
   for g in "${GRANTED_SCRIPTS[@]}"; do
@@ -1222,6 +1363,39 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../payload/claw-authority"
   [ -r "${TEMPLATE_DIR}/claw-authority.md" ] \
     || missing_payload="$missing_payload ../templates/claw-authority.md"
+  # The memory rail's unit and timer. Named here rather than only in phase 21
+  # because the phase installs the script either way: a run that reached it with
+  # the timer template missing would leave a check on the claw that nothing ever
+  # starts, and every check in that phase would still pass.
+  [ -r "${TEMPLATE_DIR}/commonclaw-memory-check.service" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-memory-check.service"
+  [ -r "${TEMPLATE_DIR}/commonclaw-memory-check.timer" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-memory-check.timer"
+  # The stall check's three files, named here for the memory rail's own reason:
+  # the phase installs the script either way, and a claw that reached it with the
+  # timer template missing would carry a check nothing ever starts while every
+  # check in that phase still passed.
+  [ -r "${TEMPLATE_DIR}/commonclaw-stall-check.service" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-stall-check.service"
+  [ -r "${TEMPLATE_DIR}/commonclaw-stall-check.timer" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-stall-check.timer"
+  [ -r "${TEMPLATE_DIR}/commonclaw-stall-check.conf" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-stall-check.conf"
+  # The wake rail's own siblings. `install-bus-nudge.sh` is named in the script
+  # list above; these are what it reads, and it is called from a phase here, so a
+  # missing one turns a phase into a refusal rather than a silent skip.
+  [ -r "${PAYLOAD_DIR}/bus-nudge" ] \
+    || missing_payload="$missing_payload ../payload/bus-nudge"
+  [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] \
+    || missing_payload="$missing_payload ../payload/bus-nudge-adapters"
+  [ -r "${TEMPLATE_DIR}/bus-nudge.conf" ] \
+    || missing_payload="$missing_payload ../templates/bus-nudge.conf"
+  [ -r "${TEMPLATE_DIR}/bus-nudge@.service" ] \
+    || missing_payload="$missing_payload ../templates/bus-nudge@.service"
+  [ -r "${TEMPLATE_DIR}/bus-nudge@.timer" ] \
+    || missing_payload="$missing_payload ../templates/bus-nudge@.timer"
+  [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
+    || missing_payload="$missing_payload ../templates/wake-rail.md"
   # At least one RETIRED generation, and this one is not tidiness.
   #
   # The reconcile recognises an unedited briefing by reproducing a retired
@@ -3029,8 +3203,43 @@ SUDOEOF
   # is refused. That pair is the difference between a per-script grant and a
   # per-directory grant, and the two are indistinguishable until something
   # beside the first file is asked for and refused.
-  local prover=""
-  for a in "${CLAW_ADMINS[@]:-}"; do
+  # THE CANDIDATES COME FROM THE GROUP, NOT FROM THE ARGUMENT LIST.
+  #
+  # This loop read `CLAW_ADMINS` alone, which the updater never fills: a release
+  # ride composes no `--claw-admins`, so the array was empty on every ride, the
+  # control never ran, and the sentence it printed instead -- "this claw carries
+  # no claw-admin member" -- was untrue on a claw whose group held one. Measured
+  # on a tenant claw on 2026-09-02, where the group read `claw-admin:x:988:...`
+  # while the control reported the group empty. A control that cannot run on the
+  # unattended path is a control that has never run where it matters.
+  #
+  # The group is the same source the rest of this script trusts for people,
+  # under the law that identity belongs to a build: whoever makes an admin also
+  # makes the membership, so the group cannot drift from the people it names.
+  # The argument still wins where it was given, because a caller naming a roster
+  # is naming who this run is about.
+  local prover="" candidates=()
+  if [ "${#CLAW_ADMINS[@]}" -gt 0 ]; then
+    candidates=("${CLAW_ADMINS[@]}")
+  else
+    local gline gmembers gid p
+    gline="$(getent group "$CLAW_ADMIN_GROUP" 2>/dev/null || true)"
+    gmembers="$(printf '%s' "$gline" | cut -d: -f4)"
+    gid="$(printf '%s' "$gline" | cut -d: -f3)"
+    # Secondary members come from the group line. Somebody whose PRIMARY group is
+    # this one appears nowhere on it, so the passwd sweep is the other half: a
+    # prover this check could not see is a control that stays unrun for a reason
+    # nobody would guess.
+    IFS=',' read -r -a candidates <<< "$gmembers"
+    if [ -n "$gid" ]; then
+      while IFS=: read -r p _ _ pgid _; do
+        [ "$pgid" = "$gid" ] || continue
+        candidates+=("$p")
+      done < <(getent passwd)
+    fi
+  fi
+
+  for a in "${candidates[@]:-}"; do
     [ -z "$a" ] && continue
     getent passwd "$a" >/dev/null 2>&1 || continue
     gtext=" $(id -nG "$a" 2>/dev/null || true) "
@@ -3038,10 +3247,14 @@ SUDOEOF
   done
 
   if [ -z "$prover" ]; then
-    warn "grant control NOT RUN: this claw carries no ${CLAW_ADMIN_GROUP} member. An unrun control is not a passed one, and this one cannot be faked from root -- re-run it once the firm names its admins."
+    warn "grant control NOT RUN: no account on this claw is in ${CLAW_ADMIN_GROUP}, by argument or by group. An unrun control is not a passed one, and this one cannot be faked from root -- re-run it once the firm names its admins."
     human "name the firm's own admins with --claw-admins and re-run this phase, then confirm the grant control passes both legs"
     return 0
   fi
+  case "${CLAW_ADMINS[*]:-}" in
+    *"$prover"*) : ;;
+    *) say "  the grant control runs as ${prover}, read from ${CLAW_ADMIN_GROUP} rather than from an argument" ;;
+  esac
 
   for g in "${GRANTED_SCRIPTS[@]}"; do
     check "grant opens for $(basename "$g"), which it names (as ${prover}, not as root)" \
@@ -4433,6 +4646,670 @@ WIDEEOF
   human "wide mode is ON here. It is for the current early set of claws only, and it must be off before this plane reaches any box beyond them."
 }
 
+
+# ---------------------------------------------------------------- phase 20
+#
+# THE MEMORY FLOOR. Swap, the swappiness that decides how it is used, and the
+# guard that acts before the kernel's own killer does.
+#
+# WHY IT IS AT THE END RATHER THAN BESIDE THE BASE. It belongs with phase 3 by
+# subject and it is appended by convention: every phase since 15 was appended,
+# the numbers are positional, and renumbering would silently change what
+# `--only 12` means on every claw and in every runbook that names a phase.
+#
+# THE SIZING RULE, and it is one sentence: swap is the size of RAM, never below
+# 2 GiB, never above 8 GiB. RAM-sized because the cushion has to hold the working
+# set of the thing that ran away. The floor because a small box is the one that
+# fills first. The cap because swap is a cushion and not a second memory: past
+# 8 GiB a box that needs it is already thrashing, and the disk it costs is disk
+# the work needed.
+#
+# THE REFUSAL. The swapfile may take at most half of what is free on its
+# filesystem. Below that the phase refuses and carves nothing: a box whose swap
+# would eat more than half its remaining disk has a disk problem, and a swapfile
+# that fills the filesystem takes the claw down a second way. Carving a smaller
+# one silently would leave a claw carrying a cushion nobody sized and nothing
+# recording that it is short.
+#
+# ADOPTION, NOT REVERSION. Active swap is adopted whatever its size, and the size
+# is reported against the plan. Resizing means swapoff, which on a box that is
+# already under pressure is the one act that could finish it off. A claw whose
+# swap somebody sized deliberately keeps it.
+
+# The three decisions, as functions, because the phase itself cannot be
+# rehearsed: it calls mkswap and swapon, and a rehearsal that ran them would
+# change the box it was rehearsing on. The controls in
+# _workpapers/w129-memory-rail/ drive these with planted numbers instead.
+swap_want_bytes() {
+  local mem_total_kb="$1" want floor cap
+  floor=$(( 2 * 1024 * 1024 * 1024 ))
+  cap=$((   8 * 1024 * 1024 * 1024 ))
+  want=$(( mem_total_kb * 1024 ))
+  [ "$want" -lt "$floor" ] && want="$floor"
+  [ "$want" -gt "$cap" ]   && want="$cap"
+  printf '%s' "$want"
+}
+
+swap_verdict() {
+  local want="$1" free="$2"
+  if [ "$free" -lt $(( want * 2 )) ]; then printf 'refuse'; else printf 'ok'; fi
+}
+
+# What is on right now, in bytes, summed. The KERNEL is asked rather than the
+# fstab, because the fstab says what should be on and only this says what is.
+swap_active_bytes() {
+  { "$SWAPON_CMD" --show=SIZE --bytes --noheadings 2>/dev/null || true; } \
+    | awk '{t+=$1} END {print t+0}'
+}
+
+# One line in the fstab, added once. Matched on the path rather than on the whole
+# line, so a line somebody edited is left alone rather than doubled.
+swap_fstab_ensure() {
+  local path="$1"
+  if grep -qE "^[[:space:]]*${path}[[:space:]]" "$FSTAB" 2>/dev/null; then
+    printf 'present'; return 0
+  fi
+  printf '%s none swap sw 0 0\n' "$path" >> "$FSTAB" || return 1
+  printf 'added'
+}
+
+phase_20_memory_floor() {
+  head1 20 "the memory floor: swap, swappiness, the OOM guard"
+
+  local mem_kb want free verdict
+  mem_kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]\+\) kB$/\1/p' /proc/meminfo | head -1)"
+  case "${mem_kb:-0}" in
+    ''|0|*[!0-9]*)
+      bad "cannot read MemTotal from /proc/meminfo, so no swap size could be derived"
+      return 0 ;;
+  esac
+  want="$(swap_want_bytes "$mem_kb")"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would ensure $(( want / 1024 / 1024 ))MB of swap at ${SWAPFILE}, record it in ${FSTAB}, write ${SYSCTL_SWAP}, and configure earlyoom"
+    return 0
+  fi
+
+  # ---- swap ----
+  #
+  # ACTIVE SWAP IS ADOPTED. `swapon --show` is read rather than the fstab,
+  # because the fstab says what should be on and the kernel says what is.
+  local active_bytes
+  active_bytes="$(swap_active_bytes)"
+  if [ "${active_bytes:-0}" -gt 0 ]; then
+    ok "swap is already active: $(( active_bytes / 1024 / 1024 ))MB, against a plan of $(( want / 1024 / 1024 ))MB. Adopted as it is"
+    if [ "$active_bytes" -lt $(( want / 2 )) ]; then
+      warn "this claw's swap is less than half the plan. Resizing means swapoff, which is the one act that could finish off a box already under pressure, so nothing here changes it"
+    fi
+  else
+    free="$( { df -B1 --output=avail "$(dirname "$SWAPFILE")" 2>/dev/null || true; } | tail -1 | tr -d ' ')"
+    case "${free:-}" in
+      ''|*[!0-9]*)
+        bad "cannot read free space on $(dirname "$SWAPFILE"), so no swapfile was made"
+        return 0 ;;
+    esac
+    verdict="$(swap_verdict "$want" "$free")"
+    if [ "$verdict" = refuse ]; then
+      # A FAILED CHECK, not a note. A release ride stops here, and it should: a
+      # claw this short of disk is a claw somebody has to look at.
+      bad "REFUSED to make a $(( want / 1024 / 1024 ))MB swapfile: only $(( free / 1024 / 1024 ))MB is free on $(dirname "$SWAPFILE"), and a swapfile may take at most half of what is free. Nothing was carved, and no smaller one was carved either"
+      return 0
+    fi
+    if fallocate -l "$want" "$SWAPFILE" 2>/dev/null \
+       || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$(( want / 1024 / 1024 )) status=none 2>/dev/null; then
+      chmod 0600 "$SWAPFILE"
+      chown root:root "$SWAPFILE"
+      if mkswap "$SWAPFILE" >/dev/null 2>&1 && swapon "$SWAPFILE" 2>/dev/null; then
+        ok "swapfile made and active: $(( want / 1024 / 1024 ))MB at ${SWAPFILE}"
+      else
+        bad "the swapfile at ${SWAPFILE} was written and could not be formatted or turned on"
+      fi
+    else
+      bad "could not write a $(( want / 1024 / 1024 ))MB swapfile at ${SWAPFILE}"
+    fi
+  fi
+
+  local fstab_verdict; fstab_verdict="$(swap_fstab_ensure "$SWAPFILE" || printf 'failed')"
+  case "$fstab_verdict" in
+    added)   ok "${SWAPFILE} recorded in ${FSTAB}, so it survives a reboot" ;;
+    present) ok "${SWAPFILE} is already recorded in ${FSTAB}" ;;
+    *)       bad "could not record ${SWAPFILE} in ${FSTAB}: this claw's swap does not survive a reboot" ;;
+  esac
+  check "swap is on right now" bash -c '[ "$(swapon --show --noheadings 2>/dev/null | wc -l)" -gt 0 ]'
+
+  # ---- swappiness ----
+  cat > "$SYSCTL_SWAP" <<SYSCTLEOF
+# How readily this claw uses its swap. Managed by provision-claw.sh.
+#
+# The default is 60, which suits a machine whose work is throughput. A claw's
+# work is people's sessions, and paging one of those out to make room for cache
+# is felt. Ten keeps cold pages of a long-idle session out of the way and leaves
+# the working set in memory. Zero is not the answer: it tells the kernel never to
+# swap a page it could keep, which turns the cushion back into the pressure it
+# was added to absorb.
+vm.swappiness = ${SWAPPINESS}
+SYSCTLEOF
+  chmod 0644 "$SYSCTL_SWAP"; chown root:root "$SYSCTL_SWAP"
+  sysctl -p "$SYSCTL_SWAP" >/dev/null 2>&1 || true
+  check "vm.swappiness is ${SWAPPINESS} right now" \
+    bash -c "[ \"\$(cat /proc/sys/vm/swappiness 2>/dev/null)\" = '${SWAPPINESS}' ]"
+
+  # ---- the OOM guard ----
+  #
+  # earlyoom, and systemd-oomd is the one that was rejected. Neither ships on
+  # this distribution, so "needs no new package" decides nothing and the
+  # behaviour does.
+  #
+  # systemd-oomd acts on a whole cgroup. On a claw every session one person holds
+  # lives under that person's own slice, so a runaway in one session would take
+  # every other session that person has with it, including the tmux server the
+  # work is sitting in. Its swap trigger also waits until swap is nearly full,
+  # which is after the thrashing has started.
+  #
+  # earlyoom watches available memory and free swap and terminates the single
+  # process with the worst score. One process, chosen because it is the largest,
+  # which on a claw is the thing that ran away. That is what "act before the box
+  # stops answering ssh" means here.
+  #
+  # ITS THRESHOLDS ARE THE PACKAGE'S OWN and they are deliberately BELOW the
+  # alarm's line. The alarm posts at 15% available so a person hears first;
+  # earlyoom is the last thing between that and the kernel's own killer.
+  if command -v earlyoom >/dev/null 2>&1; then
+    systemctl enable --now earlyoom >/dev/null 2>&1 || true
+    check "the OOM guard is running" systemctl is-active --quiet earlyoom
+    check "the OOM guard starts at boot" systemctl is-enabled --quiet earlyoom
+  else
+    bad "earlyoom is not installed, so nothing acts between memory filling and the kernel's own killer, which arrives after the box has stopped answering"
+  fi
+}
+
+# ---------------------------------------------------------------- phase 21
+
+phase_21_memory_rail() {
+  head1 21 "the memory alarm and the dead-man ping"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would install commonclaw-memory-check.sh, seed ${MEMORY_CONF} and ${MEMORY_ENV}, and install the unit and timer"
+    return 0
+  fi
+
+  install -m 0755 "${SCRIPT_DIR}/commonclaw-memory-check.sh" /usr/local/sbin/commonclaw-memory-check.sh
+  install -d -m 0755 -o root -g root "$ETC_ROOT"
+
+  # SEEDED THE WAY updater.conf IS NOT. These two carry thresholds and a
+  # reference, which are a decision the release makes rather than state the claw
+  # accumulates, so a re-run rewrites them and a changed line reaches the claw.
+  # Writing a reference is safe; a reference is not a value.
+  cat > "$MEMORY_CONF" <<MEMEOF
+# When this claw says out loud that it is running out of memory.
+# Written by provision-claw.sh. NO SECRETS HERE: the heartbeat URL is a
+# credential and none rests on this claw.
+#
+# ENABLED         yes  the beat runs, posts through commonclaw-notify.sh, and
+#                      pings the dead-man check.
+#                 no   the beat exits quietly. A deliberate silence.
+#
+# AVAILABLE_PCT   post when less than this share of memory is available. Fifteen
+#                 leaves room to act: the OOM guard starts killing below ten.
+#
+# SWAP_USED_PCT   post when more than this share of swap is in use. Swap filling
+#                 is what turns a busy box into an unreachable one.
+#
+# DEDUPE_HOURS    how long one crossed line stays quiet. Six, not the seat
+#                 check's twenty: memory pressure is something a person acts on
+#                 now, and a box still under pressure six hours later has earned
+#                 a second line. A NEW crossing breaks through the same beat it
+#                 appears, because the key carries which line was crossed.
+ENABLED="yes"
+AVAILABLE_PCT=15
+SWAP_USED_PCT=50
+DEDUPE_HOURS=6
+MEMEOF
+  chmod 0644 "$MEMORY_CONF"; chown root:root "$MEMORY_CONF"
+
+  cat > "$MEMORY_ENV" <<MEMENVEOF
+# Manager references, never values. Resolved at invocation by the manager.
+# Item names follow the naming table in reference/claw-conventions.md.
+#
+# The heartbeat check is created by a person, one per claw, and its URL put in
+# this claw's machine vault. Until that happens this reference resolves to
+# nothing, the ping is skipped quietly, and the on-box alarm still runs.
+COMMONCLAW_HEARTBEAT_URL=op://${VAULT}/commonclaw-heartbeat-${TARGET_HOSTNAME}/credential
+MEMENVEOF
+  chmod 0644 "$MEMORY_ENV"; chown root:root "$MEMORY_ENV"
+
+  install -m 0644 -o root -g root "${TEMPLATE_DIR}/commonclaw-memory-check.service" \
+    /etc/systemd/system/commonclaw-memory-check.service
+  install -m 0644 -o root -g root "${TEMPLATE_DIR}/commonclaw-memory-check.timer" \
+    /etc/systemd/system/commonclaw-memory-check.timer
+  systemctl daemon-reload
+
+  check "memory check installed and executable" test -x /usr/local/sbin/commonclaw-memory-check.sh
+  check "memory check parses" bash -n /usr/local/sbin/commonclaw-memory-check.sh
+  check "memory conf is 0644 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$MEMORY_CONF')\" = '644 root:root' ]"
+  check "memory env holds a reference, not a value" \
+    bash -c "grep -q '^COMMONCLAW_HEARTBEAT_URL=op://' '$MEMORY_ENV'"
+  check "memory check service registered" systemctl cat commonclaw-memory-check.service
+  check "memory check timer registered"   systemctl cat commonclaw-memory-check.timer
+
+  # ---- the phase control, and it has to be able to FAIL ----
+  #
+  # Two planted thresholds, two verdicts that must differ. At 100% available the
+  # reading is always below the line, so a post is unavoidable; at 0% it is
+  # always above, so a post is impossible. A control that only asserted the first
+  # would pass just as happily against a check that posts on every run.
+  #
+  # The notifier is a recording stub and the conf is a fixture, so this control
+  # reaches no channel and does not touch the claw's own dedupe state.
+  local ctl stub_log rc_hot rc_cold posts_hot posts_cold
+  ctl="$(mktemp -d)"
+  cat > "${ctl}/stub" <<'STUBEOF'
+#!/bin/bash
+printf 'POST %s\n' "$*" >> "$STUB_LOG"
+exit 0
+STUBEOF
+  chmod 0755 "${ctl}/stub"
+  stub_log="${ctl}/posts"; : > "$stub_log"
+
+  printf 'ENABLED="yes"\nAVAILABLE_PCT=100\nSWAP_USED_PCT=0\nDEDUPE_HOURS=6\n' > "${ctl}/hot.conf"
+  printf 'ENABLED="yes"\nAVAILABLE_PCT=0\nSWAP_USED_PCT=100\nDEDUPE_HOURS=6\n' > "${ctl}/cold.conf"
+
+  rc_hot=0
+  STUB_LOG="$stub_log" MEMORY_CONF="${ctl}/hot.conf" MEMORY_ENV="${ctl}/absent.env" \
+    NOTIFIER="${ctl}/stub" PROVISION_CONF="$CONF" \
+    /usr/local/sbin/commonclaw-memory-check.sh >/dev/null 2>&1 || rc_hot=$?
+  # grep -c PRINTS 0 and EXITS 1 when it matches nothing, so a `|| printf 0`
+  # fallback would append a second zero and every integer test below would read
+  # a two-line string.
+  posts_hot="$(grep -c '^POST' "$stub_log" 2>/dev/null)" || posts_hot=0
+
+  : > "$stub_log"
+  rc_cold=0
+  STUB_LOG="$stub_log" MEMORY_CONF="${ctl}/cold.conf" MEMORY_ENV="${ctl}/absent.env" \
+    NOTIFIER="${ctl}/stub" PROVISION_CONF="$CONF" \
+    /usr/local/sbin/commonclaw-memory-check.sh >/dev/null 2>&1 || rc_cold=$?
+  posts_cold="$(grep -c '^POST' "$stub_log" 2>/dev/null)" || posts_cold=0
+
+  if [ "$posts_hot" -ge 1 ]; then
+    ok "the memory check posts when the line is crossed (threshold planted at 100%, exit ${rc_hot})"
+  else
+    bad "the memory check posted nothing with the threshold planted at 100%, so it cannot report pressure at all"
+  fi
+  if [ "$posts_cold" -eq 0 ]; then
+    ok "the memory check stays silent when the line is not crossed (threshold planted at 0%, exit ${rc_cold})"
+  else
+    bad "the memory check posted with the threshold planted at 0%, so it posts regardless of what it read"
+  fi
+
+  # An absent conf is the quiet state and must not read as a fault.
+  local rc_quiet=0
+  STUB_LOG="$stub_log" MEMORY_CONF="${ctl}/nothing.conf" NOTIFIER="${ctl}/stub" \
+    /usr/local/sbin/commonclaw-memory-check.sh >/dev/null 2>&1 || rc_quiet=$?
+  if [ "$rc_quiet" -eq 3 ]; then
+    ok "the memory check exits 3 on a claw with no memory conf, which is the quiet state"
+  else
+    bad "an absent memory conf gave exit ${rc_quiet}, not 3, so the quiet state is not quiet"
+  fi
+  rm -rf "$ctl"
+
+  # THE CLASS THIS ALARM POSTS UNDER IS PROVEN IN PHASE 22, beside the notifier
+  # that owns the class table. It sat here while nothing installed the notifier,
+  # which meant it measured an absent program on a fresh claw: six identical
+  # "command not found" strings read as six identical renders and failed a run
+  # that had nothing wrong with it. The control moved to the phase that puts the
+  # program on the box.
+
+  # ENABLED, unlike the backup and update timers. Those are held back because
+  # enabling them commits a claw to something: a repository it may not have, or a
+  # release it may not want. This one reads two numbers and, at most, makes one
+  # outbound request that is skipped whenever nothing is wired. A rail installed
+  # disabled is the silence this whole unit exists to end.
+  systemctl enable --now commonclaw-memory-check.timer >/dev/null 2>&1 || true
+  check "memory check timer is active" systemctl is-active --quiet commonclaw-memory-check.timer
+
+  if grep -q "^COMMONCLAW_HEARTBEAT_URL=op://" "$MEMORY_ENV"; then
+    human "create one heartbeat check per claw at a hosted service, put its URL into ${VAULT} as an API Credential item named commonclaw-heartbeat-${TARGET_HOSTNAME}, and give the check a grace period of ten minutes. Until then this claw's alarm runs and its dead-man ping is skipped"
+  fi
+}
+
+
+# ---------------------------------------------------------------- phase 22
+
+# APPENDED, NOT INSERTED BESIDE THE PRODUCERS IT SERVES. Phase numbers here are
+# positional and every phase since 15 was appended; renumbering would silently
+# change what `--only 12` means on every claw and in every runbook that names a
+# phase. So the delivery path lands after the producers that call it, and the
+# ordering costs nothing: a producer whose notifier is absent degrades to the
+# journal by design, and the phase that installs it runs in the same pass.
+phase_22_notification_rail() {
+  head1 22 "the notification rail"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would install commonclaw-notify.sh to ${NOTIFY_BIN}, seed ${NOTIFY_CONF} and ${NOTIFY_ENV},"
+    say "  and prove every message class renders differently"
+    return 0
+  fi
+
+  install -d -m 0755 -o root -g root "$ETC_ROOT"
+  install -d -m 0755 -o root -g root /var/lib/commonclaw/notify
+
+  install_adopting "${SCRIPT_DIR}/commonclaw-notify.sh" "$NOTIFY_BIN" "the notifier"
+
+  # SEEDED THE WAY THE MEMORY RAIL'S TWO FILES ARE. They carry a decision the
+  # release makes and a manager reference, not state the claw accumulates, so the
+  # end state is this release's and a changed line reaches the claw. Writing a
+  # reference is safe; a reference is not a value.
+  #
+  # WRITTEN THROUGH install_adopting rather than with a plain `cat >`, so a claw
+  # carrying a hand-placed copy learns which of the two it got. wagmi-claw has
+  # carried both of these files since August and its copies differ from this
+  # release; a silent rewrite would drop whatever somebody had added to them with
+  # nothing in the run's output saying so.
+  local seed; seed="$(mktemp)"
+  cat > "$seed" <<'NOTIFYCONFEOF'
+# How this claw delivers its own findings. Written by provision-claw.sh.
+# NO SECRETS HERE. The webhook is a credential and none rests on this claw.
+#
+# ENABLED   yes  findings go to the channel this claw's webhook posts into.
+#           no   findings stay in the journal. A deliberate silence, and the
+#                producers see a clean exit rather than a delivery failure.
+#
+# WEBHOOK_CMD is the pluggable resolution path, the same shape as
+# FETCH_TOKEN_CMD in updater.conf: a command whose stdout is the URL. Empty
+# means the manager reference in notify.env is used instead.
+ENABLED="yes"
+WEBHOOK_CMD=""
+NOTIFYCONFEOF
+  install_adopting "$seed" "$NOTIFY_CONF" "the notify config" 0644
+
+  cat > "$seed" <<NOTIFYENVEOF
+# Manager references, never values. Resolved at invocation by the manager.
+# Item names follow the naming table in reference/claw-conventions.md.
+#
+# One webhook per claw, never one for the fleet. A shared URL means a leak from
+# any claw posts as every claw, and it carries no name saying which machine it
+# belongs to.
+COMMONCLAW_SLACK_WEBHOOK=op://${VAULT}/commonclaw-slack-webhook-${TARGET_HOSTNAME}/credential
+NOTIFYENVEOF
+  install_adopting "$seed" "$NOTIFY_ENV" "the notify env file" 0644
+  rm -f "$seed"
+
+  check "the notifier is installed and executable" test -x "$NOTIFY_BIN"
+  check "the notifier parses" bash -n "$NOTIFY_BIN"
+  check "the notify config is 0644 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$NOTIFY_CONF')\" = '644 root:root' ]"
+  check "the notify env file holds a reference, not a value" \
+    bash -c "grep -q '^COMMONCLAW_SLACK_WEBHOOK=op://' '$NOTIFY_ENV'"
+  # The notifier refuses a conf carrying a literal URL before it sources the
+  # file. This asserts the file this run WROTE carries none, which is the other
+  # half: a refusal nothing can trigger proves nothing about what was written.
+  if grep -q '^[[:space:]]*WEBHOOK_URL=' "$NOTIFY_CONF"; then
+    bad "${NOTIFY_CONF} carries a literal WEBHOOK_URL. That is a credential at rest inside the backed-up config root: rotate it, then remove the line"
+  else
+    ok "the notify config carries no literal webhook URL"
+  fi
+
+  # ---- the class control, and it has to be able to FAIL ----
+  #
+  # Every class renders, and the renders differ. A table read for its title and
+  # ignored for everything else renders every row identically, and that is the
+  # defect a per-class control is for.
+  #
+  # NOTIFY_NOW pins the clock. Without it the payload carries a wall-clock
+  # timestamp, so two renders of the same table differ whenever a second ticks
+  # between them, and the control ends up reporting on the clock.
+  #
+  # The state directory is a fixture, so this control never touches the claw's
+  # own dedupe stamps, and --dry-run reaches no channel.
+  local ctl; ctl="$(mktemp -d)"
+  local p prev="" out differed=1
+  for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note; do
+    out="$(NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
+      "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>&1)" || true
+    [ -n "$prev" ] && [ "$out" = "$prev" ] && differed=0
+    prev="$out"
+  done
+  if [ "$differed" -eq 1 ]; then
+    ok "every message class renders differently, so the class table is being read"
+  else
+    bad "two message classes render identically, so the class table is not being read"
+  fi
+
+  # THE OTHER DIRECTION. The same class six times must come out identical, or
+  # the loop above is measuring the clock rather than the table, and a control
+  # whose failing branch is unreachable is decoration.
+  local same=1
+  prev=""
+  for p in claw-note claw-note claw-note claw-note claw-note claw-note; do
+    out="$(NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
+      "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>&1)" || true
+    [ -n "$prev" ] && [ "$out" != "$prev" ] && same=0
+    prev="$out"
+  done
+  if [ "$same" -eq 1 ]; then
+    ok "known-answer control: one class rendered six times comes out identical, so the comparison above compares renders"
+  else
+    bad "one class rendered six times gave differing renders, so the divergence control measures something other than the class table"
+  fi
+
+  # THE LOOP ABOVE CANNOT FAIL ON THE AXIS ITS OWN COMMENT NAMES, and saying so
+  # here is cheaper than a claw discovering it. The payload carries the class
+  # SLUG in its context block, so two renders differ whatever the title table
+  # does. What that loop really catches is a notifier that is absent or broken,
+  # which is the failure it was written after, and it is kept for that.
+  #
+  # The claim that each row is read for its TITLE needs its own control, and this
+  # is it: six classes, six distinct titles, pulled out of the rendered text.
+  local titles distinct
+  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note; do
+    NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
+      "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>/dev/null \
+      | sed -n 's/^  "text": "[^·]*· \(.*\) · .*/\1/p'
+  done)"
+  # grep -c PRINTS 0 and EXITS 1 on no match, so the fallback is an assignment
+  # rather than an appended second line.
+  distinct="$(printf '%s\n' "$titles" | sort -u | grep -c . )" || distinct=0
+  if [ "$distinct" -eq 6 ]; then
+    ok "the six classes render six distinct titles, so the class table is read row by row"
+  else
+    bad "the classes render ${distinct} distinct title(s), not six: two of them share a heading and a finding lands under the wrong topic"
+  fi
+
+  # A class nobody put in the table is a usage error, not a generic heading.
+  local typo_rc=0
+  NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
+    "$NOTIFY_BIN" --dry-run --class not-a-class --summary "provisioning control" >/dev/null 2>&1 || typo_rc=$?
+  if [ "$typo_rc" -eq 2 ]; then
+    ok "an unknown class is refused as a usage error rather than posted under a generic heading"
+  else
+    bad "an unknown class gave exit ${typo_rc}, not 2"
+  fi
+  rm -rf "$ctl"
+
+  # Whether anything ARRIVES is a person's step and it is the last one. A dry run
+  # that resolved a webhook would still prove nothing about the channel.
+  local resolve_rc=0
+  "$NOTIFY_BIN" --dry-run --class claw-note --summary "provisioning control" >/dev/null 2>&1 || resolve_rc=$?
+  case "$resolve_rc" in
+    0) ok "the webhook resolves on this claw, so the rail is wired end to end but for the arrival" ;;
+    3) warn "no webhook resolves on this claw yet: the producers exit cleanly and their findings stay in the journal"
+       human "put this claw's incoming-webhook URL into ${VAULT} as an API Credential item named commonclaw-slack-webhook-${TARGET_HOSTNAME}, then post one message and look at the channel. Until then every check here reaches the journal and nobody else" ;;
+    *) warn "the notifier's dry run exited ${resolve_rc}, which is neither delivered nor unwired -- read its journal line" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- phase 23
+
+phase_23_stall_check() {
+  head1 23 "the stall check"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would install commonclaw-stall-check.sh to ${STALL_CHECK}, seed ${STALL_CONF},"
+    say "  install the unit and timer, and enable the timer"
+    return 0
+  fi
+
+  install -d -m 0755 -o root -g root "$ETC_ROOT"
+
+  install_adopting "${SCRIPT_DIR}/commonclaw-stall-check.sh" "$STALL_CHECK" "the stall check"
+  install_adopting "${TEMPLATE_DIR}/commonclaw-stall-check.conf" "$STALL_CONF" "the stall-check config" 0644
+  install_adopting "${TEMPLATE_DIR}/commonclaw-stall-check.service" \
+    /etc/systemd/system/commonclaw-stall-check.service "the stall-check unit" 0644
+  install_adopting "${TEMPLATE_DIR}/commonclaw-stall-check.timer" \
+    /etc/systemd/system/commonclaw-stall-check.timer "the stall-check timer" 0644
+  systemctl daemon-reload
+
+  check "the stall check is installed and executable" test -x "$STALL_CHECK"
+  check "the stall check parses" bash -n "$STALL_CHECK"
+  check "the stall-check config is 0644 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$STALL_CONF')\" = '644 root:root' ]"
+  check "the stall-check service registered" systemctl cat commonclaw-stall-check.service
+  check "the stall-check timer registered"   systemctl cat commonclaw-stall-check.timer
+  check "systemd accepts both units as written" \
+    systemd-analyze verify /etc/systemd/system/commonclaw-stall-check.service
+
+  # ---- the phase control, and it has to be able to FAIL ----
+  #
+  # Two bus fixtures, two verdicts that must differ. One holds an orchestrator
+  # handle whose oldest unread message is older than the threshold; the other
+  # holds the same handle with the same message already read. A control that
+  # only asserted the first would pass just as happily against a check that
+  # reports a stall on every run.
+  #
+  # STALL_NOW_EPOCH pins the clock, so the ages are the fixture's rather than
+  # the hour the ride happened to run in. The conf and the bus are fixtures and
+  # --state posts nothing, so this control reaches no channel and touches
+  # neither the claw's own buses nor its dedupe stamps.
+  local ctl bus found_hot found_cold
+  ctl="$(mktemp -d)"
+  bus="${ctl}/bus"
+  install -d -m 0755 "${bus}/inbox" "${bus}/cursors"
+  cat > "${bus}/handles.json" <<'HANDLEEOF'
+{"control-orch":{"owner":"nobody","role":"orchestrator"},
+ "control-worker":{"owner":"nobody","role":"worker"}}
+HANDLEEOF
+  printf '{"ts":"2026-01-01T00:00:00+00:00","from":"control-worker","subject":"x"}\n' \
+    > "${bus}/inbox/control-orch.jsonl"
+  # A worker handle with the same aged unread message. It must NOT be reported:
+  # the rule is orchestrator handles, and a check that swept every handle would
+  # post about every finished delegate on the claw.
+  cp "${bus}/inbox/control-orch.jsonl" "${bus}/inbox/control-worker.jsonl"
+  printf 'ENABLED="yes"\nTHRESHOLD_HOURS=3\nDEDUPE_HOURS=20\nBUS_DIRS="%s"\n' "$bus" > "${ctl}/stall.conf"
+
+  found_hot="$(STALL_CONF="${ctl}/stall.conf" STALL_NOW_EPOCH=1800000000 \
+    "$STALL_CHECK" --state 2>/dev/null || true)"
+  # The same bus with the cursor past the message: read mail is not a stall.
+  printf '1\n' > "${bus}/cursors/control-orch.cursor"
+  found_cold="$(STALL_CONF="${ctl}/stall.conf" STALL_NOW_EPOCH=1800000000 \
+    "$STALL_CHECK" --state 2>/dev/null || true)"
+
+  case "$found_hot" in
+    *control-orch*) ok "the stall check reports an orchestrator handle whose unread mail is past the threshold" ;;
+    *) bad "the stall check found nothing against a fixture holding a three-year-old unread message, so it cannot report a stall at all" ;;
+  esac
+  case "$found_hot" in
+    *control-worker*) bad "the stall check reported a WORKER handle, so it sweeps every handle and will post about every finished delegate on this claw" ;;
+    *) ok "the stall check leaves worker handles alone, which is what keeps its first run from posting a page of finished delegates" ;;
+  esac
+  case "$found_cold" in
+    *control-orch*) bad "the stall check reported a handle whose mail is READ, so it reports regardless of what it measured" ;;
+    *) ok "the stall check stays silent when the mail has been read" ;;
+  esac
+  rm -rf "$ctl"
+
+  # ENABLED, for the memory check's reason. The beat reads files already on this
+  # box and posts at most one message a day per distinct stall. A rail installed
+  # disabled is the silence this unit exists to end.
+  systemctl enable --now commonclaw-stall-check.timer >/dev/null 2>&1 || true
+  check "the stall-check timer is active" systemctl is-active --quiet commonclaw-stall-check.timer
+}
+
+# ---------------------------------------------------------------- phase 24
+
+phase_24_wake_rail() {
+  head1 24 "the wake rail and the orchestration settings"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would run install-bus-nudge.sh for ${#PEOPLE[@]} account(s) and write ${ORCHESTRATE_CONF_FILE}"
+    return 0
+  fi
+
+  # ---- the wake rail ----
+  #
+  # The installer owns the whole act: the program, its adapters, the member doc,
+  # the conf, the machine opt-in and one systemd instance per account. It is
+  # called rather than reimplemented, because a second copy of that sequence
+  # would drift from the door a claw-admin runs by hand.
+  if [ "${#PEOPLE[@]}" -eq 0 ]; then
+    warn "no people on this claw, so no wake-rail instance was stood. The program and the opt-in are stood by the installer only when it has an account to stand one for"
+  elif [ ! -x "${SCRIPT_DIR}/install-bus-nudge.sh" ]; then
+    bad "cannot stand the wake rail: ${SCRIPT_DIR}/install-bus-nudge.sh is missing or not executable"
+  elif "${SCRIPT_DIR}/install-bus-nudge.sh" "${PEOPLE[@]}" >/dev/null; then
+    ok "the wake rail is standing for ${#PEOPLE[@]} account(s)"
+  else
+    bad "install-bus-nudge.sh reported a failure -- a session on this claw learns about unread mail when it next happens to look"
+  fi
+
+  check "the nudge program is installed" test -x "${CLAW_BIN}/bus-nudge"
+  check "the delivered sentence carries no interpolation but the bus directory" \
+    "${CLAW_BIN}/bus-nudge" --law
+
+  # ---- the orchestration settings ----
+  #
+  # TWO KINDS OF LINE IN ONE FILE, and the phase treats them differently.
+  #
+  # The bus path and the substrate are FACTS about this machine. Phase 16 lays
+  # the shared bus and this file is where a session reads its path, so the run
+  # asserts them: a claw whose bus moved and whose conf did not is a claw whose
+  # delegates register on a bus their orchestrator is not reading.
+  #
+  # The model and the permissions flag are DECISIONS. They are seeded once and
+  # whatever the claw carries afterwards is kept, so a release ride cannot flip a
+  # firm back to the fleet default with nothing saying so. This is the seat
+  # roster's law applied line by line rather than file by file, because the same
+  # file holds both kinds.
+  local cur_model="$DELEGATE_MODEL" cur_skip="$DELEGATE_SKIP_PERMISSIONS" kept=""
+  if [ -r "$ORCHESTRATE_CONF_FILE" ]; then
+    local v
+    v="$(sed -n 's/^ORCHESTRATE_DELEGATE_MODEL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ORCHESTRATE_CONF_FILE" | tail -1)"
+    [ -n "$v" ] && { cur_model="$v"; kept="the model"; }
+    v="$(sed -n 's/^ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ORCHESTRATE_CONF_FILE" | tail -1)"
+    [ -n "$v" ] && { cur_skip="$v"; kept="${kept:+${kept} and }the permissions flag"; }
+  fi
+
+  cat > "$ORCHESTRATE_CONF_FILE" <<ORCHEOF
+# The orchestrate skill's settings for this machine. Written by
+# provision-claw.sh. NO SECRETS HERE.
+#
+# WHY THIS FILE AND NOT THE SKILL'S OWN config.yaml. The skill reads the
+# environment, then this file, then its shipped config.yaml. Under a managed
+# install the skill folder is root-owned and replaced on every update, so a
+# ruling written there is either refused or overwritten. This is the layer a
+# machine's ruling survives in.
+#
+# The first two lines are facts about this claw and provisioning asserts them on
+# every run. The last two are decisions: they are seeded once and whatever this
+# claw carries afterwards is kept.
+ORCHESTRATE_SHARED_BUS="${BUS_HOME}"
+ORCHESTRATE_SUBSTRATE="claude"
+ORCHESTRATE_DELEGATE_MODEL="${cur_model}"
+ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
+ORCHEOF
+  chmod 0644 "$ORCHESTRATE_CONF_FILE"; chown root:root "$ORCHESTRATE_CONF_FILE"
+  [ -n "$kept" ] && say "  kept ${kept} this claw already recorded in ${ORCHESTRATE_CONF_FILE}"
+
+  check "the orchestration config is 0644 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$ORCHESTRATE_CONF_FILE')\" = '644 root:root' ]"
+  check "the orchestration config names the bus this claw actually carries" \
+    bash -c "[ \"\$(sed -n 's/^ORCHESTRATE_SHARED_BUS=\"\\(.*\\)\"$/\\1/p' '$ORCHESTRATE_CONF_FILE')\" = '$BUS_HOME' ]"
+  check "the shared bus the config names exists on this claw" test -d "$BUS_HOME"
+
+  # A file every session reads has to be readable by every session.
+  check "every member can read the orchestration config" \
+    bash -c "[ \"\$(stat -c '%a' '$ORCHESTRATE_CONF_FILE' | cut -c3)\" != '0' ]"
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -4479,6 +5356,11 @@ if want_phase 16; then phase_16_session_bus;  fi
 if want_phase 17; then phase_17_runtimes;     fi
 if want_phase 18; then phase_18_authority;    fi
 if want_phase 19; then phase_19_wide_mode;   fi
+if want_phase 20; then phase_20_memory_floor; fi
+if want_phase 21; then phase_21_memory_rail;  fi
+if want_phase 22; then phase_22_notification_rail; fi
+if want_phase 23; then phase_23_stall_check;  fi
+if want_phase 24; then phase_24_wake_rail;    fi
 
 # ---------------------------------------------------------------- the record
 #

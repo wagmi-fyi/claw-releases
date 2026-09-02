@@ -13,7 +13,13 @@
 #                                   the operator's override and it overrides all
 #                                   three. The mode door prints this command to an
 #                                   admin who has just pinned their claw.
-#   commonclaw-update.sh --check    report what is on offer and change nothing
+#   commonclaw-update.sh --check    report what is on offer and change nothing.
+#                                   It writes no run-log JSON and creates no log
+#                                   directory: a read-only flag that leaves a
+#                                   record is not read-only, and an operator
+#                                   asking what is on offer must be able to ask
+#                                   without moving the thing they are measuring.
+#                                   The answer goes to the journal and to stderr.
 #
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
 # releases, so no machine holds a key to this one. `reference/release-rail.md` is
@@ -74,6 +80,24 @@ record_run() {
   [ "$RECORDED" -eq 1 ] && return 0
   RECORDED=1
   [ -n "$STAGE" ] && [ -d "$STAGE" ] && rm -rf "$STAGE"
+  # A CHECK RUN LEAVES NO RECORD, and this is the one exit that takes that branch.
+  #
+  # `--check` says on three surfaces that it changes nothing: its own help, its own
+  # message, and the reference. It exited through this trap like every other path,
+  # so it wrote a run-log JSON and created the log directory on a claw that had
+  # none. Two units then avoided the flag on live boxes for exactly that reason and
+  # measured the pre-state some other way, which is a documented instrument moving
+  # what it measures.
+  #
+  # NO SECOND LOG EITHER. A check log would put the same question back one level
+  # down: an operator asking what is on offer would still be writing somewhere, and
+  # a reader of the run log would have a second directory to reconcile it against.
+  # The verdict still reaches the journal and stderr through log() below, which is
+  # where an operator running this by hand is already looking.
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    log info "verdict=${VERDICT} at=${STEP} exit=${rc} carried=${CARRIED:-none} offered=${OFFERED:-none} (--check: nothing written)"
+    return 0
+  fi
   mkdir -p "$RUN_LOG_DIR" 2>/dev/null || true
   local when stamp f
   when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -257,8 +281,11 @@ STAGE="$(mktemp -d /tmp/commonclaw-update.XXXXXX)"
 #
 # The API contents endpoint is authoritative, carries a 60 second edge cache
 # instead of 300, and serves the current file. Its unauthenticated rate limit is
-# 60 an hour, and an hourly timer spends one or two, so nothing here needs a
-# credential to stay inside it.
+# 60 an hour per address, and an hourly timer spends one or two, so nothing here
+# needs a credential to stay inside it. The one run that spends more is a crossing,
+# which reads the tag list once and two files per skipped release: a claw crossing
+# five costs eleven, once, on the tick the crossing lands. Nothing on an ordinary
+# tick changes.
 #
 # The tarball still comes from codeload, where a tag is effectively immutable and
 # any staleness is caught by the digest comparison rather than acted on.
@@ -714,8 +741,20 @@ set +e
 apply_rc=$?
 set -e
 
+# THE PROGRESS STREAM IS KEPT, NOT JUST THE VERDICTS.
+#
+# The staging directory goes at exit and `run.log` went with it, so an operator
+# reading a failed ride afterwards had the per-check JSON and no account of how the
+# run got there. The JSON says which check failed. The log says what the run was
+# doing around it, which is the thing somebody debugging at four in the morning
+# actually needs.
+#
+# ONE STAMP FOR BOTH FILES. Computed once and reused, so the pair a reader has to
+# put side by side carries one name and cannot straddle a second boundary.
+apply_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_LOG_DIR"
-cp "${STAGE}/run.json" "${RUN_LOG_DIR}/apply-$(date -u +%Y%m%dT%H%M%SZ).json" 2>/dev/null || true
+cp "${STAGE}/run.json" "${RUN_LOG_DIR}/apply-${apply_stamp}.json" 2>/dev/null || true
+cp "${STAGE}/run.log"  "${RUN_LOG_DIR}/apply-${apply_stamp}.log"  2>/dev/null || true
 
 if [ "$apply_rc" -ne 0 ]; then
   VERDICT="apply failed"
@@ -766,6 +805,146 @@ rm -f "${FLEET_STAGE}/${APPLY_INCOMPLETE}"
 
 # The wait belonged to a release that has now landed.
 rm -f "${DEFER_DIR}/deferred" 2>/dev/null || true
+
+# ------------------------------------------------- the crossing's own entries
+STEP="back-fill the skipped releases"
+#
+# A CLAW SEVERAL RELEASES BEHIND CROSSES THEM IN ONE APPLY, AND THE CHANGELOG HAS
+# TO CARRY ALL OF THEM.
+#
+# The content of every skipped release arrives, because a release is a whole tree
+# and a run consumes it entire. The NOTES did not. The provisioning run writes one
+# entry from the offered release's notes, so a claw crossing 1.1.0 to 1.3.1 landed
+# five releases' changes and told its own people about one. Measured on a tenant
+# claw on 2026-09-02: the firm's people lost the account of the shared agents
+# token, the admin tiers, wide mode and the session bus, all of which had just
+# landed on their machine.
+#
+# ONE ENTRY PER SKIPPED RELEASE, and that is the shape the file already has. An
+# entry carries one `**Revision:**` and one `**Class:**`, so a single entry
+# concatenating several releases would have to pick one revision and one class and
+# be wrong about the rest. Each release keeps its own.
+#
+# AFTER THE APPLY, NEVER BEFORE IT. The changelog's law is that an entry claims a
+# release LANDED, which is why the provisioning run writes nothing when it fails.
+# Back-filling first would put that claim in the file before it was true and leave
+# it there if the apply never passed. The cost is the order: these entries land
+# below the offered release's own, which the run appended a moment ago. Each one
+# says so in its first line, so a reader is not left to infer it from the position.
+#
+# IT CANNOT FAIL THIS RUN. The release applied. A repository that will not answer,
+# or a release whose material the writer refuses, is a gap in the record and not a
+# failed update, so every branch here warns and continues. A claw that has spent
+# its hourly anonymous budget lands in that branch too, which is one more reason
+# the run does not turn on it.
+if [ "$CARRIED" != "0.0.0" ]; then
+  crossing_writer="${FLEET_STAGE}/provision-claw/scripts/commonclaw-changelog.sh"
+  if [ ! -x "$crossing_writer" ]; then
+    log warning "cannot back-fill the skipped releases' changelog entries: ${crossing_writer} is missing or not executable. This claw carries ${OFFERED} and its changelog names that release alone"
+  else
+    # THE TAG LIST IS PAGED UNTIL IT RUNS OUT. A fixed first page would silently
+    # drop the oldest releases once the repository passes one page, and the entries
+    # that went missing would be exactly the ones a long-behind claw needs.
+    crossing_tags=""
+    crossing_listed=1
+    crossing_page=1
+    while [ "$crossing_page" -le 10 ]; do
+      if ! fetch_raw "https://api.github.com/repos/${RELEASE_REPO}/tags?per_page=100&page=${crossing_page}" "${STAGE}/tags.json"; then
+        log warning "could not read the tag list from ${RELEASE_REPO} (page ${crossing_page}); the skipped releases' entries are not back-filled"
+        crossing_tags=""
+        crossing_listed=0
+        break
+      fi
+      crossing_got="$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "${STAGE}/tags.json" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+      [ -n "$crossing_got" ] || break
+      crossing_tags="${crossing_tags}${crossing_got}
+"
+      [ "$(printf '%s\n' "$crossing_got" | wc -l)" -ge 100 ] || break
+      crossing_page=$(( crossing_page + 1 ))
+    done
+
+    # STRICTLY BETWEEN, DECIDED BY THE RULED COMPARISON AND BY NOTHING ELSE.
+    # `release-rail.md` forbids a second version comparison, and a string test for
+    # equality is one: it would call 1.2 and 1.2.0 different releases. So both
+    # bounds are asked of version_at_least, which is the same function the verdict
+    # above and the core floors use.
+    crossing_between=""
+    for t in $crossing_tags; do
+      v="${t#v}"
+      case "$v" in ''|*[!0-9.]*) continue ;; esac
+      r=0; version_at_least "$CARRIED" "$v" || r=$?
+      [ "$r" -eq 1 ] || continue          # carried < v
+      r=0; version_at_least "$v" "$OFFERED" || r=$?
+      [ "$r" -eq 1 ] || continue          # v < offered
+      crossing_between="${crossing_between}${v}
+"
+    done
+
+    # OLDEST FIRST, SORTED BY THE SAME FUNCTION. `sort -V` is a second ordering
+    # with its own opinion about 2.1.9 and 2.1.10, and the rail's rule against a
+    # second comparison covers the sort as much as the verdict.
+    crossing_order=""
+    crossing_left="$crossing_between"
+    while [ -n "$(printf '%s' "$crossing_left" | tr -d '[:space:]')" ]; do
+      crossing_min=""
+      for v in $crossing_left; do
+        if [ -z "$crossing_min" ]; then crossing_min="$v"; continue; fi
+        r=0; version_at_least "$v" "$crossing_min" || r=$?
+        if [ "$r" -eq 1 ]; then crossing_min="$v"; fi
+      done
+      crossing_order="${crossing_order}${crossing_min}
+"
+      crossing_next=""
+      for v in $crossing_left; do
+        [ "$v" = "$crossing_min" ] || crossing_next="${crossing_next}${v}
+"
+      done
+      crossing_left="$crossing_next"
+    done
+
+    # NOTHING TO BACK-FILL AND NOTHING READABLE ARE TWO DIFFERENT ANSWERS, and only
+    # one of them is quiet. A failed tag read leaves the same empty list a one-hop
+    # update leaves, and reporting "no releases were skipped" from a list nobody
+    # could read is the measured-nothing green again. The failure already warned
+    # above, so this branch stays silent rather than contradicting it.
+    crossing_n="$(printf '%s' "$crossing_order" | grep -c . || true)"
+    if [ "$crossing_listed" -eq 0 ]; then
+      :
+    elif [ "${crossing_n:-0}" -eq 0 ]; then
+      log info "no releases were skipped between ${CARRIED} and ${OFFERED}; the changelog needs no back-fill"
+    else
+      log info "this apply crossed ${crossing_n} release(s) between ${CARRIED} and ${OFFERED}; writing their member-facing notes into the changelog, oldest first"
+      for v in $crossing_order; do
+        crossing_tag="v${v}"
+        rm -f "${STAGE}/x-release.json" "${STAGE}/x-notes.md" "${STAGE}/x-entry.md"
+        if ! fetch_raw "https://api.github.com/repos/${RELEASE_REPO}/contents/release/release.json?ref=${crossing_tag}" "${STAGE}/x-release.json" \
+           || ! fetch_raw "https://api.github.com/repos/${RELEASE_REPO}/contents/release/notes.md?ref=${crossing_tag}" "${STAGE}/x-notes.md"; then
+          log warning "could not read the notes or the release file at ${crossing_tag}; release ${v} landed on this claw and its changelog entry is missing"
+          continue
+        fi
+        crossing_rev="$(sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${STAGE}/x-release.json" | head -1)"
+        crossing_class="$(sed -n 's/.*"class"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${STAGE}/x-release.json" | head -1)"
+        if [ -z "$crossing_rev" ] || [ -z "$crossing_class" ] || [ ! -s "${STAGE}/x-notes.md" ]; then
+          log warning "the release at ${crossing_tag} carries no revision, no class or no notes; release ${v} landed on this claw and its changelog entry is missing"
+          continue
+        fi
+        # THE FIRST LINE SAYS WHY THIS ENTRY SITS WHERE IT SITS, and it is also the
+        # line the writer fingerprints, so a re-run of the same crossing dedupes on
+        # it rather than appending a second copy.
+        {
+          printf 'This release landed on this claw as part of the update to %s, whose entry is above. It is recorded here so the account of what changed is complete.\n\n' "$OFFERED"
+          cat "${STAGE}/x-notes.md"
+        } > "${STAGE}/x-entry.md"
+        if "$crossing_writer" --revision "$crossing_rev" --class "$crossing_class" --notes "${STAGE}/x-entry.md" >&2; then
+          log info "changelog entry written for the skipped release ${v} (${crossing_rev}, class ${crossing_class})"
+        else
+          log warning "the changelog entry for the skipped release ${v} FAILED to write; that release landed on this claw and its people have no record of it"
+        fi
+      done
+    fi
+  fi
+fi
+
 
 VERDICT="applied"
 if [ "$OUTSIDE_WINDOW" -eq 1 ]; then

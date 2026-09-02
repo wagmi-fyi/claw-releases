@@ -99,7 +99,9 @@ A workspace is a git repository from the moment it is scaffolded, and the group 
 
 **`main`, and branches that die young.** A branch that lives a long time diverges, and reconciling it costs more than the isolation bought.
 
-**The repository is local.** Do not add a remote. Whoever operates the claw decides that, one repository at a time, and writes the reason into the repository.
+**The repository is local.** Do not add a remote. Whoever operates the claw decides that, one repository at a time, and writes the reason into a root `REMOTE.md`.
+
+A repository that pushes carries `REMOTE.md` at its own root saying what triggers the push. So a repository without that file has no remote, and you can tell which is which by looking.
 
 ### Who a commit is by
 
@@ -107,7 +109,7 @@ A person commits as themselves. That identity is set when the account is made, s
 
 An agent commits as the seat it runs under and adds a `Co-Authored-By` trailer naming the model. The seat records which person is accountable. The trailer records that a model did the writing.
 
-Publishing to a remote is a third identity's job, and it never happens from a workspace.
+Publishing to a remote is a third identity's job. It happens only from a project repository that carries a REMOTE.md naming its trigger, never from workspace-tracked state.
 
 ## Working here
 

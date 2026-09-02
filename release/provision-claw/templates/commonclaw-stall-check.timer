@@ -1,0 +1,13 @@
+[Unit]
+Description=Firm-VM stall check, hourly
+
+[Timer]
+# Seven past, so the beat does not land on the updater's hour boundary or the
+# backup rail's half hour. Persistent means a box that was off runs one
+# catch-up beat rather than none.
+OnCalendar=*-*-* *:07:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

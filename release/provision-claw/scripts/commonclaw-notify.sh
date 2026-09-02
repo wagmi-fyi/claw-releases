@@ -127,6 +127,7 @@ class_title() {
     seat-fault)    printf 'seat fault' ;;
     backup-health) printf 'backup rail' ;;
     update-health) printf 'release rail' ;;
+    memory-pressure) printf 'memory pressure' ;;
     claw-note)     printf 'note' ;;
     *) return 1 ;;
   esac
@@ -137,6 +138,7 @@ class_default_level() {
     seat-fault)    printf 'warn' ;;
     backup-health) printf 'warn' ;;
     update-health) printf 'info' ;;
+    memory-pressure) printf 'warn' ;;
     claw-note)     printf 'info' ;;
     *) return 1 ;;
   esac

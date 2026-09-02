@@ -1,0 +1,18 @@
+# Installed VERBATIM, never rendered. See bus-nudge@.service.
+#
+# The service restarts itself. This timer is the second net under it: systemd
+# gives up on a unit that restarts too often, and a unit that has given up
+# leaves nothing behind that says so. Starting an already-running instance is a
+# no-op, so this beat costs nothing on a healthy claw and is the only thing
+# that brings back a dead one without somebody noticing first.
+[Unit]
+Description=Bus nudge for %i, restarted if it ever stopped
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*-*-* *:0/5:00
+RandomizedDelaySec=30
+Unit=bus-nudge@%i.service
+
+[Install]
+WantedBy=timers.target

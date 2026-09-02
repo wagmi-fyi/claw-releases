@@ -33,9 +33,9 @@
 #   identity           user.name, user.email and user.useConfigOnly all resolve
 #                      here. useConfigOnly is what turns an invented identity
 #                      into a refusal.
-#   remote-trigger     a remote is configured and no trigger is stated. SEE THE
-#                      LIMIT BELOW: this rule is underspecified in the
-#                      convention and this script's answer is a derivation.
+#   remote-trigger     a remote is configured and the repository has no root
+#                      REMOTE.md. That file is where the convention puts the
+#                      statement, so its presence is what this rule tests.
 #   vendored-tracked   node_modules or .venv is tracked. Dependencies belong to
 #                      the project on the project's clock, never in history.
 #   database-tracked   database/ exists and is tracked or not ignored. The
@@ -64,21 +64,14 @@
 #   One worktree per concurrent editor. A lane is only wrong while two live
 #   sessions share it, and liveness is not in the repository.
 #
-# THE LIMIT ON remote-trigger. The convention says the trigger is named IN THE
-# REPOSITORY and does not say where, so no check can find it without picking a
-# place the convention never picked. This script searches the root documents
-# named in TRIGGER_DOCS for a line carrying both a remote word and one of the
-# six triggers. That set is this script's derivation and not the convention's
-# ruling, so a repository can conform to the convention and still fail here.
-# The rule is reported with that caveat in its message. It is written down
-# rather than worked around, and closing it is a one-sentence edit to the
-# convention saying where the trigger is written.
+# WHAT remote-trigger READS. The convention puts the statement in a root
+# REMOTE.md and says every repository with a remote carries one. This rule
+# tests for that file and nothing else. It does not grade the wording, because
+# a person writes the reason and a machine has no standing to mark it.
 #
 set -uo pipefail
 
-TRIGGER_DOCS="README.md CLAUDE.md AGENTS.md REMOTE.md"
-TRIGGER_WORDS='continuous integration|published|open.source|not seated|the fleet|upstream|fork|mirror'
-REMOTE_WORDS='remote|origin'
+TRIGGER_DOC="REMOTE.md"
 
 # High-signal only. A pattern that fires on prose teaches its reader to ignore
 # it, and the cost of a missed secret is paid once while the cost of a noisy
@@ -142,22 +135,14 @@ check_repo() {
   done
 
   # -- remote-trigger
-  local r url found doc
+  local r url
   for r in $(g remote); do
     url="$(g remote get-url "$r")"
-    found=""
-    for doc in $TRIGGER_DOCS; do
-      [ -f "$REPO/$doc" ] || continue
-      if grep -Eiq "($REMOTE_WORDS)" "$REPO/$doc" 2>/dev/null &&
-         grep -Eiq "($TRIGGER_WORDS)" "$REPO/$doc" 2>/dev/null; then
-        found="$doc"; break
-      fi
-    done
-    if [ -n "$found" ]; then
-      note "remote '$r' -> $url; trigger stated in $found"
+    if [ -f "$REPO/$TRIGGER_DOC" ]; then
+      note "remote '$r' -> $url; trigger stated in $TRIGGER_DOC"
     else
       violate remote-trigger "$r -> $url" \
-        "a remote is configured and no trigger is stated in [$TRIGGER_DOCS]. The convention requires the trigger be named in the repository and does not say where, so this location set is this check's derivation"
+        "a remote is configured and there is no root $TRIGGER_DOC. The convention says the statement lives in that file and that every repository with a remote carries one"
     fi
   done
 

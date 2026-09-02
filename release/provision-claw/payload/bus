@@ -18,9 +18,10 @@ Design properties (see reference/session-bus.md + reference/substrate.md):
     every message records the account the send ran as, beside the `from` handle
     the sender typed.
 
-Invoke:  /opt/commonclaw/bin/bus <cmd> ... on a claw, where provisioning installs
-         this file. The orchestrate skill reaches the same program through a
-         symlink at ~/.claude/skills/orchestrate/scripts/bus. Not on PATH.
+Invoke:  <install-dir>/bus <cmd> ... on a machine that installs this file once
+         for everybody on it. The orchestrate skill reaches the same program
+         through a symlink at ~/.claude/skills/orchestrate/scripts/bus. Neither
+         is on PATH.
 """
 import sys, os, json, uuid, argparse, time, re, pwd
 from datetime import datetime
@@ -64,8 +65,8 @@ def file_mode_for(dir_mode):
 
 def is_shared_bus():
     """A bus more than one unix account can write. Setgid plus group-write is
-    what makes that true and is what provisioning sets on a claw bus, so the
-    mode is read rather than a flag being trusted."""
+    what makes that true, and it is what a machine-wide install sets on a
+    shared bus, so the mode is read rather than a flag being trusted."""
     m = root_dir_mode()
     return bool(m & 0o2000) and bool(m & 0o070)
 
@@ -262,6 +263,43 @@ def pid_alive(pid):
         return False
 
 
+def session_registry_dir():
+    """Where the harness records the sessions it is running right now.
+
+    Read for the reason session_identity() reads the environment: this is the
+    harness's own record of itself, and nothing derived beats it. A harness
+    that keeps no such directory yields nothing here, and the caller falls
+    back to the process the handle registered with.
+    """
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    return Path(base) / "sessions"
+
+
+def live_session(session_id):
+    """The harness's current record for a session id, or None if it is gone.
+
+    A session keeps its id across a resume and comes back under a new process.
+    So the pid a handle registered with goes stale while the session it names
+    is still there and still working. The id is the half that holds, and this
+    is the lookup that turns it back into a running process and the name the
+    listing prints for it.
+    """
+    if not session_id:
+        return None
+    try:
+        files = sorted(session_registry_dir().glob("*.json"))
+    except OSError:
+        return None
+    for f in files:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("sessionId") == session_id and pid_alive(rec.get("pid")):
+            return rec
+    return None
+
+
 def cmd_init(a):
     ensure_dirs()
     reject_flag_handle(a.handle)
@@ -276,7 +314,7 @@ def cmd_init(a):
         prior = h.get(a.handle)
 
         # ── A HANDLE IS REFUSED TO ITS SECOND CLAIMANT, NEVER TAKEN FROM ITS FIRST ──
-        # On a claw bus the handle space is shared by people, not just by
+        # On a shared bus the handle space is shared by people, not just by
         # sessions, so a collision is somebody else's session, live, addressed by
         # that name. Overwriting the registration would silently redirect every
         # message meant for them into this session's inbox, and neither side
@@ -315,6 +353,9 @@ def cmd_init(a):
         # guessed. A handle registered by hand, or under a harness that
         # exports neither, records nothing and reads as unknown, never as gone.
         ident = session_identity()
+        # The send address lives here for the same reason the session identity
+        # does: the registering session is the one place the value is known.
+        # A re-register without --address keeps the prior value.
         h[a.handle] = {
             "pane": pane,
             "owner": who,
@@ -323,6 +364,7 @@ def cmd_init(a):
             "started": now_iso(),
             "session": ident["session"],
             "pid": ident["pid"],
+            "address": a.address or (prior or {}).get("address", ""),
         }
         write_handles(h)
 
@@ -440,6 +482,7 @@ def cmd_whois(a):
         "cwd": v.get("cwd"),
         "pane": v.get("pane") or None,
         "role": v.get("role") or None,
+        "address": v.get("address") or None,
         "registered": v.get("started"),
     }, indent=2))
     # A handle registered before it carried a session, or by a caller whose
@@ -453,6 +496,60 @@ def cmd_whois(a):
     # 0 the session is alive, 2 it is gone, 3 nothing was recorded to ask about.
     # Unknown is its own answer: a gate that reads it as gone retires a live handle.
     sys.exit({True: 0, False: 2, None: 3}[alive])
+
+
+def cmd_wake(a):
+    """The address a wake goes to, resolved from what the handle recorded.
+
+    This prints an address and stops there. On a harness whose wake is a tool
+    inside a session, a command line has no way to send one, and a CLI that
+    claimed to deliver would report a wake nobody received. Printing the
+    address is the whole of what can be done honestly from here.
+
+    Exit: 0 resolved / 1 no such handle / 2 the session is gone / 3 the handle
+    records no session / 4 it is live and nothing records how to address it.
+    """
+    v = read_handles().get(a.handle)
+    if v is None:
+        print(f"no handle '{a.handle}' on this bus.", file=sys.stderr)
+        sys.exit(1)
+
+    session = v.get("session")
+    if not session:
+        # Registered before the handle carried a session, or under a harness
+        # that exports none. There is nothing to resolve, and the address the
+        # registration holds is unverifiable, so it is not offered: a wake to
+        # a stale address lands in a stranger and reads as delivered.
+        print(f"handle '{a.handle}' records no session, so nothing here can say where "
+              f"it is. Re-register it from inside its session.", file=sys.stderr)
+        sys.exit(3)
+
+    rec = live_session(session)
+    if rec is not None:
+        address = rec.get("name") or v.get("address") or ""
+        source = "the harness's live record"
+    elif not session_registry_dir().is_dir():
+        # Nothing on this harness records live sessions, so the registered
+        # process is the only liveness there is.
+        if not pid_alive(v.get("pid")):
+            print(f"the session behind '{a.handle}' is gone: process {v.get('pid')} is not "
+                  f"running and this harness records no live sessions.", file=sys.stderr)
+            sys.exit(2)
+        address = v.get("address") or ""
+        source = "the handle's own registration, whose process is still alive"
+    else:
+        print(f"the session behind '{a.handle}' is gone. It registered as {session}, and "
+              f"no session running now carries that id.", file=sys.stderr)
+        sys.exit(2)
+
+    if not address:
+        print(f"'{a.handle}' is live and nothing records what to address it as. "
+              f"Re-register it from inside its session with --address.", file=sys.stderr)
+        sys.exit(4)
+
+    print(address)
+    print(f"  from {source}. Send the wake with your harness's own peer-send tool; "
+          f"this CLI cannot deliver one.", file=sys.stderr)
 
 
 def cmd_rotate(a): # hygiene: move already-read messages out so inboxes stay small
@@ -650,6 +747,9 @@ def main():
 
     s = sub.add_parser("init", help="register this session's handle (call once at launch)")
     s.add_argument("handle"); s.add_argument("--pane", default=""); s.add_argument("--role", default="")
+    s.add_argument("--address", default="",
+                   help="the peer-visible send address for this session (the name the "
+                        "agent listing prints). Omitted on re-register, the prior value holds.")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("send", help="send a message: bus send <from> <to> <subject> [body] [--ref FILE]")
@@ -674,6 +774,9 @@ def main():
 
     s = sub.add_parser("whois", help="the session behind a handle: id, pid, whether it is alive")
     s.add_argument("handle"); s.set_defaults(func=cmd_whois)
+
+    s = sub.add_parser("wake", help="print the address a wake to this handle goes to (it does not send)")
+    s.add_argument("handle"); s.set_defaults(func=cmd_wake)
 
     s = sub.add_parser("rotate", help="move already-read messages out of MY inbox")
     s.add_argument("handle"); s.set_defaults(func=cmd_rotate)

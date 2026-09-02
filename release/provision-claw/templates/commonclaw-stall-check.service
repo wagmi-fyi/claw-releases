@@ -1,0 +1,17 @@
+[Unit]
+Description=Firm-VM stall check: say out loud when an orchestration stopped being read
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The webhook reference resolves under the machine service account. systemd
+# decrypts the credential, so this unit never touches the encrypted file itself
+# and the notifier's second token path answers.
+LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/usr/local/sbin/commonclaw-stall-check.sh
+# No Restart=. A beat that could not deliver must wait for the next beat: this
+# is the rail that reports silence, and a rail that crashloops is a new silence
+# with a louder journal.
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,35 @@
+# Installed VERBATIM, never rendered. The %i is systemd's own instance
+# expansion, and render-template.sh must not touch this file.
+#
+# One instance per account: bus-nudge@jeremiah.service. The rail runs AS the
+# session owner and never as root on their behalf, because everything it needs
+# -- the session records, the socket, the auth key -- is written by the session
+# under that account, and delivery into somebody else's session is a different
+# act with a different consent story.
+#
+# LONG-RUNNING, NOT A BEAT. This is where this rail parts from the backup and
+# stall rails, and the reason is measured: an idle session's supervisor exits
+# about 65 seconds after the session goes quiet. A nudge that arrives on the
+# next timer beat arrives at a process that is already gone. So the watcher
+# stays up and polls in seconds, and the timer beside it exists only to start
+# it again if Restart ever gives up.
+[Unit]
+Description=Bus nudge for %i: tell a live session it has unread bus mail
+Documentation=file:/opt/commonclaw/doc/wake-rail.md
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/opt/commonclaw/bin/bus-nudge --watch
+# A rail that reports silence must not become a new silence. Restart, but not
+# faster than the thing it is watching changes.
+Restart=always
+RestartSec=10
+# It reads inboxes and writes one line into a socket. Neither is urgent enough
+# to take a slice from the sessions it serves.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

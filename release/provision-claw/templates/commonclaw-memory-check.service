@@ -1,0 +1,24 @@
+# Installed VERBATIM, never rendered. render-template.sh must not touch this
+# file: it carries no substitution and a claw's name reaches the check from
+# /etc/commonclaw/provision.conf, not from a unit.
+[Unit]
+Description=Firm-VM memory check: alarm on memory pressure, ping the dead-man check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The heartbeat reference resolves under the machine service account. systemd
+# decrypts the credential, so this unit never touches the encrypted file itself
+# and the check's first token path answers. The same shape the stall check uses.
+LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/usr/local/sbin/commonclaw-memory-check.sh
+# No Restart=. A beat that could not deliver waits for the next beat. This is a
+# rail that reports trouble, and a rail that crashloops is new trouble with a
+# louder journal. It is also the rail that runs while the box is short of
+# memory, so it must be the cheapest thing on it.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
