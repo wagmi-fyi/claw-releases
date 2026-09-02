@@ -601,15 +601,30 @@ def sweep(settings, adapter, dry_run=False):
                 continue
 
             owner = rec.get("owner") or "?"
+
+            # THE DEDUPE READ COMES BEFORE EVERY REFUSAL, and the ownership one
+            # sat above it. `record` writes the dedupe state and nothing read it
+            # back on this path, so a handle belonging to somebody else and
+            # carrying unread mail was logged once per pass, every POLL_SECS,
+            # forever. Measured on a claw on 2026-09-02: about 96 lines a
+            # minute, 138,000 a day, for one account, against 1 line over the
+            # same window for the account whose handles these were. That is
+            # three times the volume the unit template names as the thing it
+            # fixes, and it is paid in a journal every other unit on the box
+            # shares.
+            #
+            # The `human` skip ten lines above is the same shape caught earlier:
+            # a handle that can never be drained fires every pass. The
+            # liveness refusal below was already on the right side of this read.
+            state = read_state(state_file(settings, bus_dir, handle))
+            if state.get("last_id") and state.get("last_id") == newest:
+                continue
+
             if owner != me:
                 results.append(
                     record(settings, bus_dir, handle, newest, "refused",
                            "handle belongs to %s, not %s" % (owner, me), dry_run)
                 )
-                continue
-
-            state = read_state(state_file(settings, bus_dir, handle))
-            if state.get("last_id") and state.get("last_id") == newest:
                 continue
 
             live, why = liveness(rec)

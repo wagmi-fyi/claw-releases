@@ -156,8 +156,71 @@ done
 # ADOPTED, NEVER OVERWRITTEN. A conf on the claw is somebody's ruling about this
 # machine. Seeding an absent one is help; replacing a present one is reverting
 # a decision nobody asked to revert.
-if [ -e "$CONF" ]; then
-  ok "conf at ${CONF} already exists and was left exactly as it is"
+#
+# A MISSING KEY IS APPENDED WITH ITS DEFAULT, and no existing key is touched.
+# Seeded-once meant a setting added by a later release never reached a claw that
+# already had the file. `IDLE_POLL_SECS` shipped in 1.4.1 and no claw provisioned
+# before it could see the key existed, let alone tune it. Nothing broke, because
+# the program carries the same default, and that is the whole cost: a firm could
+# not tune a setting by editing a file the run would not touch, and nothing told
+# them it was there.
+#
+# APPENDED, NEVER REWRITTEN. The key arrives at the end of the file with a
+# comment naming the release that added it, so somebody reading their own conf
+# can see which lines are theirs and which arrived on an update. A key already
+# present keeps its value whatever it is, including one that differs from the
+# template, because that is somebody's ruling.
+#
+# THE KEY LIST COMES FROM THE TEMPLATE, so a key added there in a later release
+# reaches an existing conf without this script being edited again.
+# THE STAGE'S OWN release.json, and nothing else. A stage carries the release
+# being applied, which is the release that added the key. The claw's
+# /etc/commonclaw/release.json names the version the box still carries, which
+# during an apply is the OLD one, so reading it would write the wrong release
+# into somebody's conf. Where there is no stage, the comment says "a later
+# release" and names nothing.
+conf_release_name() {
+  local f="${HERE}/../../release.json"
+  [ -r "$f" ] || { printf ''; return 0; }
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1
+}
+
+conf_add_missing_keys() {
+  local template="$1" conf="$2" line key added=0 rel
+  rel="$(conf_release_name)"
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Z_]*=*) key="${line%%=*}" ;;
+      *) continue ;;
+    esac
+    grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$conf" && continue
+    if [ "$MODE" = dry-run ]; then
+      ok "${DRY}append ${key} to ${conf} with its shipped default"
+      added=$((added + 1))
+      continue
+    fi
+    {
+      printf '\n'
+      if [ -n "$rel" ]; then
+        printf '# %s arrived in release %s. This file was seeded before it existed,\n' "$key" "$rel"
+      else
+        printf '# %s arrived in a release later than the one that seeded this file,\n' "$key"
+      fi
+      printf '# so the shipped default is appended here. What it does is written in\n'
+      printf '# the shipped template beside this script.\n'
+      printf '%s\n' "$line"
+    } >> "$conf"
+    ok "${key} was missing from ${conf} and its shipped default was appended"
+    added=$((added + 1))
+  done < "$template"
+  [ "$added" -gt 0 ] || ok "${conf} carries every key this release ships"
+}
+
+if [ ! -r "${TEMPLATE_DIR}/bus-nudge.conf" ]; then
+  bad "no ${TEMPLATE_DIR}/bus-nudge.conf — this script owns the claw's conf and cannot seed or complete one without it"
+elif [ -e "$CONF" ]; then
+  ok "conf at ${CONF} already exists and its existing keys were left exactly as they are"
+  conf_add_missing_keys "${TEMPLATE_DIR}/bus-nudge.conf" "$CONF"
 elif [ "$MODE" != dry-run ]; then
   install -m 0644 -o root -g root "${TEMPLATE_DIR}/bus-nudge.conf" "$CONF"
   ok "conf seeded at ${CONF}"

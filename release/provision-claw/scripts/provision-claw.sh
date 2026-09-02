@@ -5255,17 +5255,36 @@ NOTIFYENVEOF
   #
   # The claim that each row is read for its TITLE needs its own control, and this
   # is it: six classes, six distinct titles, pulled out of the rendered text.
+  # `|| true` ON THE ASSIGNMENT, and it is the whole reason this phase can run
+  # on a claw nobody has wired yet. The notifier exits 3 when no webhook
+  # resolves, which this phase treats as a supported state eleven lines below.
+  # Under `set -euo pipefail` that 3 leaves the pipeline, the loop, the command
+  # substitution and the assignment in turn, and kills the run. The two controls
+  # above carry `|| true` on their own capture for the same reason and survive
+  # the identical exit. This one did not, so the first claw on the rail with no
+  # channel wired aborted its whole apply here, at phase 22, eleven lines above
+  # the sentence that tells the firm how to wire one. Measured on a tenant claw
+  # on 2026-09-02. [O 2026-09-02]
+  #
+  # The exit code is all that is lost. A dry run prints its rendered payload
+  # before it exits 3, so the titles are captured either way and this control
+  # still measures the table on a claw with no webhook.
   local titles distinct
   titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note; do
     NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>/dev/null \
       | sed -n 's/^  "text": "[^·]*· \(.*\) · .*/\1/p'
-  done)"
+  done)" || true
   # grep -c PRINTS 0 and EXITS 1 on no match, so the fallback is an assignment
   # rather than an appended second line.
   distinct="$(printf '%s\n' "$titles" | sort -u | grep -c . )" || distinct=0
   if [ "$distinct" -eq 6 ]; then
     ok "the six classes render six distinct titles, so the class table is read row by row"
+  elif [ "$distinct" -eq 0 ]; then
+    # Zero is a different finding from two-sharing-a-heading, and naming it as
+    # the sharing case sends a reader to the class table when the notifier
+    # printed nothing at all.
+    bad "the six classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
   else
     bad "the classes render ${distinct} distinct title(s), not six: two of them share a heading and a finding lands under the wrong topic"
   fi
