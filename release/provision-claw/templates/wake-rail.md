@@ -61,6 +61,20 @@ then the machine conf, then detection. Nothing left to resolve is an error. A
 declared substrate whose adapter is absent is refused by name, because a rail
 that quietly delivered nothing would read exactly like a quiet bus.
 
+The machine conf is `/etc/commonclaw/bus-nudge.conf`, which is the file the
+installer writes and the file a claw-admin edits. The program reads that path by
+default, so a hand run of `bus-nudge` reads what the service reads.
+`BUS_NUDGE_CONF` in the environment points it somewhere else, which is how a
+setting is tried before it is written down.
+
+A live tmux server on an account counts as a session. Detection asks `claude`
+first and `tmux` next, so an account with nobody signed in to a core and one
+tmux server left running from weeks ago resolves `tmux`, and the rail delivers
+into that pane rather than reading the account as idle. The pane gets the same
+one sentence. Closing that server is what makes the account idle. `bus-nudge
+--check` names the adapter it resolved, so it answers which of the two states an
+account is in.
+
 ## Install
 
 `scripts/install-bus-nudge.sh` stands it, one systemd instance per account, each
