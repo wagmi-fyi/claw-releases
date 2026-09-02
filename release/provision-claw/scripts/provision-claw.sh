@@ -1145,9 +1145,88 @@ wide_mode_resolve() {
 # A trailing `#` is not treated as a comment start. sudoers reads `#1000` as a
 # uid, so stripping from the first `#` on a line would mangle a grant rather
 # than normalize it.
+# Every line of a sudoers file that says something, one statement per line.
+#
+# CONTINUATIONS ARE JOINED FIRST. sudoers wraps a long statement with a trailing
+# backslash, and a line-at-a-time reading takes the first fragment for the whole
+# statement and reads each remaining fragment as a statement of its own. That
+# turns one correct alias into a handful of grants nobody wrote. Joining here
+# rather than in each caller is what keeps the three readings that use this
+# agreeing about what a line is.
 sudoers_grant_lines() {
-  sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' "$1" 2>/dev/null \
+  sed -e :a -e '/\\$/{N;s/\\\n//;ba' -e '}' "$1" 2>/dev/null \
+    | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' \
     | grep -v '^#' | grep -v '^$' || true
+}
+
+# The command list the claw-admin door grants, read out of the file that grants
+# it.
+#
+# WHY THE FILE AND NOT `sudo -l`. A listing answers what a caller may run
+# through every sudoers file on the claw at once. On a wide-mode claw the
+# honest answer is "everything", and it says nothing about whether THIS door is
+# scoped. So a claim about the door's scope is measured where the scope is
+# written. Driven on wagmi on 2026-09-02, where three controls that read the
+# listing went red and each was reporting the truth about the box.
+#
+# It reads through sudoers_grant_lines, so a wrapped alias arrives whole and a
+# door file missing most of its commands cannot pass as a correct one.
+door_file_commands() {
+  local f="$1"
+  [ -r "$f" ] || return 1
+  sudoers_grant_lines "$f" \
+    | sed -n 's/^Cmnd_Alias COMMONCLAW_ADMIN_OPS = //p' \
+    | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | LC_ALL=C sort -u
+}
+
+# Every line in a sudoers file that grants somebody something, with the alias
+# definitions taken out. The door declares exactly one, so a second one is a
+# grant nobody wrote down. Without this an alias naming eleven scripts could sit
+# in a file that also opened everything on the next line.
+door_file_rules() {
+  sudoers_grant_lines "$1" | grep -v '^Cmnd_Alias ' | grep -v '^Defaults'
+}
+
+# Which sudoers files grant this caller a blanket command of ALL.
+#
+# SUDO CANNOT BE ASKED THIS. `sudo -l` says the caller holds a blanket entry and
+# never which file wrote it, so a wide-mode claw cannot tell its own declared
+# grant from one somebody left behind. Reading the files answers it, and that
+# answer is what wide mode has to be held to: one file, the one phase 19 owns.
+#
+# A grant reaches this caller when its principal is the account, one of its
+# groups, or ALL. The command is matched by SHAPE rather than by a list of
+# spellings, for the reason the listing check already gives: sudo writes the
+# runas specification several ways, and enumerating them means the reading
+# silently stops covering whichever form nobody thought of.
+blanket_grant_files() {
+  local who="$1" gtext f line princ cmds
+  gtext=" $(id -nG "$who" 2>/dev/null || true) "
+  for f in "$SUDOERS_MAIN" "$SUDOERS_DIR"/*; do
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    while IFS= read -r line; do
+      case "$line" in
+        Cmnd_Alias\ *|User_Alias\ *|Runas_Alias\ *|Host_Alias\ *|Defaults*|'#include'*|'@include'*) continue ;;
+      esac
+      case "$line" in *=*) : ;; *) continue ;; esac
+      princ="${line%% *}"
+      cmds="${line#*=}"          # (root) NOPASSWD: COMMONCLAW_ADMIN_OPS
+      cmds="${cmds#*)}"          # past the runas specification, where there is one
+      cmds="${cmds##*:}"         # past the tag, where there is one
+      cmds="${cmds# }"
+      [ "$cmds" = "ALL" ] || continue
+      case "$princ" in
+        ALL) : ;;
+        %*)  case "$gtext" in *" ${princ#%} "*) : ;; *) continue ;; esac ;;
+        *)   [ "$princ" = "$who" ] || continue ;;
+      esac
+      printf '%s\n' "$f"
+      break
+    done < <(sudoers_grant_lines "$f")
+  done | LC_ALL=C sort -u
 }
 
 # ---------------------------------------------------------------- digests
@@ -1314,7 +1393,8 @@ phase_1_preflight() {
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
            core-version.sh commonclaw-update.sh agents-plane.sh \
            commonclaw-memory-check.sh commonclaw-notify.sh \
-           commonclaw-stall-check.sh install-bus-nudge.sh; do
+           commonclaw-stall-check.sh install-bus-nudge.sh \
+           check-git-conventions.sh install-heartbeat-url.sh unit-health.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
   for g in "${GRANTED_SCRIPTS[@]}"; do
@@ -1388,6 +1468,15 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../payload/bus-nudge"
   [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] \
     || missing_payload="$missing_payload ../payload/bus-nudge-adapters"
+  # EACH ADAPTER BY NAME, and not just the directory. A present-but-short
+  # directory passes the reading above while the rail's detection ladder walks
+  # past the substrate this machine actually runs and reports a wall. The names
+  # are the ladder's, in the ladder's order, and a cut that lost one refuses
+  # here rather than on somebody's claw.
+  for s in claude tmux codex; do
+    [ -r "${PAYLOAD_DIR}/bus-nudge-adapters/${s}" ] \
+      || missing_payload="$missing_payload ../payload/bus-nudge-adapters/${s}"
+  done
   [ -r "${TEMPLATE_DIR}/bus-nudge.conf" ] \
     || missing_payload="$missing_payload ../templates/bus-nudge.conf"
   [ -r "${TEMPLATE_DIR}/bus-nudge@.service" ] \
@@ -1396,6 +1485,12 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/bus-nudge@.timer"
   [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
     || missing_payload="$missing_payload ../templates/wake-rail.md"
+  # The operator's runbook, which the same installer lays beside the member's
+  # doc. It rides in the payload rather than in templates because nothing
+  # renders it, and it is named here for the reason every other doc is: the
+  # installer would otherwise refuse mid-phase on a stage that lost it.
+  [ -r "${PAYLOAD_DIR}/doc/operator-runbook.md" ] \
+    || missing_payload="$missing_payload ../payload/doc/operator-runbook.md"
   # At least one RETIRED generation, and this one is not tidiness.
   #
   # The reconcile recognises an unedited briefing by reproducing a retired
@@ -3260,38 +3355,97 @@ SUDOEOF
     check "grant opens for $(basename "$g"), which it names (as ${prover}, not as root)" \
       member_may_run "$prover" "$g"
   done
-  check "decoy refused: the adjacent script in the same directory is NOT granted" \
-    member_refused "$prover" "$DECOY_SCRIPT"
-  check "decoy cannot be executed either, so nothing beside the grant runs" \
-    member_cannot_execute "$prover" "$DECOY_SCRIPT"
-  check "a shell is refused" member_refused "$prover" /bin/sh
+  # THE REFUSAL PAIR MEASURES THE CLAW. THE FILE READING MEASURES THE DOOR.
+  # Both run, and which one carries the scope claim depends on wide mode.
+  #
+  # With wide mode off a live refusal is the strongest evidence there is: the
+  # grant opens for what it names and the adjacent script in the same directory
+  # is refused, which is the difference between a per-script grant and a
+  # per-directory one.
+  #
+  # With wide mode on, every member holds passwordless root by a ruling this
+  # claw made. Nothing is refused to anybody, so asking sudo about this door's
+  # scope answers a question about the claw instead. Driven on wagmi on
+  # 2026-09-02: these three went red there and each was reporting the truth.
+  # A control that cannot pass on a claw it is correct about is a control that
+  # will one day be edited to match whatever the listing happens to say.
+  if [ "$WIDE_MODE" = "on" ]; then
+    say "  wide mode is on, so no member is refused anything here and no live refusal is possible. This door's scope is measured in ${SUDOERS_DROPIN} below, and the blanket grant is held to one file."
+  else
+    check "decoy refused: the adjacent script in the same directory is NOT granted" \
+      member_refused "$prover" "$DECOY_SCRIPT"
+    check "decoy cannot be executed either, so nothing beside the grant runs" \
+      member_cannot_execute "$prover" "$DECOY_SCRIPT"
+    check "a shell is refused" member_refused "$prover" /bin/sh
+  fi
 
-  # The listing is compared as a SET, not counted. Counting entries answered the
-  # question only while the alias named one script, and a count that has to be
-  # edited every time an operation joins the member plane is a check that will
-  # one day be edited to match whatever the listing happens to say.
-  local listing seen want
-  listing="$(sudo -u "$prover" -H sudo -n -l 2>/dev/null || true)"
-  seen="$(grep -oE '/[^ ,]+\.sh' <<< "$listing" | LC_ALL=C sort -u || true)"
+  # ---- what THIS door grants, read out of the file that grants it ----
+  #
+  # The scope claim lives here on every claw, wide or not, because this is the
+  # only reading that is about the door rather than about the box.
+  local seen want
+  seen="$(door_file_commands "$SUDOERS_DROPIN" || true)"
   want="$(printf '%s\n' "${GRANTED_SCRIPTS[@]}" | LC_ALL=C sort -u)"
   if [ "$seen" = "$want" ]; then
-    ok "the full listing for ${prover} carries exactly the ${#GRANTED_SCRIPTS[@]} granted script(s) and nothing else"
+    ok "${SUDOERS_DROPIN} names exactly the ${#GRANTED_SCRIPTS[@]} granted script(s) in its command alias"
   else
-    bad "the listing for ${prover} does not match the granted set -- it carries: $(printf '%s' "$seen" | tr '\n' ' ')"
+    bad "${SUDOERS_DROPIN}'s command alias does not match the granted set -- it names: $(printf '%s' "$seen" | tr '\n' ' ')"
   fi
-  # A path set can match while the grant is still wide: one entry naming ALL
-  # grants everything and carries no path at all for the comparison above to see.
+
+  # The alias is half the claim. A file could name the right eleven and grant
+  # something else on the next line, and the reading above would pass.
+  local rules rule_n
+  rules="$(door_file_rules "$SUDOERS_DROPIN")"
+  rule_n="$(printf '%s' "$rules" | grep -c . || true)"
+  if [ "${rule_n:-0}" = "1" ] && [ "$rules" = "%${CLAW_ADMIN_GROUP} ALL=(root) NOPASSWD: COMMONCLAW_ADMIN_OPS" ]; then
+    ok "${SUDOERS_DROPIN} carries one grant line and it opens nothing but that alias"
+  else
+    bad "${SUDOERS_DROPIN} carries ${rule_n:-0} grant line(s) where this door declares one: $(printf '%s' "$rules" | tr '\n' '; ')"
+  fi
+
+  # ---- what the CLAW grants this caller, and which file said so ----
   #
-  # Match the SHAPE, not a list of spellings. sudo writes the runas
-  # specification several ways -- (ALL), (root), (ALL : ALL) -- and enumerating
-  # them means the check silently stops covering whichever form nobody thought
-  # of. Every one of them ends the specification with a parenthesis before the
-  # command, so a command of ALL is what is being looked for.
-  case "$listing" in
-    *") ALL"*|*"NOPASSWD: ALL"*)
-      bad "the listing for ${prover} carries a blanket ALL entry -- the grant is not scoped to scripts" ;;
-    *) ok "the listing carries no blanket ALL entry" ;;
-  esac
+  # THE OLD SENTENCE HERE CLAIMED MORE THAN IT MEASURED. It compared the whole
+  # listing against the granted set and said "and nothing else" when the two
+  # matched. On wagmi that match held while a blanket ALL sat two lines below in
+  # the same output, because a blanket entry names no path for a path comparison
+  # to see. Nothing was hidden, because the check below caught it, and the
+  # sentence was still wider than its evidence.
+  #
+  # It now says what it measures: every script PATH the listing names is one
+  # this door grants. That stays true and stays worth having under wide mode,
+  # where the caller may run everything and the listing still enumerates no
+  # second path. The blanket reading beside it carries the other half.
+  #
+  # The set is compared, never counted. A count has to be edited every time an
+  # operation joins the member plane, and a check that gets edited to match the
+  # listing is a check that has stopped asking anything.
+  local listing seen_paths
+  listing="$(sudo -u "$prover" -H sudo -n -l 2>/dev/null || true)"
+  seen_paths="$(grep -oE '/[^ ,]+\.sh' <<< "$listing" | LC_ALL=C sort -u || true)"
+  if [ "$seen_paths" = "$want" ]; then
+    ok "the listing for ${prover} names no script path outside the ${#GRANTED_SCRIPTS[@]} this door grants"
+  else
+    bad "the listing for ${prover} names script path(s) this door does not grant: $(printf '%s' "$seen_paths" | tr '\n' ' ')"
+  fi
+
+  # A path set can match while the grant is still wide: one entry naming ALL
+  # grants everything and carries no path at all. Which FILE wrote that entry is
+  # the question, and sudo cannot be asked it, so the files are read.
+  local blanket blanket_n
+  blanket="$(blanket_grant_files "$prover")"
+  blanket_n="$(printf '%s' "$blanket" | grep -c . || true)"
+  if [ "$WIDE_MODE" = "on" ]; then
+    if [ "$blanket" = "$WIDE_SUDOERS" ]; then
+      ok "wide mode is on, and ${WIDE_SUDOERS} is the ONLY file granting ${prover} a blanket ALL"
+    else
+      bad "wide mode is on and ${prover}'s blanket grant comes from ${blanket_n:-0} file(s) rather than ${WIDE_SUDOERS} alone: $(printf '%s' "$blanket" | tr '\n' ' ')"
+    fi
+  elif [ "${blanket_n:-0}" -eq 0 ]; then
+    ok "no sudoers file grants ${prover} a blanket ALL"
+  else
+    bad "wide mode is off and sudoers file(s) grant ${prover} a blanket ALL: $(printf '%s' "$blanket" | tr '\n' ' ')"
+  fi
 }
 
 # ---------------------------------------------------------------- phase 14

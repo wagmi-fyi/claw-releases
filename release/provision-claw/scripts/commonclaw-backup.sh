@@ -101,12 +101,19 @@ log() { logger -t commonclaw-backup -p "user.$1" -- "$2"; printf '[%s] %s\n' "$1
 
 # --- invariant 1 ------------------------------------------------------------
 consistency_pass() {
+  # GUARDED FOR THE REASON LINE 202 GIVES. `install -d -m` applies its mode to a
+  # directory that already exists, so an unguarded call here owns the mode of
+  # whatever it finds and re-asserts it on every run. Neither of these two is a
+  # directory another component writes under today, and the guard costs nothing
+  # and makes that stay true.
+  local parent
   rm -rf "$CONSISTENT"
-  install -d -m 0700 "$CONSISTENT"
+  [ -d "$CONSISTENT" ] || install -d -m 0700 "$CONSISTENT"
   local db dest n=0 raw=0 failed=0
   while IFS= read -r -d '' db; do
     dest="${CONSISTENT}${db}"
-    install -d -m 0700 "$(dirname "$dest")"
+    parent="$(dirname "$dest")"
+    [ -d "$parent" ] || install -d -m 0700 "$parent"
     if sqlite3 "$db" ".backup '$dest'" 2>/dev/null; then
       n=$((n+1))
     elif sqlite3 "file:${db}?immutable=1" ".backup '$dest'" 2>/dev/null; then
@@ -277,7 +284,9 @@ cmd_restore() {
     /|/srv/*|/home/*|/etc/*|/var/lib/*)
       log err "restore destination must be scratch, never live data"; exit 1 ;;
   esac
-  install -d -m 0700 "$dest"
+  # A scratch destination somebody made keeps the mode they gave it. Same reason
+  # as above: this line would otherwise re-mode a directory it did not create.
+  [ -d "$dest" ] || install -d -m 0700 "$dest"
   if restic restore latest --retry-lock 5m --target "$dest"; then
     log info "restored the latest snapshot to ${dest}"
   else

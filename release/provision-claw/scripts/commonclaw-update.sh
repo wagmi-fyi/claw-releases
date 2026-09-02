@@ -953,3 +953,37 @@ if [ "$OUTSIDE_WINDOW" -eq 1 ]; then
 else
   log info "release ${OFFERED} applied; this claw now carries it"
 fi
+
+# ---------------------------------------------------------------- the health
+#
+# THE APPLY PASSING IS NOT THE SAME QUESTION AS THE BOX BEING WELL. A release
+# converges units, and a unit this run laid can come up and then start dying on
+# a schedule with every check in the run already green. Nobody watches an
+# unattended tick, so the reading goes in the journal beside the verdict.
+#
+# IT NEVER FAILS THE UPDATE. The release applied and that stays true. A unit
+# this apply did not lay can be looping for its own reasons, and turning that
+# into a failed update would move the carried version backwards over somebody
+# else's fault. So this warns and the verdict is untouched.
+#
+# The reading comes from the sibling rather than from a `systemctl --failed`
+# line here, because the ride runbook tells a person to run the same reading and
+# two copies would drift on what healthy means.
+health_reader="${PLANE}/scripts/unit-health.sh"
+[ -r "$health_reader" ] || health_reader="${FLEET_STAGE}/provision-claw/scripts/unit-health.sh"
+if [ -r "$health_reader" ]; then
+  # shellcheck source=unit-health.sh
+  . "$health_reader"
+  health_out=""
+  if health_out="$(unit_health 2>&1)"; then
+    log info "unit health after the apply: ${health_out}"
+  else
+    while IFS= read -r health_line; do
+      [ -n "$health_line" ] || continue
+      log warning "unit health after the apply: ${health_line}"
+    done <<< "$health_out"
+    log warning "the release applied and this claw carries it. The units above are a separate matter and nothing here retries them"
+  fi
+else
+  log warning "no unit-health.sh beside this script, so the apply's end-of-run health was not read"
+fi

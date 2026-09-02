@@ -343,12 +343,46 @@ ok "the machine credential decrypts, so this claw can act as itself"
 # Both `op item create` and `op item edit` take --template; assignment statements
 # would put the URL in argv, where every account on this claw can read it out of
 # /proc while the call is open.
+#
+# STDIN IS CLOSED ON BOTH WRITES, and that is the fix for the defect this door
+# shipped with. `op item create --template` and `op item edit --template` refuse
+# when stdin is not a terminal, saying they cannot take a template and stdin at
+# the same time. Over ssh this script's stdin is a socket, so every
+# non-interactive invocation was refused, and the message blamed a vault
+# permission. Redirecting from /dev/null makes stdin a regular file at EOF,
+# which the manager accepts. Proven on staging on 2026-09-02 by driving the
+# shipped script unchanged with only its stdin closed.
 TEMPLATE="${WORKDIR}/item.json"
 : > "$TEMPLATE"; chmod 0600 "$TEMPLATE"
 printf '{"title":"%s","category":"API_CREDENTIAL","fields":[{"id":"%s","type":"CONCEALED","label":"%s","value":"%s"}]}\n' \
   "$ITEM" "$FIELD" "$FIELD" "$URL" > "$TEMPLATE"
 
 op_said() { tr '\n' ' ' < "${WORKDIR}/op.err" 2>/dev/null | cut -c1-300; }
+
+# WHAT THE MANAGER SAID DECIDES WHAT THIS DOOR SAYS.
+#
+# The old message named a missing write grant on every refusal. The first real
+# refusal in the field was a usage error, and an operator following that message
+# would have gone and granted a permission the account already held, then seen
+# the same failure again. This is the accept-with-a-ledger law turned against
+# itself: a pre-attributed signature swallowing a different cause.
+#
+# So the exit is CLASSIFIED and never asserted. Where the manager's words fit
+# none of these, this says so rather than picking the likeliest.
+op_failure_class() {
+  case "$(op_said)" in
+    *"stdin at the same time"*|*"Usage:"*|*"usage:"*|*"unknown flag"*|*"unknown command"*|*"accepts "*)
+      printf 'the manager refused the CALL rather than the write: it read this invocation as malformed' ;;
+    *"denied"*|*"not allowed"*|*"ermission"*|*"not authorized"*|*"no access"*|*"403"*)
+      printf 'the manager refused on PERMISSION: this account does not hold write on this vault' ;;
+    *"401"*|*"authenticat"*|*"invalid token"*|*"service account"*)
+      printf 'the manager refused the CREDENTIAL: the token this claw decrypted was not accepted' ;;
+    *"connection"*|*"network"*|*"timeout"*|*"timed out"*|*"dial tcp"*|*"no such host"*|*"TLS"*|*"i/o"*)
+      printf 'the manager could not REACH the service' ;;
+    *)
+      printf 'the manager gave a reason this door does not classify' ;;
+  esac
+}
 
 say ""
 say "=== the write ==="
@@ -364,19 +398,22 @@ if [ "$exists" -eq 1 ]; then
   ACTION="edited"
   say "  ${ITEM} already exists in ${VAULT}; its ${FIELD} field is being replaced"
   OP_SERVICE_ACCOUNT_TOKEN="$TOKEN" "$OP_BIN" item edit "$ITEM" --vault "$VAULT" \
-    --template "$TEMPLATE" >/dev/null 2>"${WORKDIR}/op.err" || wr_rc=$?
+    --template "$TEMPLATE" </dev/null >/dev/null 2>"${WORKDIR}/op.err" || wr_rc=$?
 else
   ACTION="created"
   say "  ${ITEM} does not exist in ${VAULT} and is being created"
   OP_SERVICE_ACCOUNT_TOKEN="$TOKEN" "$OP_BIN" item create --vault "$VAULT" \
-    --template "$TEMPLATE" >/dev/null 2>"${WORKDIR}/op.err" || wr_rc=$?
+    --template "$TEMPLATE" </dev/null >/dev/null 2>"${WORKDIR}/op.err" || wr_rc=$?
 fi
 rm -f -- "$TEMPLATE"
 
 if [ "$wr_rc" -ne 0 ]; then
-  bad "the vault ${VAULT} refused the write (manager exit ${wr_rc}). The claw's own service account needs WRITE on its own machine vault, and read alone is the shape most of them ship with."
+  bad "the vault ${VAULT} did not take the write (manager exit ${wr_rc}). $(op_failure_class)."
   say ""
   say "  the manager said: $(op_said)"
+  say ""
+  say "  This door does not decide the cause. Read the line above before changing any grant:"
+  say "  a usage refusal and a permission refusal both exit non-zero and need opposite work."
   say ""
   warn "nothing was changed: a create that fails creates nothing and an edit that fails changes nothing"
   warn "${DROP} was NOT destroyed -- you still hold the only copy"
@@ -399,7 +436,7 @@ rb=""; rb_rc=0
 rb="$(OP_SERVICE_ACCOUNT_TOKEN="$TOKEN" "$OP_BIN" read "$REFERENCE" 2>"${WORKDIR}/op.err")" || rb_rc=$?
 TOKEN=""
 if [ "$rb_rc" -ne 0 ]; then
-  bad "${REFERENCE} does not resolve after the write (manager exit ${rb_rc}): $(op_said)"
+  bad "${REFERENCE} does not resolve after the write (manager exit ${rb_rc}). $(op_failure_class): $(op_said)"
   warn "${DROP} was NOT destroyed -- you still hold the only copy"
   finish
 fi

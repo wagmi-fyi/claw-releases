@@ -1,157 +1,107 @@
-- **Your claw has swap now, and something that acts before it runs out of
-  memory.** On 2026-09-01 a claw filled its memory, started thrashing, and
-  stopped answering ssh for half an hour. Nobody was told, because nothing on
-  the box was watching and nothing off it noticed the silence. Three things
-  changed and this is all of them.
+- **A person who is not signed in no longer fails your claw's update.** The
+  rail that tells a session it has mail runs one watcher per person on the
+  machine. Each watcher needs a live session to hand a message to, and until
+  now, finding none it stopped and was restarted, forever. On a claw with more
+  than one person that is the ordinary state most of the time, and on 2026-09-02
+  it stopped a release from landing on a machine where one person happened to be
+  away.
 
-  **A swapfile, sized at the machine's own memory, never smaller than 2 GB and
-  never larger than 8 GB.** It is a cushion, not more memory: what it buys is
-  the minutes between a session running away and the box becoming unreachable.
-  A claw that already had swap keeps exactly what it had. A claw whose disk is
-  too full to hold one is told so and given none, because a swapfile that fills
-  the disk takes the machine down a second way.
+  A watcher that finds nobody now waits instead. It says so once in the machine
+  log, looks again every minute, and starts delivering the moment that person
+  opens a session. The thing that is still treated as a fault is a machine with
+  no way to reach a session at all, because waiting does not fix that.
 
-  **A guard that ends one runaway process instead of letting the machine seize
-  up.** It picks the largest, which is nearly always the thing that ran away,
-  and it leaves everything else you have open alone.
+  The installer changed with it. It now reports that a watcher is installed and
+  switched on, which is what it can promise, and says separately whether one is
+  running right now. And the unit has a limit on how often it may restart, so
+  something nobody can fix cannot fill the machine log while it tries.
 
-  **An alarm, every five minutes, into the channel this claw posts to.** It says
-  so when available memory drops below fifteen percent or swap goes past half
-  full, and it repeats at most once every six hours while the condition lasts.
+- **Your claw's admin door now proves its scope by reading the grant, not by
+  asking what one person may run.** The door gives your admins a fixed list of
+  the claw's own scripts and nothing else, and the check for that used to ask
+  the system what one of those people could run. On a claw where every member
+  deliberately holds full root, the honest answer to that question is
+  "everything", so the check went red on three counts while reporting the truth
+  about the machine.
 
-- **Something off this claw now notices when it goes quiet.** The same
-  five-minute beat makes one request to a heartbeat check that lives somewhere
-  else. When the requests stop, that check raises the alarm. This is the half an
-  on-box alarm cannot do: a box that is thrashing, off, or gone posts nothing,
-  and silence from something running on the box reads exactly like health.
+  It now reads the grant file itself, which is the only place the door's own
+  scope is written, and holds it to exactly the scripts it should name. On a
+  claw where everyone holds full root, it also checks that the wide grant comes
+  from the one file that is supposed to carry it, so a grant somebody left
+  behind in a second file is still found. Where members do not hold full root,
+  the live refusal checks run exactly as before.
 
-  Standing that check up used to be four steps done by hand, per machine, and it
-  had been done zero times. It is now one command on the operator's side, which
-  makes the check, points it at your alarm channel, and hands the claw its own
-  address; and one command here, which files that address in this claw's vault
-  and proves the claw can read it back before destroying the copy.
+  One sentence in that output claimed more than it measured. It said a person's
+  permissions carried the granted scripts "and nothing else" while a full-root
+  entry sat two lines below it. Nothing was hidden, because the next check
+  caught that entry, and the sentence has been rewritten to say what it looked
+  at.
 
-  That address is a credential. Whoever holds it can silence the alarm by
-  pinging it themselves, or pretend this claw is healthy. It is handled the way
-  the channel webhook is: it lives in the vault, it is resolved at the moment it
-  is used, and it never rests on the claw in readable form. It appears in no
-  command, no log line and no message.
+- **The end of an update now says whether this machine's services are well.** A
+  service set to restart itself never settles into the state the usual health
+  command looks for. It sits in "starting" and that command reports nothing
+  wrong, so a service failing every ten seconds reads as a healthy box. Every
+  update now ends with a reading that looks for both: nothing failed, and
+  nothing stuck restarting. It never fails the update, because the release
+  landed and a service misbehaving for its own reasons is a separate matter.
 
-- **Your claw now installs the thing its own checks talk through.** Every check
-  on this machine could already find what it was built to find, and every one of
-  them wrote what it found to a journal nobody reads. The poster that carries a
-  finding to your channel existed and nothing put it on a claw, so a freshly
-  built machine had producers with nothing to call. Provisioning installs it
-  now, with its two settings files beside it. Neither file holds the webhook: it
-  stays in this claw's vault and is fetched at the moment a message goes out.
+- **The heartbeat door no longer blames the wrong thing when it refuses.** The
+  step that files this claw's dead-man address in its vault could not write from
+  any command sent over ssh, and it reported that as a missing vault permission.
+  The real cause was the tool refusing the shape of the call. Both writes now
+  make that call correctly, and where one is still refused the door prints what
+  the tool actually said and names which kind of refusal it read, rather than
+  naming a cause it did not measure.
 
-  A copy somebody placed by hand is kept when it matches what the release
-  carries, and replaced when it does not, and the run says which of the two it
-  did.
+- **A claw whose ordinary door refuses the operator can now be enrolled.** The
+  command that stands the dead-man check used one word for two jobs: the name of
+  the check, and the machine to send the address to. Where those had to differ,
+  the enrolment either could not reach the machine or would have stood a second
+  check under the wrong name. They are now two things, and the second one
+  defaults to the first, so nothing that works today changes.
 
-- **This claw says out loud when a piece of work stopped being read.** The
-  message rail is files. One session writes a report into another session's
-  inbox and tells nobody, so it waits until somebody happens to look. When the
-  session that owns the inbox has ended, nobody looks, and in August three
-  pieces of work sat that way for days.
+- **A directory the notifier writes into keeps the mode it was given.** Two of
+  this claw's components wrote to the same place and each re-set its permissions
+  on every run, so the mode flipped back and forth with the traffic. Nothing was
+  locked out, because both run as root. It is fixed in the notifier and in three
+  places in the backup script for the same reason.
 
-  Once an hour the claw checks whether anything that coordinates work has mail
-  it has not read for more than three hours, and posts the names and the ages to
-  your channel. It never posts what the messages say. A run that is being read
-  normally is left alone, and the same stall says so once a day rather than
-  every hour.
+- **Three files that ship with every release are now required by the run that
+  uses them.** A release that lost one of them would have passed every check and
+  arrived on your claw incomplete. The wake rail's delivery adapters are held to
+  each one by name for the same reason.
 
-- **A session here learns it has mail instead of finding out later.** The wake
-  rail was built and nothing installed it. Provisioning now stands it for every
-  person on the claw. It tells a live session, in one fixed sentence and nothing
-  else, that mail is waiting. It carries no instruction, so a stale one costs a
-  moment and can never put work into your session.
+- **The operator's runbook now rides with the release.** After this release
+  every claw carries it at `/opt/commonclaw/doc/operator-runbook.md`, beside
+  the wake rail's own document. It is replaced when a release carries a newer
+  one, and a copy that differs is named in the run's output before it goes.
 
-  The program itself also moved house in this release. Its source now sits with
-  the rest of the tools that coordinate work, and a release picks it up from
-  there. One copy either way, so your claw carries what it carried and the
-  sentence is the same sentence. The reason to mention it at all is that the
-  release digest changes because of the move.
+## Two corrections to release 1.4.0's notes
 
-- **How work is coordinated here is a setting on the machine rather than
-  whatever each session happens to hold.** One file at
-  `/etc/orchestrate.conf` records which shared rail the sessions use, what kind
-  of machine this is, which model a delegated session runs on, and whether a
-  delegated session stops to ask before acting.
+Published notes cannot be edited after the fact, so the corrections are here.
 
-  The first two are facts about this claw, so every run asserts them. A rail
-  that moved and a file that did not is a claw whose sessions register somewhere
-  their coordinator is not reading, and that reads exactly like a quiet rail.
-  The last two are your decisions. They are written once and kept exactly as you
-  leave them, so an update cannot put a firm back on a fleet default with
-  nothing saying so.
+**1.4.0's notes said an update keeps its own progress log, that `--check` writes
+nothing, and that the changelog fills in every release an update crossed. All
+three are true from the next update, not from the one that installed 1.4.0.**
+The update itself is performed by the copy of the updater the claw already had,
+because the new copy is what the update installs. So 1.4.0's own apply ran on
+1.3.1's updater and did none of the three. The claw that took 1.4.0 has the
+right updater now, and everything those three paragraphs promise happens on the
+next update it takes.
 
-- **Your claw's changelog now records every release an update crossed, not just
-  the last one.** When a claw is several releases behind, one update moves it
-  all the way to the newest release in one step. Everything in the releases it
-  passed over landed on your machine, and until now the changelog only carried
-  the newest release's notes. A machine that jumped five releases told you about
-  one of them.
-
-  After an update lands, your claw reads the notes of every release it passed
-  over and writes one changelog entry for each, oldest first, with that
-  release's own class and the words its author wrote. Each of those entries
-  opens by naming the update it arrived on, so you can see at a glance that they
-  all landed together on the same day. They sit below the newest release's
-  entry, because that one is written while the update is still running and these
-  are written after it has finished.
-
-  Nothing is written if the update did not finish. An entry in this file means
-  the release landed, and that stays true. If your claw cannot reach the release
-  repository afterwards, the entries it could not fetch are simply missing and
-  the machine's log says which ones, rather than the update failing over a
-  record.
-
-  If your claw was one of the ones that jumped several releases before today,
-  this release does not go back and fill them in. It fills in every crossing
-  from now on.
-
-- **`commonclaw-update.sh --check` now really changes nothing.** It reports what
-  release is on offer and always said it wrote nothing, and it was quietly
-  leaving a record of the check in `/var/log/commonclaw/updater/` on its way
-  out, creating that directory if the machine had none. Asking a question should
-  not move the thing you are asking about. It now writes nothing at all, and
-  there is no second log to reconcile: the answer goes to the system journal and
-  to your screen.
-
-- **An update keeps its own progress log.** Your claw already kept the
-  machine-readable result of every update in `/var/log/commonclaw/updater/`. It
-  now keeps the full output of the run beside it, under the same timestamp, so
-  the two read side by side. If an update ever fails, whoever looks into it has
-  the account of what the run was doing and not only which check went red.
-
-- **A correction to release 1.3.0's notes.** That release's section on turning
-  wide mode on says to run the update by hand passing `--wide-mode on`. No
-  updater accepts that flag, and none ever will: an update must not be able to
-  move that switch. What 1.3.0 meant is two runs. First the ordinary update,
-  which fetches the release, verifies it and applies it. Then one provisioning
-  run out of the tree that update just left on the machine, carrying the same
-  arguments plus `--wide-mode on`. The first run records the new release; the
-  second records and lays the grant. Published notes cannot be edited after the
-  fact, so the correction is here.
+**1.4.0's notes said a refusal at the heartbeat door means the claw's vault
+account is missing write permission. That is one possible cause and it was not
+the one anybody met.** The door could not write from any command sent over ssh,
+whatever permissions the account held, because the tool it calls refuses that
+shape of call when its input is not a terminal. The account had held write all
+along. 1.4.1 fixes the call and stops the door naming a cause it did not
+measure. If somebody granted that permission on a claw in response to the old
+message, nothing is wrong; the grant is harmless and the door now works either
+way.
 
 ## What somebody has to do
 
-Two of the rails above stay quiet until a person acts. Neither one fails a run,
-and neither one makes noise about being unwired.
-
-1. **Put this claw's channel webhook into its vault, and post one message to see
-   it arrive.** Until that is done, the memory alarm and the stall report have
-   nowhere to go. They run, they find what they find, and nothing leaves the
-   box.
-
-2. **Enrol this claw's heartbeat check.** One command on the operator's side
-   makes the check and points it at your alarm channel. One command here files
-   the address. The claw's own vault account needs permission to write to that
-   vault; read alone is what such an account ships with, so a refusal at the
-   second step is the ordinary first answer rather than a fault. Where the
-   account cannot write, the address is filed from a machine that can. Until
-   both halves are done, the five-minute beat skips the heartbeat in silence:
-   no error, no noise, and no off-box cover.
+Nothing new. The two items 1.4.0 named stand: put this claw's channel webhook
+into its vault, and enrol this claw's heartbeat check.
 
 Nothing here moves either core for anybody, and no core floor changed.

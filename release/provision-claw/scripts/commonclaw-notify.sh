@@ -519,7 +519,15 @@ fi
 # the attempt would suppress the retry of a message that never arrived, which is
 # the dedupe silencing the exact case it must not.
 if [ -n "$dedupe_stamp" ]; then
-  if install -d -m 0700 "$NOTIFY_STATE_DIR" 2>/dev/null && printf '%s\n' "${NOTIFY_NOW_EPOCH:-$(date +%s)}" > "$dedupe_stamp" 2>/dev/null; then
+  # `install -d -m` APPLIES THE MODE TO A DIRECTORY THAT ALREADY EXISTS, so this
+  # line owned the mode of a root three components now write under, and it reset
+  # it on every delivered note. Provisioning declares 0755 there; this took it to
+  # 0700 and the next provisioning run put it back, so the mode oscillated with
+  # the traffic. Measured on staging across three applies on 2026-09-02. The
+  # guard is the idiom the other call sites here already use: create it when it
+  # is absent, and never re-mode somebody else's directory.
+  if { [ -d "$NOTIFY_STATE_DIR" ] || install -d -m 0700 "$NOTIFY_STATE_DIR" 2>/dev/null; } \
+     && printf '%s\n' "${NOTIFY_NOW_EPOCH:-$(date +%s)}" > "$dedupe_stamp" 2>/dev/null; then
     :
   else
     log warning "delivered, but the dedupe stamp at ${dedupe_stamp} did not write, so this message will repeat"

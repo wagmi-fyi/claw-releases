@@ -13,19 +13,33 @@
 # next timer beat arrives at a process that is already gone. So the watcher
 # stays up and polls in seconds, and the timer beside it exists only to start
 # it again if Restart ever gives up.
+#
+# THE RATE LIMIT IS PART OF THE UNIT, not a precaution. On 2026-09-02 an
+# instance of this template restarted every ten seconds for hours against an
+# account with nobody signed in, at a cost of about 43,000 journal lines a day,
+# and the failing unit took a whole release apply down with it. The program no
+# longer exits on that state. This is the second net under that fix: whatever
+# makes an instance die repeatedly, systemd stops trying after five starts in
+# five minutes, and the timer beside this file brings it back on its own beat.
+# A unit that has given up leaves nothing behind that says so, which is why the
+# timer is not optional and why the health readout looks for `activating` with a
+# restart count rather than for `failed`.
 [Unit]
 Description=Bus nudge for %i: tell a live session it has unread bus mail
 Documentation=file:/opt/commonclaw/doc/wake-rail.md
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=%i
 ExecStart=/opt/commonclaw/bin/bus-nudge --watch
 # A rail that reports silence must not become a new silence. Restart, but not
-# faster than the thing it is watching changes.
+# faster than the thing it is watching changes, and not so fast that a unit
+# nobody can fix writes more than the journal can hold.
 Restart=always
-RestartSec=10
+RestartSec=30
 # It reads inboxes and writes one line into a socket. Neither is urgent enough
 # to take a slice from the sessions it serves.
 Nice=10

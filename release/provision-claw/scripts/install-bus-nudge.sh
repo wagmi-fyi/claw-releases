@@ -96,12 +96,15 @@ if [ "$MODE" = uninstall ]; then
 fi
 
 DRY=""; [ "$MODE" = dry-run ] && DRY="would "
+pair=""; src=""; dst=""
 
 # ------------------------------------------------------ the program + adapters
 for f in bus-nudge; do
   [ -r "${PAYLOAD_DIR}/${f}" ] || { bad "no ${PAYLOAD_DIR}/${f} — the assembler vendors it from the orchestrate skill, so run this from an assembled stage"; }
 done
 [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] || bad "no ${PAYLOAD_DIR}/bus-nudge-adapters — the core refuses to deliver without one, and the assembler vendors it beside the program"
+[ -r "${TEMPLATE_DIR}/wake-rail.md" ] || bad "no ${TEMPLATE_DIR}/wake-rail.md — this script owns the claw's copy of it"
+[ -r "${PAYLOAD_DIR}/doc/operator-runbook.md" ] || bad "no ${PAYLOAD_DIR}/doc/operator-runbook.md — this script owns the claw's copy of it"
 [ "$FAILED" = 0 ] || { printf '{"ok":false,"stage":"payload"}\n'; exit 1; }
 
 if [ "$MODE" != dry-run ]; then
@@ -118,11 +121,35 @@ else
   ok "${DRY}install ${BIN_DIR}/bus-nudge and its adapters"
 fi
 
-# ------------------------------------------------------------ the member's doc
-if [ -r "${TEMPLATE_DIR}/wake-rail.md" ] && [ "$MODE" != dry-run ]; then
-  install -m 0644 -o root -g root "${TEMPLATE_DIR}/wake-rail.md" "${DOC_DIR}/wake-rail.md"
-  ok "${DOC_DIR}/wake-rail.md installed"
-fi
+# ------------------------------------------------------------- the claw's docs
+#
+# TWO FILES, ONE PLACE. `wake-rail.md` says how this rail reaches a session and
+# is the member's reading. `operator-runbook.md` is the operator's, and it rides
+# in the payload rather than in templates because nothing renders it.
+#
+# WRITTEN TO AN END STATE AND REPORTED BY DIGEST, which is the law the notifier's
+# two config files already follow. They carry the release's own words rather than
+# state the claw accumulates, so a re-run rewrites them and a corrected sentence
+# reaches every claw. A copy whose bytes match is adopted and nothing is written.
+# One that differs is replaced and the run names the digest it found, because the
+# copy on the box may be one somebody edited, and a line in this output is the
+# only way anybody learns it is gone.
+for pair in "${TEMPLATE_DIR}/wake-rail.md:wake-rail.md" \
+            "${PAYLOAD_DIR}/doc/operator-runbook.md:operator-runbook.md"; do
+  src="${pair%:*}"; dst="${DOC_DIR}/${pair##*:}"
+  if [ "$MODE" = dry-run ]; then ok "${DRY}install ${dst}"; continue; fi
+  if [ ! -e "$dst" ]; then
+    install -m 0644 -o root -g root "$src" "$dst"
+    ok "${dst} installed"
+  elif cmp -s "$src" "$dst"; then
+    ok "${dst} already matches this release and was adopted unchanged"
+  else
+    warn "${dst} differed from this release and was REPLACED. The copy this run found was sha256 $(sha256sum "$dst" | cut -c1-16); if it was newer than the release, it is gone"
+    install -m 0644 -o root -g root "$src" "$dst"
+  fi
+  check "${dst} is 0644 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$dst')\" = '644 root:root' ]"
+done
 
 # ------------------------------------------------------------------- the conf
 #
@@ -216,6 +243,7 @@ done
 
 # ------------------------------------------------------- one instance per head
 STARTED=()
+state=""; restarts=""
 for a in "${ACCOUNTS[@]}"; do
   if [ "$MODE" = dry-run ]; then ok "${DRY}enable and start bus-nudge@${a}"; continue; fi
 
@@ -227,8 +255,27 @@ for a in "${ACCOUNTS[@]}"; do
   fi
   systemctl enable --now "bus-nudge@${a}.service" >/dev/null 2>&1
   systemctl enable --now "bus-nudge@${a}.timer"   >/dev/null 2>&1
-  check "bus-nudge@${a}.service is active" systemctl is-active --quiet "bus-nudge@${a}.service"
-  check "bus-nudge@${a}.timer is active"   systemctl is-active --quiet "bus-nudge@${a}.timer"
+
+  # WHAT THIS COUNTS IS INSTALLED AND ENABLED, NEVER RUNNING.
+  #
+  # It counted `is-active` and that failed a whole release apply on 2026-09-02,
+  # for an account whose owner was simply not signed in at that moment. The rail
+  # has nobody to nudge then, which is the ordinary state of a claw with more
+  # than one person on it and is not a fault this installer can fix. Enablement
+  # is what this script owns: the unit is laid, it is turned on, and it comes up
+  # with the box. Whether an instance is running right now is reported beside it
+  # as a note, so a person reading the output still learns it.
+  check "bus-nudge@${a}.service is enabled" \
+    bash -c "systemctl is-enabled 'bus-nudge@${a}.service' 2>/dev/null | grep -qx enabled"
+  check "bus-nudge@${a}.timer is enabled" \
+    bash -c "systemctl is-enabled 'bus-nudge@${a}.timer' 2>/dev/null | grep -qx enabled"
+  state="$(systemctl is-active "bus-nudge@${a}.service" 2>/dev/null || true)"
+  restarts="$(systemctl show -p NRestarts --value "bus-nudge@${a}.service" 2>/dev/null || true)"
+  case "$state" in
+    active)     warn "bus-nudge@${a}.service is running (restarts: ${restarts:-0})" ;;
+    activating) warn "bus-nudge@${a}.service is in activating with ${restarts:-0} restart(s), so it is coming up or looping. journalctl -u bus-nudge@${a}.service says which" ;;
+    *)          warn "bus-nudge@${a}.service is enabled and reads ${state:-unknown}. An account with nobody signed in is the ordinary reason and it needs nothing done to it" ;;
+  esac
   STARTED+=("$a")
 done
 
