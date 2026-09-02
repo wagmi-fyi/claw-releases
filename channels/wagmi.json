@@ -1,8 +1,8 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "wagmi",
-  "version": "1.3.1",
-  "tag": "v1.3.1",
-  "tree_digest": "d13f3f7d741f6bcbf022f843b7c0fd349fe4125c3999a9f5f9481e9dafc60cc8",
-  "note": "Promoted on proofs, per the rail's promotion rule: staging applied 1.3.1 on its own tick, then passed a second apply, a forced backup reclaim, a third apply with zero convergence, and member-access checks, all measured by an independent session on 2026-08-31. The digest was re-derived from the tag before this pointer was written."
+  "version": "1.4.0",
+  "tag": "v1.4.0",
+  "tree_digest": "ef457726297c50a47b29108fa599396eadd3f982ddeebaa050dbeb58148ac3bf",
+  "note": "1.4.0 for the wagmi tier. One release forward from 1.3.1, nothing skipped.\nDisruption is quiet and neither core floor moves: codex stays at 0.147.0 and\nclaude at 2.1.227.\n\nThe box half, measured on wagmi-claw on 2026-09-02 before this pointer was\nwritten. The claw carries two members and both hold a persistent core at or\nabove the floor, and the per-task core's companion host is present, so no member\nreads as core-moving and this claw's own classifier will not defer the release\nto the quiet window. A claw on this channel measures itself the same way before\nit rides: one read of the members group, and one look at each member's launcher.\n\nThis release installs rails a claw did not have. It seeds /etc/orchestrate.conf\nwith four settings, adds a swapfile sized to the box and an out-of-memory guard,\ninstalls the memory check and the stall check with their timers, and installs\nthe wake rail as a system service.\n\nThree things on wagmi-claw are older copies of what this release ships: the\nnotifier, the wake rail program, and the memory check that is absent there\nentirely. The run replaces each one and names it in its own output rather than\nconverging in silence. The wake rail restarts when it is replaced, and a live\nsession on the box loses a beat and nothing else.\n\nThe two lines /etc/orchestrate.conf seeds once and then keeps, the delegate\nmodel and the permission posture, take this box's current values. A claw that\nalready carries that file keeps what it has.\n\nThe dead-man ping is enrolled per claw from the hub and it is not automatic.\nUntil it is wired, the memory check says out loud that no check is wired rather\nthan failing quietly."
 }
