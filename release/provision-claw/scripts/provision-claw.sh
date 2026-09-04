@@ -3465,6 +3465,50 @@ managed_count() {
   printf '%s' "${hit##* }"
 }
 
+# The machine-path control's verdict, on its own so it can be read against
+# fixture counts with no core to run and no tier to plant in.
+#
+# THE EXPECTATION IS TAKEN FROM THE READING. It used to be taken from the
+# manifest: the control asserted the core would see the declared count with the
+# probe misplaced and that count plus one with it in place. The reading comes
+# from the machine-wide tier, and that tier also holds every entry this rail
+# leaves alone, so the manifest's number and the directory's number stop being
+# equal on the first claw that puts a skill of its own there. What the probe
+# proves is a DELTA. One entry appears when the placement is right, none appears
+# when it is wrong, and a delta is measured against the same tier's count with
+# no probe in it at all.
+#
+# THE FLOOR IS WHAT KEEPS THE PASS LINE TRUE. A delta on its own says the
+# directory is being read. It does not say the shipped skills are in it, which
+# is the other half of what this control claims. So the count with no probe has
+# to be at least what this run installed there, a bound a firm's own entries can
+# only relax.
+machine_path_verdict() { # <count_0> <count_a> <count_b> <declared> <shadowed>
+  local c0="$1" ca="$2" cb="$3" declared="$4" shadow_n="$5" installed foreign line
+
+  if [ -z "$c0" ] || [ -z "$ca" ] || [ -z "$cb" ]; then
+    bad "machine-path control: the core produced no managed count, so no placement was measured -- check that the member can run the core and write its debug log"
+    return 0
+  fi
+
+  # What this run put in that tier: every declared name except the ones this
+  # claw's own entries hold, which are installed nowhere.
+  installed=$((declared - shadow_n))
+  foreign=$((c0 - installed))
+
+  if [ "$c0" -lt "$installed" ]; then
+    bad "machine-path control: this release installed ${installed} skill(s) into the machine-wide tier and the core reads managed ${c0} there, so something it installed is not loading"
+  elif [ "$ca" = "$c0" ] && [ "$cb" = "$((c0 + 1))" ]; then
+    line="machine-path control: with no probe the core reads managed ${c0}; the probe is invisible without the inner .claude segment (managed ${ca}) and visible with it (managed ${cb}); every shipped skill loads at the real path. Of that ${c0}, this release installed ${installed}, so ${foreign} were not installed by this release."
+    [ "$foreign" -eq 0 ] || line="${line} Those ${foreign} are this claw's own, and phase 14 named each one above."
+    ok "$line"
+  elif [ "$ca" = "$cb" ]; then
+    bad "machine-path control: both probe placements gave managed ${ca}, so the count is not measuring the directory and this readout proves nothing"
+  else
+    bad "machine-path control: expected managed ${c0} then $((c0 + 1)) against the ${c0} this tier reads with no probe, got ${ca} then ${cb}"
+  fi
+}
+
 phase_14_skill_plane() {
   head1 14 "the fleet skill plane"
 
@@ -3731,7 +3775,7 @@ phase_14_skill_plane() {
     fi
   fi
 
-  phase_14_core_observables "$member"
+  phase_14_core_observables "$member" "${#shadowed[@]}"
 
   # The end state, asserted rather than assumed. The convergence step and the
   # control's own cleanup are two different ways to arrive here, and neither is
@@ -3770,7 +3814,7 @@ phase_14_skill_plane() {
 # what it loaded anyway. Nothing is spent, no connector is opened, and every
 # byte either core writes lands in a directory that is removed below.
 phase_14_core_observables() {
-  local member="$1"
+  local member="$1" shadow_n="${2:-0}"
   [ -n "$member" ] || { warn "core resolution NOT RUN: this claw carries nobody to run it as"; return 0; }
 
   local home probe_wrong probe_right probe_name="zz-commonclaw-pathcontrol"
@@ -3820,15 +3864,23 @@ phase_14_core_observables() {
   if [ ! -x "$cbin" ]; then
     rm -rf -- "$run_home"
     warn "machine-path control NOT RUN: ${member} has no executable core at ${cbin}, and the readout is taken from that binary. An unrun control is not a passed one -- re-run this phase once phase 10 has installed it."
-    human "re-run phase 14 once the persistent-session core is installed, and require the two probe placements to give DIFFERENT managed counts"
+    human "re-run phase 14 once the persistent-session core is installed, and require the probe to raise the tier's own managed count by exactly one at the real path and by nothing at the dropped-segment path"
     return 0
   fi
 
   # THE CONTROL. The managed path carries an inner .claude segment that is easy
   # to drop, and a wrong path fails SILENTLY: zero skills load and nothing says
-  # why. So the same probe is read twice, from two placements, and the two
-  # counts must DIFFER. One placement alone proves nothing -- a count that never
-  # moves is not measuring the directory.
+  # why. So the tier is read THREE times: once with no probe anywhere, once with
+  # the probe at the dropped-segment path, once with it at the real path. The
+  # first reading is the baseline the other two are measured against. One
+  # placement alone proves nothing, because a count that never moves is not
+  # measuring the directory, and a count compared against a number this script
+  # composed from the manifest is measuring the manifest.
+  #
+  # THE THIRD READING IS THIS UNIT'S COST, NAMED SO IT CLASSIFIES ON SIGHT. It
+  # is one more start of the persistent-session core, unauthenticated, out of the
+  # same throwaway home, capped by the same `timeout` as the other two. It buys
+  # the only number the tier's own count can be compared against.
   #
   # A COST THIS CONTROL CANNOT GIVE UP, NAMED HERE SO IT CLASSIFIES ON SIGHT.
   # The second placement is the LIVE machine-wide tier, the same directory every
@@ -3860,7 +3912,8 @@ phase_14_core_observables() {
   # the readout would come back empty and the control would report that both
   # placements measured nothing. The throwaway home is already the member's, so
   # the core creates its own file inside a directory it owns.
-  local declared="${#SKILL_NAMES[@]}" log_a log_b count_a count_b
+  local declared="${#SKILL_NAMES[@]}" log_0 log_a log_b count_0 count_a count_b
+  log_0="${run_home}/no-probe.log"
   log_a="${run_home}/wrong-path.log"; log_b="${run_home}/real-path.log"
 
   write_probe() {
@@ -3886,6 +3939,10 @@ PROBEEOF
     managed_count "$1"
   }
 
+  # The baseline, taken with no probe at either placement. Both were removed
+  # above, so this reads the tier as the run leaves it.
+  count_0="$(read_managed "$log_0")"
+
   write_probe "$probe_wrong"
   count_a="$(read_managed "$log_a")"
   rm -rf -- "$probe_wrong"
@@ -3894,19 +3951,7 @@ PROBEEOF
   count_b="$(read_managed "$log_b")"
   rm -rf -- "$probe_right"
 
-  # An ABSENT readout is its own failure and says something different from two
-  # matching ones: nothing was measured at all, so neither placement was tested.
-  # Reporting it as "the same verdict twice" would send the next reader looking
-  # at the directories when the core never produced a count.
-  if [ -z "$count_a" ] || [ -z "$count_b" ]; then
-    bad "machine-path control: the core produced no managed count, so neither placement was measured -- check that the member can run the core and write its debug log"
-  elif [ "$count_a" = "$declared" ] && [ "$count_b" = "$((declared + 1))" ]; then
-    ok "machine-path control: the probe is invisible without the inner .claude segment (managed ${count_a}) and visible with it (managed ${count_b}); every shipped skill loads at the real path"
-  elif [ "$count_a" = "$count_b" ]; then
-    bad "machine-path control: both probe placements gave managed ${count_a}, so the count is not measuring the directory and this readout proves nothing"
-  else
-    bad "machine-path control: expected managed ${declared} then $((declared + 1)), got ${count_a} then ${count_b}"
-  fi
+  machine_path_verdict "$count_0" "$count_a" "$count_b" "$declared" "$shadow_n"
 
   # The stayed-out-of-their-home claim, taken from the core's OWN report rather
   # than from the comment at the top of this function. The core names the tiers
