@@ -1,65 +1,88 @@
-- **A fix to the wake rail now actually runs after an update.** The rail is the
-  thing that tells a session it has unread mail. An update replaces the program
-  it runs, and the copy already running kept going on the bytes it started with,
-  so a corrected rail sat on the machine doing nothing until somebody restarted
-  it or the box was rebooted. The update now compares the program and its
-  delivery parts before and after it copies them, and restarts a watcher that
-  was already running when they changed. A watcher that was stopped is started
-  the way it always was, once. A watcher whose bytes did not change is left
-  alone. Each restart prints a line naming what it was running and what it moved
-  onto.
+- **A skill you put on the claw yourself is no longer deleted by an update.**
+  The machine-wide skill directory is open to a firm. Until this release, an
+  unattended update emptied it of everything the release did not carry. The
+  update read the list of skills the release ships and removed every other entry
+  it found. Nothing named what went, and the claw's record afterwards listed the
+  release's own skills, so the record agreed with itself. A claw whose operator
+  rode the update by hand, with a list naming their own skills alongside the
+  release's, kept them. That has been the only way a firm's own machine-wide
+  skill survived an update.
 
-  **This matters to anybody who took 1.4.2.** That release carried two wake-rail
-  fixes, and on a machine where the watcher had been up since before the update,
-  neither of them was running. Taking this release puts them into service.
+  From this release the claw keeps a ledger of what an update installed, in
+  `/etc/commonclaw/skills.yaml`. An update removes only what that ledger names,
+  so a skill a release retires still goes. Everything else stays as you left it,
+  and every run prints a line naming it by its full path, so the run's own record
+  says what this claw is carrying.
 
-- **The wake rail reads the settings file on the machine.** The file is at
-  `/etc/commonclaw/bus-nudge.conf`, which is where the install writes it. The
-  program had been looking somewhere else, so every machine ran the rail on the
-  shipped defaults and a setting written into that file changed nothing. The
-  program now reads the file the install writes. The one setting that mattered
-  most before anybody tuned anything, the switch that turns the rail off, now
-  does what it says.
+  **Your skill wins a name it shares with ours.** Where a release ships a skill
+  whose name one of yours already uses, yours takes precedence on your claw and
+  the shipped one is installed nowhere there. Every update prints a line saying
+  which name that happened to, so the state cannot go quiet. To take the shipped
+  skill instead, move your entry off the claw and update again.
 
-- **A machine somebody left a terminal session open on gets the nudge in that
-  terminal.** The rail finds a session by asking each way of reaching one in
-  turn. A `tmux` server counts, and a `tmux` server left running weeks ago still
-  counts. So an account with nobody signed in to a core and one old terminal
-  session behind it gets the message delivered into that terminal rather than
-  going quiet. Closing that server is what makes the account quiet. This is not
-  a change; it is what the rail has always done, and the wake-rail document on
-  every claw now says so.
+  **What to do.** Nothing, on a claw carrying only what the release ships. If
+  your own skills were in the machine-wide directory before this release and are
+  gone, put them back after taking it. Section 10 of the operator runbook says
+  where the three places are and what reaches whom.
 
-- **Enrolling a dead-man check over a remote login keeps the file locked down.**
-  Writing the address to the far machine creates a file that only the owner can
-  read. A file already sitting there from an earlier run kept whatever
-  permissions it had, because the setting that locks a new file down does
-  nothing to one that already exists. The old file is now removed first. The
-  same thing was fixed for the local case in 1.4.2.
+- **A release now reaches one machine on a tier before it is offered to the
+  rest.** Machines take releases in tiers. The older order offered a release to a
+  whole tier and then found out whether it worked there, so when it did not,
+  every other firm on that tier was already being offered a release that would
+  have failed on their machines as well. An operator can now run a named release
+  on one machine by hand while the rest of the tier has not been offered it, and
+  the offer follows when that run passes. The command refuses unless a tier at or
+  below the machine's own already carries the release, and it refuses to run
+  unattended, so the scheduled update cannot use it.
 
-- **Publishing a release refuses when the operator has no name set.** The
-  release commit takes its author from the operator's own git settings. With no
-  name and no address set, git accepted it and the commit landed signed by
-  nobody. It now stops before it reads any credential or touches the network,
-  and it names the two settings to fix.
+  **Nothing changes on a firm's side.** No setting moves and no machine behaves
+  differently on its own. The effect a firm sees is one step removed: the release
+  their machine is offered has already been run on a machine on their own tier,
+  with a person watching it.
 
-## Errata for releases 1.4.0 through 1.4.2
+- **Cutting a release now works from wherever the operator is standing.** The
+  tool that pins the per-file record of a release used to need every path spelt
+  out from the root of the machine. Given a short path it read the release tree,
+  then changed into it, and then looked for its own digester at that short path a
+  second time, which by then pointed inside the tree instead of beside it. The
+  run died after it had already read the tree. The same thing sent the written
+  record inside the release tree rather than to the directory the operator named.
+  All three paths are now resolved in full before anything changes directory,
+  which is what the publishing tool has done since the same defect was measured
+  in it.
+
+  **A member sees nothing from this.** The tool runs on the machine where a
+  release is cut and it is not part of what a claw takes, so no claw installs it
+  and nothing on any machine changes.
+
+- **The wake rail carries the same program with four comments reworded.** The
+  rail is the thing that tells a session it has unread mail. Four comment lines
+  in it named this company and one of its machines, and the rail's source is
+  published openly, where a name like that does not belong. The lines now describe
+  the machine a measurement was taken on rather than naming it. **Nothing runs
+  differently.** The change is to text the program never reads, and it is listed
+  here only because the file on your machine changes, so the update replaces it
+  and restarts the watcher that was running it.
+
+## Errata for every release up to 1.4.3
 
 Published notes cannot be edited after the fact, so the corrections are here.
 
-**Every release from 1.4.0 on has verified a settings file the wake rail was not
-reading.** The install wrote the file, checked it, and reported it. The program
-looked at a different path and found nothing, so it ran on its shipped defaults
-throughout. Nothing failed, because the defaults and the shipped file said the
-same thing. What was lost is that a machine could not change the setting. From
-this release the two name one file.
+**Every release since the machine-wide skill directory existed has emptied it of
+anything the release did not carry, and no release said so.** The update removed
+each entry it found that its own list did not name, wrote its record of what it
+had installed, and reported a clean run. A firm who put a skill there lost it on
+the next unattended update, with nothing in the run's output naming what went. If
+you are missing a machine-wide skill you placed yourself, that is where it went.
+This release stops it, and the removal cannot be undone by taking the release, so
+put the skill back afterwards.
 
-**1.4.2's two wake-rail fixes did not run on a machine whose watcher was already
-up.** They installed correctly and they verified correctly. The watcher kept the
-old program in memory until something stopped it. On the machines that took
-1.4.2, that means the quieter machine log and the waiting behaviour arrived only
-where somebody restarted the watcher by hand. This release puts them into
-service on the next update.
+**One placement behaved differently, and it failed loudly instead.** A firm who
+dropped a real directory straight into one of the two machine reading places, and
+nowhere else, kept the file. The update refused to replace a real directory with
+a link and the whole run failed. So that firm lost no skill and got a red update
+instead, on every run, until somebody moved the directory. From this release that
+placement is left alone and named in a line, and the run passes.
 
 ## What somebody has to do
 
