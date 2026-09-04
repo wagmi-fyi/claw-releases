@@ -421,7 +421,17 @@ if [ -n "$RIDE_TAG" ]; then
   [ -n "$RIDE_FROM" ] || die "no tier carries the tag" "NO CHANNEL AT OR BELOW ${CHANNEL} CARRIES ${RIDE_TAG}. A tier takes a release the tier below it has proven, so a ride needs a channel to ride FROM. Either no tier below this one has taken ${RIDE_TAG}, or there is no such tag; the pointers are what was read and they name neither. This claw is unchanged and no payload was fetched"
 
   OFFERED="$(jqv version)"; OFFERED_TAG="$(jqv tag)"; OFFERED_DIGEST="$(jqv tree_digest)"
-  log info "riding ${RIDE_TAG} from the ${RIDE_FROM} channel's pointer, which carries version ${OFFERED}; the ${CHANNEL} pointer is not read"
+  # ONE TRUE SENTENCE ON EVERY TIER. The ladder is read at or below this claw's
+  # own channel, so the tier that carries the tag can be this claw's own: that is
+  # every ride by a first-tier claw, and any ride of a tag this claw's channel
+  # already names. One line saying it read a lower pointer and did not read its
+  # own then names the same channel twice, once as each. Measured on staging
+  # 2026-09-04, w166's finding 3.
+  if [ "$RIDE_FROM" = "$CHANNEL" ]; then
+    log info "riding ${RIDE_TAG} from this claw's own ${CHANNEL} pointer, which carries the tag and version ${OFFERED}; no channel below ${CHANNEL} was needed"
+  else
+    log info "riding ${RIDE_TAG} from the ${RIDE_FROM} channel's pointer, which carries version ${OFFERED}; this claw's own ${CHANNEL} pointer is not read"
+  fi
 else
   POINTER_URL="https://api.github.com/repos/${RELEASE_REPO}/contents/channels/${CHANNEL}.json"
   fetch_raw "$POINTER_URL" "${STAGE}/pointer.json" \
