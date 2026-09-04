@@ -291,7 +291,29 @@ Retiring a credential means retiring it at the manager. Rewriting a file on the
 claw revokes nothing, because the old value is inside every backup snapshot still
 within the retention window, and a delete on the box reaches no snapshot.
 
-## 10. Where to look
+## 10. Your own skills
+
+The machine-wide tier is `/opt/commonclaw/skills`, linked into both cores'
+machine-wide skill directories. Releases put skills there. Your own belong there
+too, when everybody on the claw should have them.
+
+Provisioning keeps a ledger of what a release installed, in
+`/etc/commonclaw/skills.yaml`, and it removes only what that ledger names.
+Anything you put in the tier by hand stays as you left it. Every run names it in
+a note, so the run's own record says this claw is carrying it.
+
+The other two places need nothing from an operator. A member's own
+`~/.claude/skills` reaches that person's sessions and nobody else's. A workspace
+can carry skills as well, and those reach whoever is working in it.
+
+Skill names have to be unique across the claw. One core resolves a same-name
+collision by authority, and the other lists every copy and leaves the model to
+pick. So where a release ships a skill whose name yours already uses, yours
+takes precedence on this claw and the shipped one is not installed at all. Every
+run prints a line saying which name that happened to. To take the shipped skill
+instead, move your entry off the claw and update again.
+
+## 11. Where to look
 
 | Path | Holds |
 |---|---|
@@ -308,6 +330,8 @@ within the retention window, and a delete on the box reaches no snapshot.
 | `/etc/commonclaw/claw-authority.md` | who may approve an operation on this claw, and how |
 | `/etc/commonclaw/workspace-conventions.md` | how work is filed here, for a member |
 | `/etc/commonclaw/runtimes.md` | the shared language runtimes, for a member |
+| `/etc/commonclaw/skills.yaml` | which skills a release installed here, and the ledger pruning reads |
+| `/opt/commonclaw/skills` | the machine-wide skill tier, releases' and yours |
 | `/etc/sudoers.d/commonclaw-wide-mode` | the wide-mode grant, when the setting is on |
 | `/etc/orchestrate.conf` | where this machine's shared session bus is |
 | `/var/log/commonclaw/updater/` | one record per update run, and the apply's output |
@@ -329,7 +353,7 @@ within the retention window, and a delete on the box reaches no snapshot.
 | `/opt/commonclaw/doc/wake-rail.md` | the wake rail's own contract |
 | `/opt/commonclaw/doc/operator-runbook.md` | this document |
 
-## 11. What this document does not cover
+## 12. What this document does not cover
 
 The rail's own contract, and what a release is required to carry, are in the
 release repository's README. What one release changed is in that release's own

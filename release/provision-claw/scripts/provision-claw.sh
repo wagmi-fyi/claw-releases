@@ -875,6 +875,12 @@ install_adopting() {
 is_unix_name() { case "$1" in [a-z_]*) : ;; *) return 1 ;; esac; case "$1" in *[!a-z0-9_-]*) return 1 ;; esac; }
 is_slug()      { case "$1" in [a-z]*)  : ;; *) return 1 ;; esac; case "$1" in *[!a-z0-9-]*)  return 1 ;; esac; }
 
+# Membership, by value, against the rest of the arguments. Written as a
+# predicate because the alternative is the same four-line loop written out at
+# every place that asks the question, and one of those copies eventually forgets
+# to break.
+in_list() { local want="$1" x; shift; for x in "$@"; do [ "$x" = "$want" ] && return 0; done; return 1; }
+
 json_esc() {
   local s="$1"
   s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
@@ -3471,6 +3477,62 @@ phase_14_skill_plane() {
     return 0
   fi
 
+  # ---- the ledger: what a release put on this claw ----
+  # THE RAIL REMOVES ONLY WHAT IT INSTALLED. Pruning used to read the manifest,
+  # which answers a different question. The manifest says what should be here.
+  # It says nothing about who put the rest here, so anything else in the tier
+  # read as a leftover and went, unnamed, on a run nobody was watching. A firm
+  # with its own machine-wide skills is the ordinary case, and the tier is open
+  # to them.
+  #
+  # The record of what we installed is the declaration this phase already
+  # writes at the end. It names exactly the set the last run materialized, so it
+  # is the ledger. A second file carrying the same fact would be a second copy
+  # of it, and the two would drift.
+  #
+  # A claw carrying no declaration has never met this rail. There the declared
+  # set is seeded in as ours, so a first build converges normally and every
+  # other entry on the box is somebody else's from the first run.
+  #
+  # THE ABSENCE OF THE FILE IS WHAT SEEDS, never a count of zero inside it. A
+  # declaration naming no skill says this rail installed nothing here, which is
+  # a true reading and has to stay one. Seeding on the count would hand every
+  # declared name back to the rail the moment the file went empty.
+  local ledger=() ledger_from led
+  if [ -r "$SKILLS_DECLARATION" ]; then
+    ledger_from="${SKILLS_DECLARATION}, written by the last run"
+    while IFS= read -r led; do
+      if [ -n "$led" ]; then ledger+=("$led"); fi
+    done < <(sed -n 's/^  \([a-z][a-z0-9-]*\):$/\1/p' "$SKILLS_DECLARATION")
+  else
+    ledger=("${SKILL_NAMES[@]}")
+    ledger_from="the manifest being applied: this claw carries no ${SKILLS_DECLARATION}"
+  fi
+  say "  ledger: ${#ledger[@]} skill(s) from ${ledger_from}"
+
+  # ---- a name this claw already uses belongs to this claw ----
+  # An entry no release installed, carrying a name the manifest now declares.
+  # The claw's own entry wins and the shipped skill of that name stands down for
+  # as long as the name is taken. Writing over it would delete a skill somebody
+  # here put in place and report a green install on top of it. Refusing the
+  # whole phase would hold every other skill off the claw over one name.
+  #
+  # The notice repeats on every apply, because the state persists and a one-time
+  # line scrolls past. A shadowed name is recorded as shadowed and never as
+  # installed, so no later run reads it back as ours and prunes it.
+  local decl_i decl_name shadowed=() spot taken
+  for decl_i in "${!SKILL_NAMES[@]}"; do
+    decl_name="${SKILL_NAMES[$decl_i]}"
+    in_list "$decl_name" "${ledger[@]}" && continue
+    taken=""
+    for spot in "${SKILLS_CANON}/${decl_name}" "${CLAUDE_MACHINE_SKILLS}/${decl_name}" "${CODEX_MACHINE_SKILLS}/${decl_name}"; do
+      if [ -e "$spot" ] || [ -L "$spot" ]; then taken="$spot"; break; fi
+    done
+    [ -n "$taken" ] || continue
+    shadowed+=("$decl_name")
+    warn "shadowed: this claw's own '${decl_name}' at ${taken} was not installed by a release, so it takes precedence and the shipped skill of that name is NOT installed anywhere here. To take the shipped one instead, move that entry off the claw and apply again."
+  done
+
   install -d -m 0755 -o root -g root "$OPT_ROOT" "$SKILLS_CANON"
   install -d -m 0755 -o root -g root /etc/claude-code /etc/claude-code/.claude "$CLAUDE_MACHINE_SKILLS"
   install -d -m 0755 -o root -g root /etc/codex "$CODEX_MACHINE_SKILLS"
@@ -3500,7 +3562,12 @@ phase_14_skill_plane() {
   # ---- materialize one canonical copy per skill ----
   local i name src dest sdig ddig d changed=0 unchanged=0 want
   for i in "${!SKILL_NAMES[@]}"; do
-    name="${SKILL_NAMES[$i]}"; src="${SKILL_SOURCES[$i]}"; dest="${SKILLS_CANON}/${name}"
+    name="${SKILL_NAMES[$i]}"
+    # A SHADOWED NAME IS NOT WRITTEN, ANYWHERE. Not the canonical copy and not
+    # either link: a link into a canonical copy that does not exist is worse
+    # than no link, and half the name shipped is a state nobody asked for.
+    in_list "$name" "${shadowed[@]}" && continue
+    src="${SKILL_SOURCES[$i]}"; dest="${SKILLS_CANON}/${name}"
     sdig="$(tree_digest "$src")"
     ddig=""; [ -d "$dest" ] && ddig="$(tree_digest "$dest")"
     if [ "$sdig" = "$ddig" ]; then
@@ -3533,32 +3600,51 @@ phase_14_skill_plane() {
       fi
     done
   done
-  say "  skills: ${#SKILL_NAMES[@]} declared   rewritten: ${changed}   already current: ${unchanged}"
+  say "  skills: ${#SKILL_NAMES[@]} declared   rewritten: ${changed}   already current: ${unchanged}   shadowed: ${#shadowed[@]}"
 
-  # ---- converge: what the manifest no longer declares does not stay ----
-  # Bounded on purpose. Under the canonical root everything is this mechanism's
-  # own; in the machine directories only symlinks pointing INTO that root are
-  # touched, so anything another hand put there is left exactly alone.
-  local entry base declared target pruned=0
+  # ---- converge: what a release installed and the manifest dropped does not stay ----
+  # THREE CASES, AND THE LEDGER DECIDES WHICH. Named in the manifest: handled
+  # above. In the ledger and not in the manifest: a retired skill, and it goes.
+  # In neither: nobody here put it there, so it stays exactly as it is, copy or
+  # link, whatever it points at, and it is named in a note so the operator knows
+  # this claw is carrying it.
+  local entry base target pruned=0 kept=0
   for entry in "$SKILLS_CANON"/*; do
-    [ -e "$entry" ] || continue
-    base="$(basename "$entry")"; declared=0
-    for name in "${SKILL_NAMES[@]}"; do [ "$name" = "$base" ] && { declared=1; break; }; done
-    [ "$declared" -eq 1 ] && continue
-    rm -rf -- "$entry"; pruned=$((pruned+1))
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    in_list "$base" "${SKILL_NAMES[@]}" && continue
+    if in_list "$base" "${ledger[@]}"; then
+      rm -rf -- "$entry"; pruned=$((pruned+1))
+    else
+      warn "left alone: ${entry} was not installed by a release, so '${base}' stays as this claw has it"
+      kept=$((kept+1))
+    fi
   done
   for d in "$CLAUDE_MACHINE_SKILLS" "$CODEX_MACHINE_SKILLS"; do
     for entry in "$d"/*; do
-      [ -L "$entry" ] || continue
-      target="$(readlink -- "$entry")"
-      case "$target" in "${SKILLS_CANON}/"*) : ;; *) continue ;; esac
-      base="$(basename "$entry")"; declared=0
-      for name in "${SKILL_NAMES[@]}"; do [ "$name" = "$base" ] && { declared=1; break; }; done
-      [ "$declared" -eq 1 ] && continue
-      rm -f -- "$entry"; pruned=$((pruned+1))
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      base="$(basename "$entry")"
+      in_list "$base" "${SKILL_NAMES[@]}" && continue
+      if in_list "$base" "${ledger[@]}"; then
+        # A ledger name is ours to remove only while it still points into our
+        # own root. One that does not was replaced by hand after we installed
+        # it, and that replacement is the firm's, whatever our record says.
+        target="$(readlink -- "$entry" 2>/dev/null)" || target=""
+        case "$target" in
+          "${SKILLS_CANON}/"*)
+            rm -f -- "$entry"; pruned=$((pruned+1)) ;;
+          *)
+            warn "left alone: ${entry} carries a retired name and does not point into ${SKILLS_CANON}, so it is not this rail's to remove"
+            kept=$((kept+1)) ;;
+        esac
+      else
+        warn "left alone: ${entry} was not installed by a release, so '${base}' stays as this claw has it"
+        kept=$((kept+1))
+      fi
     done
   done
-  [ "$pruned" -eq 0 ] || warn "removed ${pruned} entr(ies) the manifest no longer declares"
+  [ "$pruned" -eq 0 ] || warn "removed ${pruned} entr(ies) a release installed and the manifest no longer declares"
+  say "  tier: removed ${pruned}   left alone ${kept}   shadowed ${#shadowed[@]}"
 
   # ---- the materialized declaration ----
   # Every digest below was MEASURED after install. The file carries no
@@ -3568,6 +3654,9 @@ phase_14_skill_plane() {
     printf '# Materialized skill declaration. Written by provision-claw.sh.\n'
     printf '# Digests are MEASURED after install, never copied from the manifest.\n'
     printf '# Do not hand-edit. The next provisioning run rewrites this file.\n'
+    printf '# This file is also the LEDGER of what a release put on this claw. The next\n'
+    printf '# run removes what it names and the manifest has dropped, and leaves every\n'
+    printf '# other skill on this claw alone.\n'
     printf 'source_manifest: %s\n' "$SKILLS_MANIFEST"
     printf 'canonical_root: %s\n' "$SKILLS_CANON"
     printf 'machine_dirs:\n'
@@ -3575,17 +3664,39 @@ phase_14_skill_plane() {
     printf '  - %s\n' "$CODEX_MACHINE_SKILLS"
     printf 'skills:\n'
     for i in "${!SKILL_NAMES[@]}"; do
+      in_list "${SKILL_NAMES[$i]}" "${shadowed[@]}" && continue
       printf '  %s:\n' "${SKILL_NAMES[$i]}"
       printf '    source: %s\n' "${SKILL_SOURCES[$i]}"
       printf '    digest: sha256:%s\n' "${SKILL_DIGESTS[$i]}"
       [ -z "${SKILL_PINS[$i]}" ] || printf '    pin: %s\n' "${SKILL_PINS[$i]}"
     done
+    # SHADOWED NAMES SIT OUTSIDE `skills:` ON PURPOSE. That block is the ledger
+    # of what this rail installed, and the next run prunes from it. A shadowed
+    # name recorded there would be pruned as ours on the run after, which is the
+    # deletion this whole mechanism exists to prevent.
+    if [ "${#shadowed[@]}" -gt 0 ]; then
+      printf 'shadowed:\n'
+      for name in "${shadowed[@]}"; do printf '  - %s\n' "$name"; done
+    fi
   } > "$SKILLS_DECLARATION"
   chmod 0644 "$SKILLS_DECLARATION"
 
   local struct_ok=1
   for i in "${!SKILL_NAMES[@]}"; do
     name="${SKILL_NAMES[$i]}"; dest="${SKILLS_CANON}/${name}"
+    # A SHADOWED NAME IS SATISFIED BY THIS CLAW'S OWN ENTRY. The shipped skill
+    # is deliberately absent under that name, so the three readings below would
+    # fail on a state the run chose. What is checked instead is that the entry
+    # which won the name is still standing, and that the record says so.
+    if in_list "$name" "${shadowed[@]}"; then
+      taken=""
+      for spot in "${dest}" "${CLAUDE_MACHINE_SKILLS}/${name}" "${CODEX_MACHINE_SKILLS}/${name}"; do
+        if [ -e "$spot" ] || [ -L "$spot" ]; then taken="$spot"; break; fi
+      done
+      [ -n "$taken" ] || { bad "${name} was recorded shadowed and no entry of that name is on this claw"; struct_ok=0; }
+      grep -qE "^  - ${name}$" "$SKILLS_DECLARATION" || { bad "${name} is shadowed by this claw's own entry and ${SKILLS_DECLARATION} does not record it"; struct_ok=0; }
+      continue
+    fi
     [ -r "${dest}/SKILL.md" ] || { bad "${name}: no readable SKILL.md at ${dest}"; struct_ok=0; }
     for d in "$CLAUDE_MACHINE_SKILLS" "$CODEX_MACHINE_SKILLS"; do
       [ -L "${d}/${name}" ] && [ "$(readlink -f "${d}/${name}")" = "$(readlink -f "$dest")" ] \
@@ -3593,12 +3704,25 @@ phase_14_skill_plane() {
     done
     grep -qE "^  ${name}:$" "$SKILLS_DECLARATION" || { bad "${name} is installed but absent from ${SKILLS_DECLARATION}"; struct_ok=0; }
   done
-  [ "$struct_ok" -eq 1 ] && ok "every declared skill is materialized once and linked into both machine directories"
+  if [ "$struct_ok" -eq 1 ]; then
+    if [ "${#shadowed[@]}" -gt 0 ]; then
+      ok "every declared skill is materialized once and linked into both machine directories, or is a name ${#shadowed[@]} of this claw's own entries hold"
+    else
+      ok "every declared skill is materialized once and linked into both machine directories"
+    fi
+  fi
 
   # ---- can an unprivileged member actually read it? ----
-  local member="${PEOPLE[0]:-}"
-  if [ -n "$member" ] && [ "${#SKILL_NAMES[@]}" -gt 0 ]; then
-    name="${SKILL_NAMES[0]}"
+  # THE PROBE READS A SKILL THIS RUN INSTALLED. A shadowed name is this claw's
+  # own entry at a path the rail did not write, so reading it would answer a
+  # question about the firm's file rather than about the tier this phase built.
+  local member="${PEOPLE[0]:-}" probe=""
+  for i in "${!SKILL_NAMES[@]}"; do
+    in_list "${SKILL_NAMES[$i]}" "${shadowed[@]}" && continue
+    probe="${SKILL_NAMES[$i]}"; break
+  done
+  if [ -n "$member" ] && [ -n "$probe" ]; then
+    name="$probe"
     if sudo -u "$member" -H test -r "${CLAUDE_MACHINE_SKILLS}/${name}/SKILL.md" \
        && sudo -u "$member" -H test -r "${CODEX_MACHINE_SKILLS}/${name}/SKILL.md"; then
       ok "an unprivileged member reads a shipped skill through both machine paths"

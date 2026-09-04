@@ -20,6 +20,18 @@
 #                                   asking what is on offer must be able to ask
 #                                   without moving the thing they are measuring.
 #                                   The answer goes to the journal and to stderr.
+#   commonclaw-update.sh --release TAG
+#                                   ride the named tag, instead of whatever this
+#                                   claw's channel points at. It is how a tier's
+#                                   FIRST claw takes a release before the tier's
+#                                   pointer moves, so a release that fails on
+#                                   that tier fails on one box rather than being
+#                                   published to every box on the tier. From the
+#                                   tag onward it is the ordinary path. It is
+#                                   refused unless a channel at or below this
+#                                   claw's own already carries the tag, and
+#                                   refused unless a person is standing at the
+#                                   run.
 #
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
 # releases, so no machine holds a key to this one. `reference/release-rail.md` is
@@ -57,15 +69,30 @@ FLEET_STAGE=/root/fleet-stage
 # also a payload tree and this is not part of the payload.
 APPLY_INCOMPLETE=.commonclaw-apply-incomplete
 
-MODE_NOW=0; CHECK_ONLY=0
+MODE_NOW=0; CHECK_ONLY=0; RIDE_TAG=""; RIDE_FROM=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --now)   MODE_NOW=1; shift ;;
     --check) CHECK_ONLY=1; shift ;;
+    --release)
+      [ $# -ge 2 ] || { printf -- '--release takes a tag, for example --release v1.4.4\n' >&2; exit 2; }
+      RIDE_TAG="$2"; shift 2 ;;
     -h|--help) awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2; exit 2 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+
+# THE TAG IS CHECKED FOR SHAPE BEFORE IT REACHES A URL. It is composed into an
+# API path and into the codeload path, and the shape the cutter makes is a v and
+# a version. Anything else is refused here rather than sent.
+if [ -n "$RIDE_TAG" ]; then
+  ride_bad=0
+  case "$RIDE_TAG" in v[0-9]*) : ;; *) ride_bad=1 ;; esac
+  case "${RIDE_TAG#v}" in ''|*[!0-9.]*|*..*|.*|*.) ride_bad=1 ;; esac
+  [ "$ride_bad" -eq 0 ] || {
+    printf 'not a release tag: %s. A release tag is a v and a version, for example v1.4.4\n' "$RIDE_TAG" >&2
+    exit 2; }
+fi
 
 STAGE=""; VERDICT="did not start"; OFFERED=""; CARRIED=""; STEP="startup"
 log() { logger -t commonclaw-update -p "user.$1" -- "$2" 2>/dev/null || true; printf '[%s] %s\n' "$1" "$2" >&2; }
@@ -133,6 +160,31 @@ done
 # ---------------------------------------------------------------- config
 STEP="config"
 [ "$(id -u)" -eq 0 ] || die "not root" "run this as root: applying a release writes root-owned paths"
+
+# A RIDE IS REFUSED UNLESS A PERSON IS STANDING AT THE RUN, and attendance is
+# MEASURED rather than declared.
+#
+# This script had no way to tell a timer run from a hand run. `--now` is a flag
+# the operator passes, and a unit file could pass it just as easily, so it says
+# what was asked for and nothing at all about who asked. The reading is therefore
+# taken off the run itself, on two arms, and either one refuses.
+#
+#   INVOCATION_ID  systemd puts it in the environment of every unit it starts, so
+#                  its presence means this run belongs to a unit. That covers the
+#                  timer, and it covers `systemctl start` by hand, which is the
+#                  same case: the run is detached from whoever asked for it.
+#   a terminal     a run with no terminal on stdin has nobody to report to and
+#                  nobody to stop it part way.
+#
+# A person with root gets both by running this from their own shell, and a run
+# whose output they redirect keeps its terminal on stdin.
+#
+# THE REFUSAL SITS ABOVE EVERY NETWORK ACT, because an unattended ride must fetch
+# nothing at all.
+if [ -n "$RIDE_TAG" ]; then
+  [ -z "${INVOCATION_ID:-}" ] || die "ride not attended" "--release names ${RIDE_TAG} and systemd started this run, so nobody is standing at it. A ride is attended by definition: it exists so the first claw on a tier meets a bad release with a person present. This claw is unchanged and nothing was fetched"
+  [ -t 0 ] || die "ride not attended" "--release names ${RIDE_TAG} and this run has no terminal on stdin, so nobody is standing at it. A ride is attended by definition. Run it from a shell. This claw is unchanged and nothing was fetched"
+fi
 [ -r "$CONF" ]         || die "no claw config" "missing ${CONF}: this machine has not been provisioned"
 [ -r "$UPDATER_CONF" ] || die "no updater config" "missing ${UPDATER_CONF}: provisioning seeds it, and its absence means somebody removed it"
 
@@ -156,6 +208,13 @@ WINDOW_START="04"; WINDOW_END="06"; MAX_DEFER_HOURS="26"
 # on its own. A constant here for the same reason as the three above: a firm that
 # could raise it could restore the unbounded loop this bound exists to end.
 MAX_APPLY_FAILURES="3"
+
+# THE CHANNEL LADDER, lowest tier first. `reference/release-rail.md` draws it, and
+# a ride reads it to answer one question: which channels sit at or below this
+# claw's own. It is assigned here for the same reason as the four values above.
+# Settable from the conf, a firm could name itself the first tier and ride
+# anything, which is the proof this flag exists to require.
+CHANNEL_LADDER="staging wagmi tenants"
 
 # THE BOUND'S STATE BELONGS DOWN HERE TOO, and this was the hole in the argument
 # above. The three constants were protected by being assigned after the conf, and
@@ -181,7 +240,7 @@ STEP="read carried version"
 sv() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$STATE" 2>/dev/null | head -1; }
 
 CARRIED="0.0.0"
-CARRIED_TAG=""; CARRIED_DIGEST=""; CARRIED_APPLIED=""; CARRIED_PREV=""
+CARRIED_TAG=""; CARRIED_DIGEST=""; CARRIED_APPLIED=""; CARRIED_PREV=""; CARRIED_FROM=""
 LAST_VERDICT=""; FAILING_VERSION=""; FAILURE_COUNT=0
 if [ -r "$STATE" ]; then
   CARRIED="$(sv version)"
@@ -190,6 +249,11 @@ if [ -r "$STATE" ]; then
   # the failure and must not lose what the claw actually holds.
   CARRIED_TAG="$(sv tag)"; CARRIED_DIGEST="$(sv tree_digest)"
   CARRIED_APPLIED="$(sv applied_at)"; CARRIED_PREV="$(sv previous)"
+  # HOW THIS CLAW GOT WHAT IT CARRIES, carried forward like the four above.
+  # A claw provisioned before this ships has no such field, and empty is the
+  # honest reading of it: not recorded. That is the last_verdict lesson again,
+  # which the reference named for weeks before anything wrote it.
+  CARRIED_FROM="$(sv applied_from)"
   LAST_VERDICT="$(sv last_verdict)"; FAILING_VERSION="$(sv failing_version)"
   # An unreadable count is treated as none. It costs one extra attempt, which is
   # the safe direction: a count trusted wrongly stops a claw that could still
@@ -207,7 +271,13 @@ fi
 # whole pass -- fetch, extract, digest, stage swap, a full provisioning run --
 # every hour, forever, on a box with nobody watching.
 #
-# write_state <version> <tag> <digest> <applied_at> <previous> <verdict> <failing> <count>
+# THE RECORD SAYS HOW THE RELEASE GOT HERE, and that is one field because the
+# next tick has to be explainable from it. A claw that rode a tag sits AHEAD of
+# its own channel pointer, so the tick after the ride reads "already at or above"
+# and skips, and nothing in the record would tell a reader that apart from a
+# pointer that never moved.
+#
+# write_state <version> <tag> <digest> <applied_at> <previous> <verdict> <failing> <count> <applied_from>
 write_state() {
   cat > "$STATE" <<STATEEOF
 {
@@ -216,6 +286,7 @@ write_state() {
   "tree_digest": "${3}",
   "channel": "${CHANNEL}",
   "applied_at": "${4}",
+  "applied_from": "${9}",
   "previous": "${5}",
   "last_verdict": "${6}",
   "failing_version": "${7}",
@@ -247,7 +318,7 @@ count_refusal() {   # count_refusal <verdict>
     FAILURE_COUNT=1
   fi
   write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
-              "$1" "$OFFERED" "$FAILURE_COUNT"
+              "$1" "$OFFERED" "$FAILURE_COUNT" "$CARRIED_FROM"
 }
 
 # ---------------------------------------------------------------- fetch
@@ -269,6 +340,11 @@ fetch_raw() {  # <remote path> <destination file>
 STEP="fetch channel pointer"
 STAGE="$(mktemp -d /tmp/commonclaw-update.XXXXXX)"
 
+# ONE READER FOR EVERY POINTER FILE. A ride reads more than one of them, so the
+# file is an argument; jqv keeps the name the rest of this script calls it by.
+ptr() { sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1; }
+jqv() { ptr "${STAGE}/pointer.json" "$1"; }
+
 # THE POINTER COMES FROM THE API, NOT FROM THE RAW HOST.
 #
 # Measured 2026-08-13, twice, and the second measurement corrected the first. The
@@ -289,41 +365,100 @@ STAGE="$(mktemp -d /tmp/commonclaw-update.XXXXXX)"
 #
 # The tarball still comes from codeload, where a tag is effectively immutable and
 # any staleness is caught by the digest comparison rather than acted on.
-POINTER_URL="https://api.github.com/repos/${RELEASE_REPO}/contents/channels/${CHANNEL}.json"
-fetch_raw "$POINTER_URL" "${STAGE}/pointer.json" \
-  || die "pointer unreachable" "could not read the ${CHANNEL} channel pointer; this claw is unchanged"
 
-jqv() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${STAGE}/pointer.json" | head -1; }
+# HOW THIS RUN RESOLVED ITS RELEASE, recorded on the way through so the state
+# file can carry it.
+APPLIED_FROM="channel pointer"
 
-# THE POINTER MUST SAY WHAT IT IS, and this is not ceremony.
-#
-# Without a positive marker, a fetch that returned an error page, a login
-# redirect or a truncated file parses to empty fields, and "empty" would then be
-# read as the channel declaring no release. Two different worlds would wear one
-# verdict, and the wrong one is the reassuring one: a timer reporting a clean
-# no-op while it is actually unable to read anything. That is the same shape as a
-# sweep reporting clean because it measured nothing.
-#
-# So absence of the marker is UNREADABLE, and only a pointer that parses and
-# explicitly declares no release is the quiet no-op.
-[ "$(jqv pointer_schema)" = "commonclaw-channel-v1" ] \
-  || die "pointer unreadable" "what came back for the ${CHANNEL} channel is not a channel pointer: no pointer_schema marker. This claw is unchanged, and a fetch that returns something else must never read as nothing to do"
+if [ -n "$RIDE_TAG" ]; then
+  STEP="resolve the ride's tag"
+  APPLIED_FROM="tag ride"
 
-OFFERED="$(jqv version)"; OFFERED_TAG="$(jqv tag)"; OFFERED_DIGEST="$(jqv tree_digest)"
+  # THE ONE SEAM THIS FLAG ADDS, AND IT IS THE ONLY ONE.
+  #
+  # A pointer ride learns three things out of one file: the version, the tag, and
+  # the digest that tag's payload must have. A tag ride learns the same three out
+  # of the same kind of file, read off a channel at or below this claw's own that
+  # already names the tag. Everything past this block is the pointer ride's own
+  # code, unchanged and not branched on: the version comparison, the mode gate,
+  # the failure bound, the payload fetch, the digest comparison, the stage, the
+  # apply and the record.
+  #
+  # THE PROOF AND THE PROMISE ARE ONE READ, and that is why the promise comes
+  # from a pointer rather than from the tag. The payload at a tag carries no
+  # digest of itself. The baseline the cutter measures stays in the cutter's
+  # working material and is never committed, so the only published promise about
+  # a tag's bytes is a channel pointer that names it. That is also the source
+  # `publish.sh --promote` re-derives against, so a ride and a promotion check
+  # the same number against the same bytes.
+  #
+  # AT OR BELOW, RATHER THAN STRICTLY BELOW. A tier takes a release the tier
+  # under it has proven, which is the rule `--promote` enforces. The first tier
+  # has no tier under it, so its own pointer is what it reads, and that is what
+  # lets a staging claw ride at all. Below the first tier the two readings agree:
+  # a tag reaches a channel through a cut or a promotion, and a promotion already
+  # required a lower channel to carry it.
+  case " $CHANNEL_LADDER " in
+    *" $CHANNEL "*) : ;;
+    *) die "channel not on the ladder" "this claw's channel '${CHANNEL}' is not one of the tiers this release knows (${CHANNEL_LADDER}), so a ride cannot say which channels sit below it. Refusing rather than reading an unknown channel as the first tier. This claw is unchanged and nothing was fetched" ;;
+  esac
 
-# A CHANNEL WITH NO RELEASE IS A DEFINED STATE, not an error. It is what every
-# channel reads as before the first publish, and a timer must not go red on it.
-# Reached only through the marker above, so it means what it says.
-if grep -q '"version"[[:space:]]*:[[:space:]]*null' "${STAGE}/pointer.json"; then
-  VERDICT="no release on this channel"
-  log info "the ${CHANNEL} channel names no release; nothing to do"
-  exit 0
+  for c in $CHANNEL_LADDER; do
+    fetch_raw "https://api.github.com/repos/${RELEASE_REPO}/contents/channels/${c}.json" "${STAGE}/pointer-${c}.json" \
+      || die "pointer unreachable" "could not read the ${c} channel pointer, which a ride of ${RIDE_TAG} has to read to find the tier that carries it; this claw is unchanged"
+    [ "$(ptr "${STAGE}/pointer-${c}.json" pointer_schema)" = "commonclaw-channel-v1" ] \
+      || die "pointer unreadable" "what came back for the ${c} channel is not a channel pointer: no pointer_schema marker. This claw is unchanged, and a fetch that returns something else must never read as a tier not carrying the tag"
+    if [ "$(ptr "${STAGE}/pointer-${c}.json" tag)" = "$RIDE_TAG" ]; then
+      RIDE_FROM="$c"
+      cp "${STAGE}/pointer-${c}.json" "${STAGE}/pointer.json"
+      break
+    fi
+    # The ladder is read upward and stops at this claw's own tier. A channel
+    # above this one carrying the tag proves nothing about the tier below.
+    if [ "$c" = "$CHANNEL" ]; then break; fi
+  done
+
+  [ -n "$RIDE_FROM" ] || die "no tier carries the tag" "NO CHANNEL AT OR BELOW ${CHANNEL} CARRIES ${RIDE_TAG}. A tier takes a release the tier below it has proven, so a ride needs a channel to ride FROM. Either no tier below this one has taken ${RIDE_TAG}, or there is no such tag; the pointers are what was read and they name neither. This claw is unchanged and no payload was fetched"
+
+  OFFERED="$(jqv version)"; OFFERED_TAG="$(jqv tag)"; OFFERED_DIGEST="$(jqv tree_digest)"
+  log info "riding ${RIDE_TAG} from the ${RIDE_FROM} channel's pointer, which carries version ${OFFERED}; the ${CHANNEL} pointer is not read"
+else
+  POINTER_URL="https://api.github.com/repos/${RELEASE_REPO}/contents/channels/${CHANNEL}.json"
+  fetch_raw "$POINTER_URL" "${STAGE}/pointer.json" \
+    || die "pointer unreachable" "could not read the ${CHANNEL} channel pointer; this claw is unchanged"
+
+  # THE POINTER MUST SAY WHAT IT IS, and this is not ceremony.
+  #
+  # Without a positive marker, a fetch that returned an error page, a login
+  # redirect or a truncated file parses to empty fields, and "empty" would then be
+  # read as the channel declaring no release. Two different worlds would wear one
+  # verdict, and the wrong one is the reassuring one: a timer reporting a clean
+  # no-op while it is actually unable to read anything. That is the same shape as a
+  # sweep reporting clean because it measured nothing.
+  #
+  # So absence of the marker is UNREADABLE, and only a pointer that parses and
+  # explicitly declares no release is the quiet no-op.
+  [ "$(jqv pointer_schema)" = "commonclaw-channel-v1" ] \
+    || die "pointer unreadable" "what came back for the ${CHANNEL} channel is not a channel pointer: no pointer_schema marker. This claw is unchanged, and a fetch that returns something else must never read as nothing to do"
+
+  OFFERED="$(jqv version)"; OFFERED_TAG="$(jqv tag)"; OFFERED_DIGEST="$(jqv tree_digest)"
+
+  # A CHANNEL WITH NO RELEASE IS A DEFINED STATE, not an error. It is what every
+  # channel reads as before the first publish, and a timer must not go red on it.
+  # Reached only through the marker above, so it means what it says.
+  if grep -q '"version"[[:space:]]*:[[:space:]]*null' "${STAGE}/pointer.json"; then
+    VERDICT="no release on this channel"
+    log info "the ${CHANNEL} channel names no release; nothing to do"
+    exit 0
+  fi
 fi
 
 # Parsed, marked, and still missing what it needs: that is a malformed pointer
-# rather than an empty one.
+# rather than an empty one. It names the pointer that was read, which on a ride
+# is the tier this claw rode from and not this claw's own channel.
+SOURCE_POINTER="${RIDE_FROM:-$CHANNEL}"
 for f in OFFERED OFFERED_TAG OFFERED_DIGEST; do
-  [ -n "${!f}" ] || die "pointer incomplete" "the ${CHANNEL} pointer declares a release but carries no ${f}; this claw is unchanged"
+  [ -n "${!f}" ] || die "pointer incomplete" "the ${SOURCE_POINTER} pointer declares a release but carries no ${f}; this claw is unchanged"
 done
 
 # ---------------------------------------------------------------- decide
@@ -378,7 +513,11 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     log info "release ${OFFERED} is available and this claw has stopped retrying it after ${FAILURE_COUNT} failed attempts (carrying ${CARRIED}); --check changes nothing"
   else
     VERDICT="available"
-    log info "release ${OFFERED} is available (carrying ${CARRIED}); --check changes nothing"
+    if [ -n "$RIDE_TAG" ]; then
+      log info "release ${OFFERED} is available as a ride of ${RIDE_TAG} from the ${RIDE_FROM} channel (carrying ${CARRIED}); --check changes nothing"
+    else
+      log info "release ${OFFERED} is available (carrying ${CARRIED}); --check changes nothing"
+    fi
   fi
   exit 0
 fi
@@ -386,7 +525,7 @@ fi
 if [ "$STUCK_HERE" -eq 1 ]; then
   VERDICT="stuck"
   write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
-              "stuck" "$OFFERED" "$FAILURE_COUNT"
+              "stuck" "$OFFERED" "$FAILURE_COUNT" "$CARRIED_FROM"
   die "stuck" "release ${OFFERED} has failed to apply ${FAILURE_COUNT} times and will not be retried on its own. This claw still carries ${CARRIED} and is unchanged. A NEWER release will be taken normally. To retry this one, an operator runs this script with --now"
 fi
 
@@ -634,7 +773,7 @@ fi
 
 # ---------------------------------------------------------------- apply
 STEP="apply"
-log info "applying release ${OFFERED} from ${OFFERED_TAG} (carrying ${CARRIED})"
+log info "applying release ${OFFERED} from ${OFFERED_TAG} by ${APPLIED_FROM} (carrying ${CARRIED})"
 
 # THE VERIFIED PAYLOAD MOVES TO THE RULED PREFIX BEFORE IT IS APPLIED.
 #
@@ -766,7 +905,7 @@ if [ "$apply_rc" -ne 0 ]; then
     FAILURE_COUNT=1
   fi
   write_state "$CARRIED" "$CARRIED_TAG" "$CARRIED_DIGEST" "$CARRIED_APPLIED" "$CARRIED_PREV" \
-              "apply failed" "$OFFERED" "$FAILURE_COUNT"
+              "apply failed" "$OFFERED" "$FAILURE_COUNT" "$CARRIED_FROM"
 
   # THE MESSAGE NAMES A PATH ONLY WHEN THE PATH IS THERE.
   #
@@ -797,7 +936,7 @@ STEP="record"
 # AN APPLY THAT PASSED CLEARS THE FAILURE RECORD. The count exists to stop one
 # release being retried forever; a release that landed has nothing left to count.
 write_state "$OFFERED" "$OFFERED_TAG" "$GOT_DIGEST" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CARRIED" \
-            "applied" "" "0"
+            "applied" "" "0" "$APPLIED_FROM"
 
 # THE APPLY PASSED, so this stage becomes a way back. Clearing the marker is the
 # only thing that makes it one, and nothing else on the claw writes this file.
@@ -950,6 +1089,8 @@ VERDICT="applied"
 if [ "$OUTSIDE_WINDOW" -eq 1 ]; then
   VERDICT="applied outside the quiet window"
   log warning "release ${OFFERED} applied OUTSIDE the quiet window after the deferral bound was reached"
+elif [ -n "$RIDE_TAG" ]; then
+  log info "release ${OFFERED} applied from the ride of ${OFFERED_TAG}; this claw now carries it and is AHEAD of the ${CHANNEL} pointer, so every tick reads 'already at or above' and changes nothing until that pointer passes it"
 else
   log info "release ${OFFERED} applied; this claw now carries it"
 fi
