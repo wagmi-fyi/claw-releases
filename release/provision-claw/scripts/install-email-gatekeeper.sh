@@ -215,8 +215,10 @@ fi
 
 # --------------------------------------------------------- the key's reference
 #
-# A REFERENCE, NEVER A VALUE, composed from the vault and hostname this claw
-# already records. Phase 22 composes the webhook reference the same way. Seeding
+# A REFERENCE, NEVER A VALUE, composed from the vault and hostname the calling
+# run passes in `EMAIL_GATEKEEPER_VAULT` and `EMAIL_GATEKEEPER_HOSTNAME`, and
+# from this box's own hostname when nobody passes them. Phase 22 composes the
+# webhook reference the same way, inside the run where both are in scope. Seeding
 # it is what makes install-email-provider-key.sh able to work out where to write,
 # because that door parses the vault and the item out of this line rather than
 # taking them as arguments.
@@ -225,14 +227,26 @@ if [ "$MODE" = dry-run ]; then
 elif [ -e "$ENVF" ]; then
   ok "${ENVF} already exists and was left exactly as it is"
 else
-  VAULT=""; HOSTN=""
-  if [ -r /etc/commonclaw/provision.conf ]; then
-    # shellcheck disable=SC1091
-    . /etc/commonclaw/provision.conf
-    VAULT="${VAULT:-}"; HOSTN="${TARGET_HOSTNAME:-$(hostname -s)}"
-  fi
-  if [ -z "$VAULT" ]; then
-    warn "/etc/commonclaw/provision.conf names no vault, so ${ENVF} was not seeded. Write the reference by hand before wiring a key"
+  # THE VAULT COMES FROM THE RUN THAT CALLS THIS. `provision.conf` does not
+  # carry a VAULT key and never has. VAULT is a variable inside
+  # `provision-claw.sh`, declared there and defaulted once the arguments are
+  # parsed to `{hostname}-machine`, and the conf's hostname key is BOX_HOSTNAME
+  # rather than TARGET_HOSTNAME. Reading that file for either name found nothing
+  # on every claw, this file was seeded on none of them, and phase 25's check on
+  # it could not pass anywhere.
+  #
+  # Phase 25 passes both values. A hand-run passes neither and falls back to the
+  # same default the run uses, so an operator's door and the release compose one
+  # reference.
+  VAULT="${EMAIL_GATEKEEPER_VAULT:-}"
+  HOSTN="${EMAIL_GATEKEEPER_HOSTNAME:-$(hostname -s)}"
+  [ -n "$VAULT" ] || VAULT="${HOSTN}-machine"
+  if [ -z "$HOSTN" ]; then
+    # THIS GUARDS A NAMELESS REFERENCE, and it is the only state left that stops
+    # the seeding. With no hostname the item name is `commonclaw-email-provider-`
+    # and the default vault is `-machine`, so the line resolves to nothing while
+    # reading like a wired claw.
+    warn "this claw reports no short hostname, so ${ENVF} was not seeded. Pass EMAIL_GATEKEEPER_HOSTNAME, or give the box a hostname, then run this again"
   else
     {
       printf '# Manager references, never values. Resolved at start by the service.\n'

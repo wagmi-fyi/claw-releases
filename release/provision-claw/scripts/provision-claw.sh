@@ -5734,9 +5734,17 @@ phase_25_mail_gatekeeper() {
   # The installer's stdout is its JSON result and goes to a file, because this
   # script's own stdout belongs to its own JSON alone. Its stderr is left
   # untouched so a refusal reaches the progress stream a person reads.
+  #
+  # THE VAULT AND THE HOSTNAME ARE PASSED, because they are variables of this
+  # run and of nothing else. The installer used to read them out of
+  # `provision.conf`, which carries neither name, so it seeded no env file on
+  # any claw and the check below failed every apply. Phases 11, 21 and 22
+  # compose their rails' references inline here, where `VAULT` is in scope; this
+  # is the same composition, handed to the door that owns the act.
   local out="" rc=0 tmp_out=""
   tmp_out="$(mktemp)"
-  "${SCRIPT_DIR}/install-email-gatekeeper.sh" >"$tmp_out" || rc=$?
+  EMAIL_GATEKEEPER_VAULT="$VAULT" EMAIL_GATEKEEPER_HOSTNAME="$TARGET_HOSTNAME" \
+    "${SCRIPT_DIR}/install-email-gatekeeper.sh" >"$tmp_out" || rc=$?
   out="$(cat "$tmp_out")"
   rm -f "$tmp_out"
   if [ -z "$out" ]; then
@@ -5754,8 +5762,19 @@ phase_25_mail_gatekeeper() {
     bash -c "systemctl is-enabled email-gatekeeper.service 2>/dev/null | grep -qx enabled"
   check "the gatekeeper conf carries no literal provider key" \
     bash -c "! grep -qiE '^[[:space:]]*(PROVIDER_KEY|API_KEY|EMAIL_PROVIDER_KEY)[[:space:]]*=' /etc/commonclaw/email-gatekeeper.conf"
-  check "the env file holds a reference, not a value" \
-    bash -c "grep -q '^COMMONCLAW_EMAIL_PROVIDER_KEY=op://' /etc/commonclaw/email-gatekeeper.env"
+  # THE CHECK AND THE INSTALLER AGREE ABOUT WHEN THE FILE IS OWED. A fresh
+  # install always seeds it now, so this check reads what the installer just
+  # wrote. Two states are left where the file is absent and neither is a defect
+  # of this run: a claw whose operator removed the file, and an install that
+  # refused to seed it because the box reports no hostname. The installer says
+  # which one in its own line above, so this is a note that names the door,
+  # in the shape of the three notes below it, and never a failed apply.
+  if [ -r /etc/commonclaw/email-gatekeeper.env ]; then
+    check "the env file holds a reference, not a value" \
+      bash -c "grep -q '^COMMONCLAW_EMAIL_PROVIDER_KEY=op://' /etc/commonclaw/email-gatekeeper.env"
+  else
+    warn "this claw has no readable /etc/commonclaw/email-gatekeeper.env, so no provider reference is recorded. The installer's own line above says why. Write the reference by hand, or run install-email-gatekeeper.sh again once the box has a hostname"
+  fi
 
   # ---- the health line ----
   #
