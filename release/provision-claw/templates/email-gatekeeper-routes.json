@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "The routing table. Seeded once at install and never rewritten by an apply:",
+    "a file on the claw is somebody's ruling about this machine.",
+    "",
+    "self  is this claw's own identity on the wire. It is EMPTY on a fresh claw.",
+    "      An operator fills it once, after the provider key is wired, with",
+    "      `email inbox create --username <name> --display-name \"<Name>\"`.",
+    "      The address is in every From: line a recipient ever sees, so a second",
+    "      one is refused and changing it means editing this file by hand.",
+    "      Nothing in a release carries a firm's address.",
+    "",
+    "      self.runbook is the absolute path of the firm's communication",
+    "      runbook, the document the email orchestrator applies to everything",
+    "      that goes out. It is EMPTY on a fresh claw. The launch that writes",
+    "      the runbook records where it put it, with",
+    "      `email self set runbook <path>`. The value is a pointer and nothing",
+    "      here opens it.",
+    "",
+    "default   the handle every mail reaches when nothing else matches. This is",
+    "          the email orchestrator, the agent that holds the judgement.",
+    "domains   sender domain to handles. This is where one mail fans out to",
+    "          several desks.",
+    "addresses one address to handles, and `agent` marking an address as another",
+    "          machine rather than a person. What that flag means for a reply is",
+    "          the email orchestrator's runbook, not this service's code.",
+    "",
+    "The thread map is NOT here. It lives beside this file in threads.jsonl and",
+    "the service owns it: a reply routes back to the desk that started the",
+    "conversation, whatever this table says about the sender."
+  ],
+  "self": {
+    "address": "",
+    "display_name": "",
+    "inbox_id": "",
+    "runbook": ""
+  },
+  "default": "email-orchestrator",
+  "domains": {},
+  "addresses": {}
+}

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""email -- reach this claw's mail through the gatekeeper.
+
+An agent on this box sends and reads mail with this command. It talks to the
+gatekeeper over a UNIX socket, and it holds no credential of its own: the
+provider key lives in the service's memory and reaches nothing here.
+
+  email send --to ADDR --subject S --body B [--in-reply-to MSG] [--thread T] [--handle H]
+  email thread <thread_id>
+  email message <message_id>
+  email route list
+  email route add <domain-or-address> <handle> [--agent]
+  email route remove <domain-or-address> [<handle>]
+  email inbox create --username U --display-name "D" [--domain D]
+  email self
+  email self set runbook <path>
+  email status
+
+WHERE THE RUNBOOK PATH IS CHECKED. `self set runbook` records where the firm's
+communication runbook rests. This command resolves the path and reads it here,
+standing where the caller stands, because the service runs as its own account
+and a firm's directory is group-owned. The service refuses anything that is not
+absolute. Neither one opens the file: the value is a pointer.
+
+WHAT --handle IS FOR. Pass your own bus handle on a send, so the service's log
+says which desk wrote the mail. The service records it as CLAIMED, beside the
+unix account it MEASURED from the socket, because a handle typed by a caller is
+not a fact anybody can check. Passing a thread with it is what makes a reply
+come back to you rather than to the default desk.
+
+WHO MAY CALL. Anybody who can open the socket. The socket is 0660 and group
+`claw-members`, so unix permissions are the whole access story. The service does
+not refuse callers: the runbook is the rule and the log is the audit.
+
+WHAT A HUMAN RELEASE LOOKS LIKE. It is not in this command and not in the
+service. Which mail waits for a person is the email orchestrator's runbook, and
+it lives with that agent, not in the plumbing.
+
+EXIT CODES. 0 the service answered and the answer was ok. 1 the service answered
+and refused. 2 usage. 4 the service could not be reached at all.
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+
+SOCKET = os.environ.get("EMAIL_GATEKEEPER_SOCKET", "/run/email-gatekeeper/sock")
+CONF = os.environ.get("EMAIL_GATEKEEPER_CONF", "/etc/commonclaw/email-gatekeeper.conf")
+
+
+def socket_path():
+    """The command and the service must name one socket, or this reaches nothing.
+
+    Both read the same conf, so a firm that moved it moved it for both.
+    """
+    if os.environ.get("EMAIL_GATEKEEPER_SOCKET"):
+        return os.environ["EMAIL_GATEKEEPER_SOCKET"]
+    try:
+        with open(CONF, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("SOCKET="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return SOCKET
+
+
+def call(req):
+    path = socket_path()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(120)
+        s.connect(path)
+    except OSError as exc:
+        sys.stderr.write(
+            "the gatekeeper is not answering at %s: %s\n"
+            "systemctl status email-gatekeeper says why.\n" % (path, exc))
+        sys.exit(4)
+    try:
+        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        data = b""
+        while b"\n" not in data:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    try:
+        return json.loads(data.decode("utf-8", "replace").strip() or "{}")
+    except ValueError:
+        sys.stderr.write("the gatekeeper answered something that is not JSON\n")
+        sys.exit(4)
+
+
+def show(resp):
+    print(json.dumps(resp, indent=2, sort_keys=True))
+    if not resp.get("ok"):
+        return 1
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="email", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("send", help="send a mail through the gatekeeper")
+    s.add_argument("--to", action="append", required=True)
+    s.add_argument("--cc", action="append", default=[])
+    s.add_argument("--subject", default="")
+    s.add_argument("--body", default="")
+    s.add_argument("--in-reply-to", dest="in_reply_to", default="")
+    s.add_argument("--thread", default="")
+    s.add_argument("--handle", default="", help="your own bus handle, recorded as claimed")
+
+    s = sub.add_parser("thread", help="read a whole thread")
+    s.add_argument("id")
+
+    s = sub.add_parser("message", help="read one message")
+    s.add_argument("id")
+
+    r = sub.add_parser("route", help="read or change the routing table")
+    rsub = r.add_subparsers(dest="route_cmd")
+    rsub.add_parser("list")
+    a = rsub.add_parser("add")
+    a.add_argument("key", help="a sender domain, or one address")
+    a.add_argument("handle")
+    a.add_argument("--agent", action="store_true", help="mark this address as another machine")
+    d = rsub.add_parser("remove")
+    d.add_argument("key")
+    d.add_argument("handle", nargs="?", default="")
+
+    i = sub.add_parser("inbox", help="the claw's own inbox, made once")
+    isub = i.add_subparsers(dest="inbox_cmd")
+    c = isub.add_parser("create")
+    c.add_argument("--username", default="")
+    c.add_argument("--domain", default="")
+    c.add_argument("--display-name", dest="display_name", default="")
+
+    f = sub.add_parser("self", help="this claw's own entry in the routing table")
+    fsub = f.add_subparsers(dest="self_cmd")
+    fset = fsub.add_parser("set")
+    fset.add_argument("field", choices=["runbook"])
+    fset.add_argument("value", help="an absolute path to the firm's communication runbook")
+
+    sub.add_parser("status", help="is the gatekeeper connected, and to what")
+
+    a = ap.parse_args()
+    if not a.cmd:
+        ap.print_help()
+        return 2
+
+    if a.cmd == "send":
+        return show(call({"verb": "send", "to": a.to, "cc": a.cc, "subject": a.subject,
+                          "body": a.body, "in_reply_to": a.in_reply_to,
+                          "thread": a.thread, "handle": a.handle}))
+    if a.cmd == "thread":
+        return show(call({"verb": "thread", "id": a.id}))
+    if a.cmd == "message":
+        return show(call({"verb": "message", "id": a.id}))
+    if a.cmd == "status":
+        return show(call({"verb": "status"}))
+    if a.cmd == "route":
+        if a.route_cmd == "list":
+            return show(call({"verb": "route-list"}))
+        if a.route_cmd == "add":
+            return show(call({"verb": "route-add", "key": a.key,
+                              "handle": a.handle, "agent": a.agent}))
+        if a.route_cmd == "remove":
+            return show(call({"verb": "route-remove", "key": a.key, "handle": a.handle}))
+        ap.parse_args(["route", "--help"])
+        return 2
+    if a.cmd == "self":
+        if not a.self_cmd:
+            # READ THROUGH route-list rather than a verb of its own. The table
+            # is one object and the service already returns it whole, so a
+            # second reading path could disagree with the first.
+            resp = call({"verb": "route-list"})
+            if not resp.get("ok"):
+                return show(resp)
+            return show({"ok": True, "self": (resp.get("routes") or {}).get("self", {})})
+        if a.self_cmd == "set" and a.field == "runbook":
+            path = a.value
+            if not os.path.isabs(path):
+                sys.stderr.write(
+                    "%s is a relative path. Pass the absolute path: the session that "
+                    "reads this table does not stand where you stand.\n" % path)
+                return 2
+            if not os.path.exists(path):
+                sys.stderr.write(
+                    "%s does not exist. Write the runbook first, then record where it "
+                    "is.\n" % path)
+                return 2
+            return show(call({"verb": "self-set-runbook", "path": os.path.realpath(path)}))
+        ap.parse_args(["self", "--help"])
+        return 2
+    if a.cmd == "inbox":
+        if a.inbox_cmd == "create":
+            return show(call({"verb": "inbox-create", "username": a.username,
+                              "domain": a.domain, "display_name": a.display_name}))
+        ap.parse_args(["inbox", "--help"])
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

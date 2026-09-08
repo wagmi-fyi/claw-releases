@@ -1,0 +1,879 @@
+#!/usr/bin/env python3
+"""email-gatekeeper -- one access point for a firm's mail, and nothing else.
+
+WHAT THIS IS. Humans and agents talk across organisations. One address per
+organisation rather than one per person, with a service behind it that routes
+what arrives to the sessions it concerns and carries what they write back out.
+The service is the plumbing. Every judgement about a mail lives somewhere else.
+
+THE LAW THIS SERVICE RUNS UNDER.
+
+  1. IT NEVER READS A MAIL FOR MEANING. It applies a table. The one line it puts
+     on the bus is the provider's own preview field, truncated, never composed.
+     Nothing here calls a model, and nothing here ever should.
+  2. IT NEVER DECIDES A RECIPIENT beyond applying that table, and it never
+     replies on its own. A mail is information and it grants nothing.
+  3. NO SECRET ON DISK. The provider key is resolved once at start, from a
+     reference, through the machine credential systemd hands this unit. It is
+     held in memory and passed to an adapter in that adapter's environment. It
+     is never written, never logged, and never put on a command line.
+  4. NO CORRESPONDENCE HERE. Mail rests at the provider. This service keeps a
+     routing table, a thread map and a send log. Message text is fetched on
+     demand and is not stored.
+  5. IT NEVER REFUSES A CALLER. Anybody who can open the socket can send. The
+     runbook is the rule and the log is the audit. What that costs is written in
+     reference/email-gatekeeper.md rather than hidden here.
+
+WHAT IS CORE AND WHAT IS AN ADAPTER. This file knows about mail, handles, a
+routing table and a socket. It knows nothing about how mail is fetched or sent.
+That is an adapter, because the provider is exactly the thing that differs per
+firm and per year. This is master-builder's Adapters primitive
+(skill-primitives.md), and it is the same shape the wake rail uses.
+
+THE WAKE IS NOT THIS SERVICE'S JOB. A bus message is the whole act. `bus-nudge`
+already sweeps every handle on every bus it watches and tells a live session it
+has unread mail, once per newest message id, same account only. A second
+delivery path here would carry its own consent story and its own way to fail
+quietly, and it would reach nothing the standing rail does not.
+
+  email-gatekeeper --check     resolve everything, probe the adapter, serve
+                               nothing, connect to nothing
+  email-gatekeeper --serve     the unit runs this
+
+EXIT CODES. 0 ok. 2 usage. 3 nothing here can reach a provider, or the key could
+not be resolved. Both are walls and both are loud.
+"""
+
+import argparse
+import errno
+import json
+import os
+import pwd
+import random
+import socket
+import struct
+import subprocess
+import sys
+import syslog
+import threading
+import time
+
+# ------------------------------------------------------------------ resolution
+#
+# Local -> Firm -> Core, first match wins, nothing merged. Local is the
+# environment, Firm is the machine conf, Core is the shipped default. The
+# default path here and the path the installer writes are one file, or a firm's
+# ruling reaches nothing while a conf sits beside it saying otherwise.
+CONF = os.environ.get("EMAIL_GATEKEEPER_CONF", "/etc/commonclaw/email-gatekeeper.conf")
+ENVFILE = os.environ.get("EMAIL_GATEKEEPER_ENV", "/etc/commonclaw/email-gatekeeper.env")
+CRED_FILE = "/etc/commonclaw/credentials/op-service-account.cred"
+CRED_NAME = "op-service-account"
+
+DEFAULTS = {
+    "ENABLED": "yes",
+    "ADAPTER": "agentmail",
+    "ADAPTER_DIR": "",
+    "STATE_DIR": "/srv/connections/email-gatekeeper/state",
+    "LOG_DIR": "/srv/connections/email-gatekeeper/log",
+    "SOCKET": "/run/email-gatekeeper/sock",
+    "SOCKET_GROUP": "claw-members",
+    "BUS_CLI": "/opt/commonclaw/bin/bus",
+    "BUS_DIR": "",
+    "BUS_HANDLE": "email-gatekeeper",
+    # The reconnect ladder. One second doubling to a minute, with jitter, so a
+    # provider that is down does not get a synchronised retry from every claw on
+    # the rail at the same instant.
+    "RECONNECT_MIN_SECS": "1",
+    "RECONNECT_MAX_SECS": "60",
+}
+
+# The environment variable an adapter reads its key from. Named here because the
+# core sets it and every adapter reads it, and a name written twice drifts once.
+KEY_ENV = "EMAIL_PROVIDER_KEY"
+
+
+def log(level, msg):
+    """Everything this service says goes to the journal. Never to a bus.
+
+    A rail that recorded its own trouble into an inbox would raise unread mail,
+    which would raise a nudge, which would raise more mail.
+    """
+    try:
+        syslog.syslog(
+            {"err": syslog.LOG_ERR, "warn": syslog.LOG_WARNING}.get(level, syslog.LOG_INFO),
+            msg,
+        )
+    except Exception:
+        pass
+    sys.stderr.write("%s %s\n" % (level, msg))
+    sys.stderr.flush()
+
+
+class Settings:
+    def __init__(self):
+        self.values = dict(DEFAULTS)
+        self.origin = {k: "shipped default" for k in DEFAULTS}
+        if os.path.isfile(CONF):
+            for line in read_lines(CONF):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k in self.values:
+                    self.values[k] = v.strip().strip('"').strip("'")
+                    self.origin[k] = CONF
+        for k in list(self.values):
+            env = os.environ.get("EMAIL_GATEKEEPER_" + k)
+            if env is not None:
+                self.values[k] = env
+                self.origin[k] = "environment"
+
+    def __getattr__(self, name):
+        key = name.upper()
+        if key in self.values:
+            return self.values[key]
+        raise AttributeError(name)
+
+    def adapter_dir(self):
+        if self.values["ADAPTER_DIR"]:
+            return self.values["ADAPTER_DIR"]
+        return os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                            "email-gatekeeper-adapters")
+
+    def adapter_path(self):
+        return os.path.join(self.adapter_dir(), self.values["ADAPTER"])
+
+    def enabled(self):
+        return self.values["ENABLED"].strip().lower() in ("yes", "true", "1", "on")
+
+    def reconnect_bounds(self):
+        lo = max(1, to_int(self.values["RECONNECT_MIN_SECS"], 1))
+        hi = max(lo, to_int(self.values["RECONNECT_MAX_SECS"], 60))
+        return lo, hi
+
+
+def to_int(v, fallback):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return fallback
+
+
+def read_lines(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.readlines()
+    except OSError:
+        return []
+
+
+# ---------------------------------------------------------------------- the key
+#
+# THE VALUE NEVER TOUCHES DISK AND NEVER TOUCHES A COMMAND LINE. /proc/PID/cmdline
+# is world-readable and this claw is deliberately multi-user, so the key reaches
+# an adapter through that adapter's environment and reaches nothing else at all.
+def resolve_key():
+    """The provider key, from a reference, through the machine credential.
+
+    Three token paths, in the order the memory check already uses: an explicit
+    environment token, the credentials directory systemd populates for this
+    unit, and root decrypting the claw's own credential by hand. Returns the key
+    or raises with a reason that names no value.
+    """
+    # THE ENVIRONMENT FIRST, WHICH IS WHAT THE CONTROLS RIDE ON. The memory check
+    # resolves its own reference the same way and for the same reason: a control
+    # that had to reach a real vault would need a real secret to prove a
+    # mechanism that has nothing to do with one. A systemd unit starts with a
+    # clean environment, so nothing on a claw sets this.
+    if os.environ.get(KEY_ENV):
+        return os.environ[KEY_ENV]
+
+    ref = ""
+    for line in read_lines(ENVFILE):
+        line = line.strip()
+        if line.startswith("COMMONCLAW_EMAIL_PROVIDER_KEY=op://"):
+            ref = line.split("=", 1)[1].strip()
+            break
+    if not ref:
+        raise RuntimeError("%s carries no COMMONCLAW_EMAIL_PROVIDER_KEY op:// reference" % ENVFILE)
+
+    tok = ""
+    if os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
+        tok = os.environ["OP_SERVICE_ACCOUNT_TOKEN"]
+    else:
+        cdir = os.environ.get("CREDENTIALS_DIRECTORY", "")
+        cpath = os.path.join(cdir, CRED_NAME) if cdir else ""
+        if cpath and os.access(cpath, os.R_OK):
+            with open(cpath, "r", encoding="utf-8") as fh:
+                tok = fh.read().strip()
+        elif os.access(CRED_FILE, os.R_OK):
+            try:
+                tok = subprocess.run(
+                    ["systemd-creds", "decrypt", "--name=" + CRED_NAME, CRED_FILE, "-"],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                tok = ""
+    if not tok:
+        raise RuntimeError(
+            "no service-account token reached this process, so %s could not be resolved" % ENVFILE)
+
+    env = dict(os.environ)
+    env["OP_SERVICE_ACCOUNT_TOKEN"] = tok
+    try:
+        p = subprocess.run(["op", "read", ref], capture_output=True, text=True,
+                           env=env, timeout=60)
+    except OSError:
+        raise RuntimeError("the manager CLI is not installed, so %s cannot be resolved" % ENVFILE)
+    value = (p.stdout or "").strip()
+    if p.returncode != 0 or not value:
+        # The manager's own stderr can quote an item name. It never quotes a
+        # value, but this service does not pass it on either way.
+        raise RuntimeError("the manager returned no value for the reference in %s" % ENVFILE)
+    return value
+
+
+# ------------------------------------------------------------------- the state
+#
+# TWO FILES, TWO OWNERS, TWO LIFETIMES.
+#
+# routes.json is a ruling about this machine. It is seeded once at install and no
+# apply rewrites it. A person edits it, or the `email route` verbs do.
+#
+# threads.jsonl is this service's own memory. Append-only, because a process
+# killed mid-write must not lose the map that routes a reply back to the desk
+# that started the conversation. Last line for a thread id wins, and the file is
+# compacted at start.
+class State:
+    def __init__(self, state_dir):
+        self.dir = state_dir
+        self.routes_path = os.path.join(state_dir, "routes.json")
+        self.threads_path = os.path.join(state_dir, "threads.jsonl")
+        self.lock = threading.Lock()
+        self.routes = self.load_routes()
+        self.threads = {}
+
+    def load_routes(self):
+        try:
+            with open(self.routes_path, "r", encoding="utf-8") as fh:
+                r = json.load(fh)
+        except (OSError, ValueError):
+            r = {}
+        if not isinstance(r, dict):
+            r = {}
+        r.setdefault("self", {})
+        # FILLED KEY BY KEY, so a table written before a field existed reads
+        # back with that field present and empty. Defaulting the whole block
+        # only reaches a table that has no `self` at all, which is a table
+        # nobody has ever run `email inbox create` against.
+        for k in ("address", "display_name", "inbox_id", "runbook"):
+            r["self"].setdefault(k, "")
+        r.setdefault("default", "")
+        r.setdefault("domains", {})
+        r.setdefault("addresses", {})
+        return r
+
+    def save_routes(self):
+        """Written whole, through a temp file in the same directory.
+
+        `mv` from elsewhere would drop the group under /srv, so the temp file is
+        made here and replaced in place.
+        """
+        tmp = self.routes_path + ".new"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.routes, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, self.routes_path)
+
+    def load_threads(self):
+        seen = {}
+        for line in read_lines(self.threads_path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            tid = rec.get("thread_id")
+            handle = rec.get("handle")
+            if tid and handle:
+                seen[tid] = handle
+        self.threads = seen
+        return seen
+
+    def compact_threads(self):
+        """One line per thread, written once at start. Bounded growth, no loss."""
+        self.load_threads()
+        tmp = self.threads_path + ".new"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for tid, handle in sorted(self.threads.items()):
+                fh.write(json.dumps({"thread_id": tid, "handle": handle,
+                                     "ts": iso_now()}) + "\n")
+        os.replace(tmp, self.threads_path)
+
+    def remember_thread(self, thread_id, handle):
+        if not thread_id or not handle:
+            return
+        with self.lock:
+            self.threads[thread_id] = handle
+            append_json(self.threads_path,
+                        {"thread_id": thread_id, "handle": handle, "ts": iso_now()})
+
+    def route(self, sender, thread_id):
+        """Which handles a mail reaches, and why.
+
+        THE THREAD MAP IS READ BEFORE THE TABLE. A reply belongs to the desk that
+        started the conversation, whatever the sender's domain maps to. That is
+        the whole reason the map exists.
+        """
+        if thread_id and thread_id in self.threads:
+            return [self.threads[thread_id]], "thread"
+        addr = (sender or "").strip().lower()
+        if "<" in addr and ">" in addr:
+            addr = addr[addr.rfind("<") + 1:addr.rfind(">")].strip()
+        entry = self.routes["addresses"].get(addr)
+        if isinstance(entry, dict) and entry.get("handles"):
+            return list(entry["handles"]), "address"
+        domain = addr.rpartition("@")[2]
+        if domain and self.routes["domains"].get(domain):
+            return list(self.routes["domains"][domain]), "domain"
+        if self.routes.get("default"):
+            return [self.routes["default"]], "default"
+        return [], "none"
+
+
+def iso_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+
+
+def append_json(path, obj):
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, sort_keys=True) + "\n")
+
+
+# ----------------------------------------------------------------- the adapter
+def run_adapter(settings, key, verb, payload, timeout=90):
+    """One adapter call. JSON in, one JSON object out.
+
+    The key rides the environment. Not argv, because /proc/PID/cmdline is
+    world-readable here.
+    """
+    path = settings.adapter_path()
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        raise RuntimeError("no executable adapter for '%s' at %s" % (settings.adapter, path))
+    env = dict(os.environ)
+    if key:
+        env[KEY_ENV] = key
+    p = subprocess.run([path, verb], input=json.dumps(payload), capture_output=True,
+                       text=True, env=env, timeout=timeout)
+    out = (p.stdout or "").strip()
+    if not out:
+        raise RuntimeError("the %s adapter answered nothing to '%s': %s"
+                           % (settings.adapter, verb, (p.stderr or "").strip()[:200]))
+    try:
+        obj = json.loads(out.splitlines()[-1])
+    except ValueError:
+        raise RuntimeError("the %s adapter answered '%s' with something that is not JSON"
+                           % (settings.adapter, verb))
+    if p.returncode not in (0,):
+        raise RuntimeError("the %s adapter failed '%s': %s"
+                           % (settings.adapter, verb, obj.get("reason", "no reason given")))
+    return obj
+
+
+# ------------------------------------------------------------------- the bus
+def bus_send(settings, to_handle, subject, body, ref):
+    """One bus message. The full text is never on the bus.
+
+    NO BACKTICKS AND NO SECRETS IN A BODY. Everybody on this machine reads every
+    inbox: that is the trust plane, and the standing law rides with it.
+    """
+    cli = settings.bus_cli
+    if not os.access(cli, os.X_OK):
+        raise RuntimeError("no bus CLI at %s" % cli)
+    env = dict(os.environ)
+    if settings.bus_dir:
+        env["SESSION_BUS_DIR"] = settings.bus_dir
+    argv = [cli, "send", settings.bus_handle, to_handle, subject, body]
+    if ref:
+        argv += ["--ref", ref]
+    p = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError("bus send to %s failed: %s" % (to_handle, (p.stderr or "").strip()[:200]))
+    return (p.stdout or "").strip()
+
+
+def one_line(text, limit=240):
+    """The provider's own preview, on one line, cut to length.
+
+    NEVER GENERATED. This service does not read a mail for meaning, so the
+    summary it puts on the bus is the provider's field and nothing else. A model
+    call here would put judgement in the plumbing.
+    """
+    s = " ".join((text or "").split())
+    return s[:limit]
+
+
+# ------------------------------------------------------------------ the runtime
+class Gatekeeper:
+    def __init__(self, settings, key):
+        self.settings = settings
+        self.key = key
+        self.state = State(settings.state_dir)
+        self.log_path = os.path.join(settings.log_dir, "sends.jsonl")
+        self.started = time.time()
+        self.reconnects = 0
+        self.connected = False
+        self.last_event = ""
+        self.last_reason = ""
+        self.stop = threading.Event()
+
+    # -- inbound ------------------------------------------------------------
+    def inbox_id(self):
+        return (self.state.routes.get("self") or {}).get("inbox_id", "")
+
+    def listen_forever(self):
+        """One `listen` child, restarted with backoff for as long as we run.
+
+        A dropped connection is ordinary. What is not ordinary is a service that
+        looks healthy while it is reaching nothing, which is why `email status`
+        reads connected or not connected rather than running or not running.
+        """
+        lo, hi = self.settings.reconnect_bounds()
+        wait = lo
+        while not self.stop.is_set():
+            # NO KEY IS A NOT-YET, HELD ON THIS SAME LADDER. A person puts the
+            # key in the claw's vault long after the service starts, so the
+            # resolution is retried here rather than read once at start, and a
+            # key that arrives is picked up without a restart. The reason names
+            # no value: resolve_key raises with a sentence about the reference.
+            if not self.key:
+                try:
+                    self.key = resolve_key()
+                except Exception as exc:
+                    self.connected = False
+                    self.last_reason = ("no provider key is resolved yet: %s"
+                                        % str(exc)[:200])
+                    self.stop.wait(wait + random.uniform(0, wait * 0.25))
+                    wait = min(hi, wait * 2)
+                    continue
+                log("info", "a provider key resolved, so the listener starts")
+                wait = lo
+            inbox = self.inbox_id()
+            if not inbox:
+                self.connected = False
+                self.last_reason = "routes.json names no inbox yet: run `email inbox create`"
+                self.stop.wait(10)
+                continue
+            try:
+                self.pump(inbox)
+                self.last_reason = "the listener exited"
+            except Exception as exc:
+                self.last_reason = str(exc)[:300]
+            self.connected = False
+            if self.stop.is_set():
+                return
+            self.reconnects += 1
+            log("warn", "listener stopped (%s); reconnecting in about %ds" % (self.last_reason, wait))
+            self.stop.wait(wait + random.uniform(0, wait * 0.25))
+            wait = min(hi, wait * 2)
+
+    def pump(self, inbox):
+        path = self.settings.adapter_path()
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            raise RuntimeError("no executable adapter at %s" % path)
+        env = dict(os.environ)
+        env[KEY_ENV] = self.key
+        proc = subprocess.Popen([path, "listen"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, env=env)
+        try:
+            proc.stdin.write(json.dumps({"inbox_id": inbox}) + "\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except ValueError:
+                    continue
+                if evt.get("event") == "listening":
+                    self.connected = True
+                    log("info", "listening on inbox %s through the %s adapter"
+                        % (inbox, self.settings.adapter))
+                    continue
+                if evt.get("event") == "received":
+                    self.connected = True
+                    self.fan_out(evt)
+        finally:
+            self.connected = False
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+
+    def fan_out(self, evt):
+        """One inbound mail becomes one bus message per target handle."""
+        self.last_event = iso_now()
+        handles, why = self.state.route(evt.get("from", ""), evt.get("thread_id", ""))
+        if not handles:
+            log("warn", "a mail arrived and the table names nobody for it, not even a default")
+            return
+        subject = evt.get("subject") or "(no subject)"
+        body = "from %s on %s. %s" % (
+            evt.get("from", "an unknown sender"),
+            evt.get("date", "an unknown date"),
+            one_line(evt.get("preview", "")),
+        )
+        ref = "email:%s/%s" % (evt.get("thread_id", ""), evt.get("message_id", ""))
+        for h in handles:
+            try:
+                bus_send(self.settings, h, subject, body, ref)
+                log("info", "routed a mail to %s by %s" % (h, why))
+            except Exception as exc:
+                log("err", "could not put a mail on the bus for %s: %s" % (h, exc))
+
+    # -- outbound -----------------------------------------------------------
+    def do_send(self, req, peer):
+        inbox = self.inbox_id()
+        if not inbox:
+            return {"ok": False, "reason": "routes.json names no inbox yet: run `email inbox create`"}
+        payload = {
+            "inbox_id": inbox,
+            "to": req.get("to") or [],
+            "cc": req.get("cc") or [],
+            "subject": req.get("subject") or "",
+            "text": req.get("body") or "",
+            "in_reply_to": req.get("in_reply_to") or "",
+            "thread_id": req.get("thread") or "",
+        }
+        out = run_adapter(self.settings, self.key, "send", payload)
+        thread_id = out.get("thread_id") or payload["thread_id"]
+        handle = req.get("handle") or ""
+        if thread_id and handle:
+            self.state.remember_thread(thread_id, handle)
+        self.record_send(req, peer, out)
+        return {"ok": True, "message_id": out.get("message_id", ""), "thread_id": thread_id}
+
+    def record_send(self, req, peer, out):
+        """The audit line.
+
+        `uid` is measured from the socket peer and cannot be chosen. `handle` is
+        typed by the caller and cannot be checked. Both are recorded and the
+        record says which is which, the same way the bus records `from` beside
+        `sender`. No message body is written here.
+        """
+        append_json(self.log_path, {
+            "ts": iso_now(),
+            "peer_uid": peer.get("uid"),
+            "peer_user": peer.get("user"),
+            "claimed_handle": req.get("handle") or "",
+            "to": req.get("to") or [],
+            "cc": req.get("cc") or [],
+            "subject": req.get("subject") or "",
+            "in_reply_to": req.get("in_reply_to") or "",
+            "message_id": out.get("message_id", ""),
+            "thread_id": out.get("thread_id", ""),
+        })
+
+    # -- the socket ---------------------------------------------------------
+    def handle_request(self, req, peer):
+        verb = req.get("verb", "")
+        if verb == "status":
+            return {
+                "ok": True,
+                "adapter": self.settings.adapter,
+                "inbox_id": self.inbox_id(),
+                "address": (self.state.routes.get("self") or {}).get("address", ""),
+                "connected": self.connected,
+                "uptime_secs": int(time.time() - self.started),
+                "reconnects": self.reconnects,
+                "last_event": self.last_event,
+                "reason": "" if self.connected else self.last_reason,
+                "threads_known": len(self.state.threads),
+            }
+        if verb == "send":
+            return self.do_send(req, peer)
+        if verb == "thread":
+            return {"ok": True, "thread": run_adapter(
+                self.settings, self.key, "thread",
+                {"inbox_id": self.inbox_id(), "thread_id": req.get("id", "")})}
+        if verb == "message":
+            return {"ok": True, "message": run_adapter(
+                self.settings, self.key, "message",
+                {"inbox_id": self.inbox_id(), "message_id": req.get("id", "")})}
+        if verb == "route-list":
+            return {"ok": True, "routes": self.state.routes}
+        if verb == "route-add":
+            return self.route_add(req)
+        if verb == "route-remove":
+            return self.route_remove(req)
+        if verb == "inbox-create":
+            return self.inbox_create(req)
+        if verb == "self-set-runbook":
+            return self.self_set_runbook(req)
+        return {"ok": False, "reason": "no such verb: %s" % verb}
+
+    def route_add(self, req):
+        key = (req.get("key") or "").strip().lower()
+        handle = (req.get("handle") or "").strip()
+        if not key or not handle:
+            return {"ok": False, "reason": "a route needs a sender domain or address and a handle"}
+        with self.state.lock:
+            bucket = "addresses" if "@" in key else "domains"
+            if bucket == "domains":
+                have = self.state.routes["domains"].setdefault(key, [])
+                if handle not in have:
+                    have.append(handle)
+            else:
+                entry = self.state.routes["addresses"].setdefault(
+                    key, {"handles": [], "agent": bool(req.get("agent"))})
+                if handle not in entry["handles"]:
+                    entry["handles"].append(handle)
+                if req.get("agent") is not None:
+                    entry["agent"] = bool(req.get("agent"))
+            self.state.save_routes()
+        return {"ok": True, "routes": self.state.routes}
+
+    def route_remove(self, req):
+        key = (req.get("key") or "").strip().lower()
+        handle = (req.get("handle") or "").strip()
+        with self.state.lock:
+            bucket = "addresses" if "@" in key else "domains"
+            if bucket == "domains":
+                have = self.state.routes["domains"].get(key, [])
+                if handle:
+                    self.state.routes["domains"][key] = [h for h in have if h != handle]
+                    if not self.state.routes["domains"][key]:
+                        self.state.routes["domains"].pop(key, None)
+                else:
+                    self.state.routes["domains"].pop(key, None)
+            else:
+                entry = self.state.routes["addresses"].get(key)
+                if entry and handle:
+                    entry["handles"] = [h for h in entry["handles"] if h != handle]
+                    if not entry["handles"]:
+                        self.state.routes["addresses"].pop(key, None)
+                else:
+                    self.state.routes["addresses"].pop(key, None)
+            self.state.save_routes()
+        return {"ok": True, "routes": self.state.routes}
+
+    def self_set_runbook(self, req):
+        """Where the firm's communication runbook rests, recorded once.
+
+        WHAT THIS SERVICE CHECKS, AND WHAT IT CANNOT. An absolute path is the
+        only shape this value can take, and that is a reading of the string, so
+        it is made here. Whether the file exists is a reading of the caller's
+        own directory. This service runs as its own system account and a firm's
+        workspace is group-owned with nothing granted to everybody else, so a
+        stat taken here would refuse a path that is there. The command takes
+        that reading, standing where the caller stands.
+
+        The value is a pointer and never the document. Nothing in this service
+        opens it: which mail waits for a person is the email orchestrator's
+        runbook, and this records only where that agent put it.
+        """
+        path = (req.get("path") or "").strip()
+        if not path:
+            return {"ok": False, "reason": "a runbook needs a path"}
+        if not path.startswith("/"):
+            return {"ok": False, "reason":
+                    "%s is a relative path. The runbook is recorded as an absolute path, "
+                    "because the session that reads this table does not stand where the "
+                    "session that wrote it stood." % path}
+        with self.state.lock:
+            self.state.routes.setdefault("self", {})["runbook"] = path
+            self.state.save_routes()
+        return {"ok": True, "self": self.state.routes["self"]}
+
+    def inbox_create(self, req):
+        """The claw's own address, made once, by a person, after the key is wired.
+
+        REFUSED WHEN `self` IS ALREADY SET. A second inbox is a second identity
+        on the same claw, and the address is in every From: line a recipient
+        ever sees. Changing it later means telling everybody who has one.
+        """
+        cur = self.state.routes.get("self") or {}
+        if cur.get("inbox_id"):
+            return {"ok": False, "reason":
+                    "this claw already has an inbox: %s. Editing routes.json by hand is the "
+                    "deliberate way to change it." % cur.get("address", cur["inbox_id"])}
+        out = run_adapter(self.settings, self.key, "make-inbox", {
+            "username": req.get("username") or "",
+            "domain": req.get("domain") or "",
+            "display_name": req.get("display_name") or "",
+        })
+        with self.state.lock:
+            # THE RUNBOOK CARRIES OVER. An operator may record it before the
+            # key is wired, and this block writes `self` whole.
+            self.state.routes["self"] = {
+                "address": out.get("address", ""),
+                "display_name": req.get("display_name") or "",
+                "inbox_id": out.get("inbox_id", ""),
+                "runbook": cur.get("runbook", ""),
+            }
+            self.state.save_routes()
+        return {"ok": True, "self": self.state.routes["self"]}
+
+    def serve_socket(self):
+        path = self.settings.socket
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        # 0660 with the members group. Unix permissions are the whole access
+        # story here, which is what a connection service is.
+        try:
+            import grp
+            os.chown(path, -1, grp.getgrnam(self.settings.socket_group).gr_gid)
+        except (KeyError, OSError) as exc:
+            log("warn", "could not set the socket group to %s: %s"
+                % (self.settings.socket_group, exc))
+        os.chmod(path, 0o660)
+        srv.listen(16)
+        log("info", "listening on %s" % path)
+        while not self.stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self.serve_one, args=(conn,), daemon=True).start()
+
+    def serve_one(self, conn):
+        peer = {"uid": None, "user": "?"}
+        try:
+            # SO_PEERCRED is measured by the kernel. A caller cannot choose it.
+            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", raw)
+            peer["uid"] = uid
+            try:
+                peer["user"] = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                peer["user"] = str(uid)
+        except OSError:
+            pass
+        try:
+            conn.settimeout(120)
+            data = b""
+            while b"\n" not in data:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 8 * 1024 * 1024:
+                    break
+            req = json.loads(data.decode("utf-8", "replace").strip() or "{}")
+            try:
+                resp = self.handle_request(req, peer)
+            except Exception as exc:
+                resp = {"ok": False, "reason": str(exc)[:400]}
+            conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+        except Exception as exc:
+            log("warn", "a socket request failed: %s" % str(exc)[:200])
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------- checks
+def cmd_check(settings):
+    """Resolve everything, probe the adapter, connect to nothing."""
+    report = {
+        "conf": CONF,
+        "enabled": settings.enabled(),
+        "adapter": settings.adapter,
+        "adapter_path": settings.adapter_path(),
+        "state_dir": settings.state_dir,
+        "log_dir": settings.log_dir,
+        "socket": settings.socket,
+        "bus_cli": settings.bus_cli,
+        "bus_dir": settings.bus_dir or "(the CLI's own default)",
+        "origin": settings.origin,
+    }
+    st = State(settings.state_dir)
+    report["inbox_id"] = (st.routes.get("self") or {}).get("inbox_id", "")
+    report["address"] = (st.routes.get("self") or {}).get("address", "")
+    report["default_handle"] = st.routes.get("default", "")
+    report["runbook"] = (st.routes.get("self") or {}).get("runbook", "")
+
+    key = ""
+    try:
+        key = resolve_key()
+        # WHERE IT CAME FROM, not what it is. A claw reading "environment" here
+        # is a claw whose key is not coming from its vault, and that is worth
+        # seeing in a health line.
+        report["key"] = "resolved from the environment" if os.environ.get(KEY_ENV) \
+            else "resolved through %s" % ENVFILE
+    except Exception as exc:
+        report["key"] = "not resolved: %s" % exc
+
+    try:
+        probe = run_adapter(settings, key, "probe", {}, timeout=30)
+        report["probe"] = probe
+    except Exception as exc:
+        report["probe"] = {"ready": False, "reason": str(exc)}
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report.get("probe", {}).get("ready") else 3
+
+
+def cmd_serve(settings):
+    if not settings.enabled():
+        log("info", "ENABLED is not yes in %s, so this service is deliberately off" % CONF)
+        return 0
+    for d in (settings.state_dir, settings.log_dir):
+        os.makedirs(d, exist_ok=True)
+    # A CLAW WITH NO KEY IS THE ORDINARY STATE OF A FRESH CLAW, not a failure.
+    # The socket opens either way, so `email status` answers and phase 25 reads
+    # its health line. The listener starts only when a key resolves, and the
+    # resolution is retried on the same ladder a dropped connection uses,
+    # because the thing that changes is a person putting the key in the vault.
+    key = ""
+    try:
+        key = resolve_key()
+    except Exception as exc:
+        log("info", "no provider key is resolved yet, so no mail is routed: %s. "
+                    "A person wires one with install-email-provider-key.sh" % exc)
+    gk = Gatekeeper(settings, key)
+    gk.state.compact_threads()
+    threading.Thread(target=gk.listen_forever, daemon=True).start()
+    try:
+        gk.serve_socket()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        gk.stop.set()
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__.splitlines()[0])
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--check", action="store_true", help="resolve and probe, serve nothing")
+    g.add_argument("--serve", action="store_true", help="run the service")
+    a = ap.parse_args()
+    try:
+        syslog.openlog("email-gatekeeper", syslog.LOG_PID, syslog.LOG_DAEMON)
+    except Exception:
+        pass
+    settings = Settings()
+    return cmd_check(settings) if a.check else cmd_serve(settings)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

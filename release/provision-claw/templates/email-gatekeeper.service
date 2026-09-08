@@ -1,0 +1,51 @@
+# Installed VERBATIM, never rendered. render-template.sh must not touch this
+# file: it carries no substitution, and this claw's own address comes from the
+# routing table rather than from a unit or a release.
+#
+# LONG-RUNNING, LIKE THE WAKE RAIL AND UNLIKE EVERY OTHER RAIL HERE. It holds one
+# connection to the provider's push channel, and a connection is not something a
+# timer beat can hold. A dropped connection is reconnected by the service on its
+# own ladder, so systemd's restart is the net under the net.
+#
+# THE KEY REACHES THIS PROCESS AND NOTHING ELSE. systemd decrypts the claw's
+# machine credential and puts it in this unit's own credentials directory, so a
+# service running as a non-root account reaches the machine vault without ever
+# opening the encrypted file. The service resolves the reference at start and
+# holds the value in memory. Nothing writes it down. On a claw where no key is
+# wired yet the service still runs and retries the resolution on its own
+# reconnect ladder, so a key put in the vault later needs no restart here.
+[Unit]
+Description=Email gatekeeper: one access point for this firm's mail
+Documentation=file:/opt/commonclaw/doc/operator-runbook.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=email-gate
+Group=email-gate
+SupplementaryGroups=claw-members
+LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/opt/commonclaw/bin/email-gatekeeper --serve
+# RuntimeDirectory gives the socket a home systemd makes and removes, so a stale
+# socket cannot outlive the service that answered on it.
+RuntimeDirectory=email-gatekeeper
+RuntimeDirectoryMode=0755
+# A provider that is down must not become a restart storm. The service already
+# reconnects on its own ladder, so a restart here means the process itself died.
+Restart=always
+RestartSec=30
+# It waits on a socket and writes small files. Neither is urgent enough to take
+# a slice from the sessions it serves.
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/connections/email-gatekeeper /var/lib/commonclaw/bus
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""email-gatekeeper adapter -- AgentMail.
+
+THE ADAPTER CONTRACT, WHICH EVERY ADAPTER HERE ANSWERS AND NONE MAY WIDEN:
+
+  probe        {}                                  -> {"provider","ready","reason"}
+  make-inbox   {"username","domain","display_name"} -> {"inbox_id","address"}
+  thread       {"inbox_id","thread_id"}             -> {"thread_id","subject","messages":[...]}
+  message      {"inbox_id","message_id"}            -> one message object
+  send         {"inbox_id","to","cc","subject","text","in_reply_to","thread_id"}
+                                                    -> {"message_id","thread_id"}
+  listen       {"inbox_id"}                         -> one JSON line per inbound mail
+                                                       until killed
+
+  JSON on stdin, one JSON object on stdout. Exit 0 for an answer, 2 for usage,
+  3 for a transport that changed underneath. A failure prints
+  {"error": "..."} and exits 3, so the core never has to guess.
+
+THE KEY COMES FROM THE ENVIRONMENT AND GOES NOWHERE ELSE. `EMAIL_PROVIDER_KEY`
+is read once here. /proc/PID/cmdline is world-readable and this claw is
+deliberately multi-user, so the key is never an argument, never printed, and
+never written to a log. The WebSocket URL carries the key as a query parameter,
+which is this provider's own authentication for that transport, and that URL is
+composed inside this file and passed to nothing that records it.
+
+WHY THERE IS A WEBSOCKET CLIENT IN HERE. The push channel is RFC 6455 and this
+claw's programs are Python standard library only, which has no WebSocket client.
+So a minimal one lives here, in the adapter, which is exactly where a provider's
+transport belongs. The core never sees it.
+
+THE SEND ACT MAPS TO TWO CALLS. AgentMail's send endpoint carries no in_reply_to
+field: a threaded send is a separate endpoint keyed by the message being
+answered. One act at the seam, two calls at the provider. That is what an
+adapter is for.
+
+WHAT WAS READ, AND WHEN. The endpoints, the event strings and the subscribe
+frame below were read from AgentMail's published documentation on 2026-09-04.
+An API that has moved since shows up as a 404 or an unexpected shape, and both
+exit 3 rather than being smoothed over.
+"""
+
+import base64
+import json
+import os
+import socket
+import ssl
+import struct
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = os.environ.get("AGENTMAIL_API", "https://api.agentmail.to")
+WS = os.environ.get("AGENTMAIL_WS", "wss://ws.agentmail.to/v0")
+KEY_ENV = "EMAIL_PROVIDER_KEY"
+UA = "commonclaw-email-gatekeeper"
+
+
+def die(reason, code=3):
+    print(json.dumps({"error": reason}))
+    sys.exit(code)
+
+
+def key():
+    k = os.environ.get(KEY_ENV, "").strip()
+    if not k:
+        die("no %s in this adapter's environment" % KEY_ENV)
+    return k
+
+
+def api(method, path, body=None):
+    url = API.rstrip("/") + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + key())
+    req.add_header("User-Agent", UA)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        # The status and the endpoint, never the key and never the body of a
+        # message. A 401 here means the key is wrong, not that it should print.
+        die("%s %s answered %s" % (method, path, exc.code))
+    except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        die("%s %s could not be reached: %s" % (method, path, exc))
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        die("%s %s answered something that is not JSON" % (method, path))
+
+
+def norm_message(m):
+    """The provider's message, in the seam's shape. The core reads only this."""
+    return {
+        "message_id": m.get("message_id", ""),
+        "thread_id": m.get("thread_id", ""),
+        "from": m.get("from", ""),
+        "to": m.get("to", []),
+        "cc": m.get("cc", []),
+        "subject": m.get("subject", ""),
+        "date": m.get("timestamp") or m.get("created_at", ""),
+        "text": m.get("text", ""),
+        "in_reply_to": m.get("in_reply_to", ""),
+    }
+
+
+def as_list(v):
+    if not v:
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+# ------------------------------------------------------------------- the verbs
+def v_probe(_req):
+    """Is this adapter here and does its key open the account?
+
+    A probe that only checked for a key would answer ready on a revoked one.
+    """
+    k = os.environ.get(KEY_ENV, "").strip()
+    if not k:
+        return {"provider": "agentmail", "ready": False,
+                "reason": "no %s in this adapter's environment" % KEY_ENV}
+    url = API.rstrip("/") + "/v0/inboxes?limit=1"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", "Bearer " + k)
+    req.add_header("User-Agent", UA)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read(1)
+        return {"provider": "agentmail", "ready": True, "reason": "the account answered"}
+    except urllib.error.HTTPError as exc:
+        return {"provider": "agentmail", "ready": False,
+                "reason": "the account answered %s" % exc.code}
+    except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        return {"provider": "agentmail", "ready": False,
+                "reason": "the provider could not be reached: %s" % exc}
+
+
+def v_make_inbox(req):
+    body = {}
+    if req.get("username"):
+        body["username"] = req["username"]
+    if req.get("domain"):
+        body["domain"] = req["domain"]
+    if req.get("display_name"):
+        body["display_name"] = req["display_name"]
+    out = api("POST", "/v0/inboxes", body)
+    return {"inbox_id": out.get("inbox_id", ""), "address": out.get("email", "")}
+
+
+def v_thread(req):
+    inbox = urllib.parse.quote(req.get("inbox_id", ""), safe="")
+    tid = urllib.parse.quote(req.get("thread_id", ""), safe="")
+    out = api("GET", "/v0/inboxes/%s/threads/%s" % (inbox, tid))
+    return {
+        "thread_id": out.get("thread_id", ""),
+        "subject": out.get("subject", ""),
+        "messages": [norm_message(m) for m in out.get("messages", [])],
+    }
+
+
+def v_message(req):
+    inbox = urllib.parse.quote(req.get("inbox_id", ""), safe="")
+    mid = urllib.parse.quote(req.get("message_id", ""), safe="")
+    return norm_message(api("GET", "/v0/inboxes/%s/messages/%s" % (inbox, mid)))
+
+
+def v_send(req):
+    inbox = urllib.parse.quote(req.get("inbox_id", ""), safe="")
+    body = {
+        "to": as_list(req.get("to")),
+        "subject": req.get("subject", ""),
+        "text": req.get("text", ""),
+    }
+    if req.get("cc"):
+        body["cc"] = as_list(req["cc"])
+    if req.get("in_reply_to"):
+        # The threaded half of the act. The endpoint is keyed by the message
+        # being answered, and it carries no subject: the provider takes it from
+        # the thread.
+        body.pop("subject", None)
+        mid = urllib.parse.quote(req["in_reply_to"], safe="")
+        out = api("POST", "/v0/inboxes/%s/messages/%s/reply" % (inbox, mid), body)
+    else:
+        out = api("POST", "/v0/inboxes/%s/messages/send" % inbox, body)
+    return {"message_id": out.get("message_id", ""), "thread_id": out.get("thread_id", "")}
+
+
+# ------------------------------------------------------ the push channel
+#
+# A minimal RFC 6455 client. Text frames in, text frames out, ping answered with
+# pong, close honoured. Nothing else, because nothing else is needed to read an
+# event stream, and every line of transport here is a line that can be wrong.
+class WebSocket:
+    def __init__(self, url, timeout=70):
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        port = parts.port or (443 if parts.scheme == "wss" else 80)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        raw = socket.create_connection((host, port), timeout=30)
+        if parts.scheme == "wss":
+            ctx = ssl.create_default_context()
+            raw = ctx.wrap_socket(raw, server_hostname=host)
+        raw.settimeout(timeout)
+        self.sock = raw
+        self.buf = b""
+        nonce = base64.b64encode(os.urandom(16)).decode()
+        handshake = (
+            "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nUser-Agent: %s\r\n\r\n"
+            % (path, host, nonce, UA)
+        )
+        raw.sendall(handshake.encode("ascii"))
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = raw.recv(4096)
+            if not chunk:
+                raise OSError("the provider closed the connection during the handshake")
+            head += chunk
+        status = head.split(b"\r\n", 1)[0].decode("latin-1")
+        if "101" not in status:
+            raise OSError("the push channel refused the upgrade: %s" % status)
+        self.buf = head.split(b"\r\n\r\n", 1)[1]
+
+    def _read(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError("the push channel closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def send_text(self, text):
+        payload = text.encode("utf-8")
+        header = bytearray([0x81])
+        mask = os.urandom(4)
+        n = len(payload)
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack(">H", n)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack(">Q", n)
+        header += mask
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def recv_text(self):
+        """One text message, or None for a control frame that needs no answer."""
+        b0, b1 = self._read(2)
+        opcode = b0 & 0x0F
+        n = b1 & 0x7F
+        if n == 126:
+            n = struct.unpack(">H", self._read(2))[0]
+        elif n == 127:
+            n = struct.unpack(">Q", self._read(8))[0]
+        if b1 & 0x80:
+            mask = self._read(4)
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(self._read(n)))
+        else:
+            data = self._read(n)
+        if opcode == 0x8:
+            raise OSError("the provider sent a close frame")
+        if opcode == 0x9:
+            self.sock.sendall(bytes([0x8A, 0x80]) + os.urandom(4))
+            return None
+        if opcode in (0x1, 0x2):
+            return data.decode("utf-8", "replace")
+        return None
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def v_listen(req):
+    """Stream inbound mail until something breaks. Never returns normally.
+
+    Only `message.received` is subscribed. Spam, blocked and unauthenticated
+    arrive as their own event types and are excluded from a subscription unless
+    a subscriber asks for them and holds the matching label permission. Not
+    asking is this claw's decision and it is also the provider's default.
+    """
+    inbox = req.get("inbox_id", "")
+    if not inbox:
+        die("listen was given no inbox_id")
+    url = WS + ("&" if "?" in WS else "?") + urllib.parse.urlencode({"api_key": key()})
+    try:
+        ws = WebSocket(url)
+    except (OSError, ssl.SSLError) as exc:
+        die("the push channel could not be opened: %s" % exc)
+    try:
+        ws.send_text(json.dumps({
+            "type": "subscribe",
+            "event_types": ["message.received"],
+            "inbox_ids": [inbox],
+        }))
+        while True:
+            try:
+                raw = ws.recv_text()
+            except socket.timeout:
+                # A quiet channel is normal. A read timeout is not a drop, and
+                # treating it as one would reconnect this claw all day.
+                continue
+            except (OSError, ssl.SSLError) as exc:
+                die("the push channel dropped: %s" % exc)
+            if raw is None:
+                continue
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            kind = msg.get("type")
+            if kind == "subscribed":
+                emit({"event": "listening", "inbox_id": inbox})
+                continue
+            if kind == "error":
+                die("the push channel answered an error: %s" % msg.get("name", "unnamed"))
+            if kind != "event" or msg.get("event_type") != "message.received":
+                continue
+            m = msg.get("message") or msg.get("data") or {}
+            emit({
+                "event": "received",
+                "inbox_id": inbox,
+                "message_id": m.get("message_id", ""),
+                "thread_id": m.get("thread_id", ""),
+                "from": m.get("from", ""),
+                "to": m.get("to", []),
+                "subject": m.get("subject", ""),
+                "date": m.get("timestamp") or m.get("created_at", ""),
+                # The provider's own preview. The gatekeeper truncates it and
+                # composes nothing.
+                "preview": m.get("preview", ""),
+            })
+    finally:
+        ws.close()
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+VERBS = {
+    "probe": v_probe,
+    "make-inbox": v_make_inbox,
+    "thread": v_thread,
+    "message": v_message,
+    "send": v_send,
+    "listen": v_listen,
+}
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in VERBS:
+        sys.stderr.write("usage: agentmail <%s>, JSON on stdin\n" % "|".join(sorted(VERBS)))
+        return 2
+    verb = sys.argv[1]
+    raw = sys.stdin.readline() if verb == "listen" else sys.stdin.read()
+    try:
+        req = json.loads(raw or "{}")
+    except ValueError:
+        die("stdin was not JSON", 2)
+    out = VERBS[verb](req)
+    if out is not None:
+        emit(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,47 +1,102 @@
-- **An update no longer fails on a claw that carries a skill of its own.**
-  Release 1.4.4 shipped the fix that keeps your own machine-wide skills through
-  an update. One of its own checks then failed on exactly the claws that have
-  one.
+- **This claw can now hold one email address for your firm, with the sessions on
+  the machine behind it.** Somebody outside writes to the firm. They do not have
+  to guess which person or which agent to reach. What arrives is carried to the
+  sessions whose work it is, and what those sessions write goes back out the same
+  way. Nobody carries a message by hand.
 
-  The check starts the persistent-session core and asks how many machine-wide
-  skills it can see. It expected that number to be the count of skills the
-  release ships. On a claw carrying a skill of your own the core sees yours as
-  well, so the number came back higher and the check reported a failure.
+  The part this release installs is plumbing, and it is built to stay that way.
+  It reads no mail for meaning. It picks no recipient beyond the table you give
+  it. It answers nothing on its own. It keeps no copy of your correspondence,
+  which rests at the provider. It holds no key on disk: the value lives in the
+  running process from start to stop, and this claw's own machine vault holds it
+  the rest of the time.
 
-  What that cost a claw on 1.4.4: the update applied its files and then reported
-  a failed run, so the version the claw records was not advanced and no
-  changelog entry was written. The next two scheduled updates failed the same
-  way, because your skill was still there, and then the claw stopped retrying.
-  Nothing on the box named your file as the cause.
+  Which mail waits for a person to look at it is your firm's rule, written down
+  in your own document, and no code path here decides it.
 
-  From 1.4.5 the check reads the machine-wide directory three times, once with
-  no probe of its own in it, once with the probe misplaced and once with it in
-  the right place. It passes when the probe raises the directory's own count by
-  one, whatever that count started at. Its line now says how many skills the
-  core can see there that the release did not install, and says those are yours.
+  **Two steps turn it on, both a person's, both once.** The operator runbook on
+  the claw carries them in full.
 
-  **What to do.** Nothing. A claw that met this on 1.4.4 takes 1.4.5 on its next
-  update and records the version normally. Your own skills are untouched
-  throughout, on 1.4.4 and on 1.4.5 both.
+  The first puts your provider key into this claw's own machine vault:
 
-- **The line at the top of a ride says which pointer it read.** A ride is
-  `commonclaw-update.sh --release <tag>`, and it finds the tag on a channel at or
-  below the one this claw follows. On the first tier that channel is the claw's
-  own. The line still said it had read a lower channel and had left this claw's
-  pointer alone, naming one channel as both. From 1.4.5 it says the claw's own
-  pointer carried the tag when that is what happened, and names the lower channel
-  when a lower one carried it.
+  ```
+  sudo /opt/commonclaw/provision-claw/scripts/install-email-provider-key.sh
+  ```
 
-  **What to do.** Nothing. Only the wording changed. A ride resolves the same tag
-  from the same channel it did before.
+  It takes the value through memory, files it, reads it back through the same
+  reference the service uses, and destroys the drop. It then restarts the
+  service, because a running process holds the key it started with.
 
-- **A fix to the tool that builds a release, which a member sees nothing of.**
-  `assemble.sh` runs on the machine a release is cut from. It resolved the output
-  directory once where the operator stood and a second time inside the source
-  checkout, so a relative output path could unpack a whole payload into the source
-  tree. It now makes every path argument absolute before it changes directory.
+  The second makes the address, after the key is wired:
 
-  **What to do.** Nothing. This tool ships with no release and runs on no claw.
+  ```
+  email inbox create --username <name> --display-name "<Display Name>"
+  ```
+
+  That address is in every From: line a recipient will ever see, so no release
+  picks it and a second one is refused.
+
+  **A claw with neither step done is not broken.** The service is installed and
+  running, it reports that it reaches no provider, and it waits. The update says
+  the same thing in two notes and does not fail the run. This is the ordinary
+  state of a claw whose firm has not wired mail, and a rail that failed an apply
+  for it would stop a release above the sentence saying how to fix it.
+
+  **What an agent on the box gains** is the `email` command: send, read a thread,
+  read a message, see and change the routing table, read the health line, and
+  make the claw's one inbox. It talks to the service over a socket that only
+  members of this claw can open. It never refuses a caller, so anybody who can
+  open that socket can send as the firm. Every send is written to a log with the
+  account it came from, measured rather than claimed.
+
+  **The table also records where your firm's mail rules live.** The document your
+  email agent applies to everything that goes out sits in that agent's own
+  directory, and nothing else on the machine could name that directory. The
+  routing table now carries the path:
+
+  ```
+  email self set runbook <absolute path>
+  ```
+
+  `email self` reads it back, and the update prints one note when it is unset.
+  Nothing opens the file. It is a pointer and nothing more.
+
+  **What to do.** Nothing, on a claw with no mail. A firm that wants the address
+  runs the two steps above, in that order.
+
+- **The skill that runs a firm's email is in the open library and does not
+  arrive with this release.** The service moves mail. The judgement about mail
+  sits with an agent, and that agent is launched from a skill called `email`.
+  The skill says what an email agent is and what it never does, how a firm stands
+  one up, what to do with each mail that arrives, and how anybody else on the
+  claw asks for a send. It carries a template for the firm's own communication
+  runbook, the document that says who signs, what tone the firm writes in, and
+  which mail waits for a person. The launch writes that document, then records
+  its path in the routing table with the command above.
+
+  **What to do.** Nothing on the claw. This release installs no skill and no
+  agent. A firm that wants an email agent takes the skill from the library and
+  runs its launch.
+
+- **An update run by hand from inside a home directory no longer reports every
+  other person's git identity as missing.** The people phase writes and reads
+  each person's git name and address as that person. It did so from wherever the
+  operator happened to be standing. git looks at its working directory before it
+  does anything else, and one person cannot look inside another person's home, so
+  every reading for everybody but the operator died there. The run then said
+  those people had no git identity. They had one the whole time.
+
+  What that cost a claw: one update on 2026-09-04 reported six failed checks
+  against one person, recorded the old version, and wrote no changelog entry, on
+  a box whose files had already converged. Nothing in the output named the
+  operator's directory as the cause.
+
+  The scheduled update never met this, because the system hands it the root of
+  the filesystem. From 1.5.0 the phase's own git calls stand there whatever
+  directory the caller is in, and the operator runbook says to ride from the same
+  place.
+
+  **What to do.** Nothing. A claw takes this on its next update.
 
 ## What somebody has to do
 

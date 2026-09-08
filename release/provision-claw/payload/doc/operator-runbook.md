@@ -225,6 +225,42 @@ handle holding unread mail past a threshold, and posts the handle names, their
 counts and their ages. It reports no subject and no message body. It reads files
 already on the box, so nothing else here needs wiring.
 
+**The mail gatekeeper.** One address for the firm, with the sessions on this
+claw behind it. Mail that arrives is routed over the bus to the sessions it
+concerns, and what they write goes back out through the same service. It reads
+no mail for meaning, decides no recipient beyond a table, replies to nothing on
+its own, and keeps no correspondence: mail rests at the provider.
+
+Wiring it takes two steps, both a person's, both once.
+
+The key first. It sends mail as your firm and reads everything that arrives, so
+it lives in this claw's own machine vault and never on the disk. Pipe it down
+one ssh command into the claw's memory-backed runtime directory, then open the
+door:
+
+```
+printf '%s' '<provider api key>' \
+  | ssh {claw} 'umask 077; cat > /run/user/$(id -u)/commonclaw-email-provider-key'
+sudo /opt/commonclaw/provision-claw/scripts/install-email-provider-key.sh
+```
+
+The door files the key, reads it back through the reference the service
+resolves, restarts the service so the running process holds it, and destroys the
+drop. It says which of those failed if one does.
+
+The address second. It is in every `From:` line anybody who writes to your firm
+will see, so no release picks it and no default exists:
+
+```
+email inbox create --username <name> --display-name "<Display Name>"
+```
+
+A second one is refused. Changing it later means telling everybody who has it.
+
+After that, `email status` says whether the service is connected, and `email
+route list` shows who mail reaches. A claw with neither step done is not broken:
+the service runs, reports that it reaches no provider, and waits.
+
 **The wake rail.** A session bus is files, and a message written into one
 announces itself to nobody. This rail tells a live session that it has unread
 mail, in one fixed sentence carrying no instruction. An account with no session

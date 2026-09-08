@@ -109,8 +109,10 @@
 # ../templates; phase 22 installs commonclaw-notify.sh; phase 23 installs
 # commonclaw-stall-check.sh with its conf and two units from ../templates; and
 # phase 24 runs install-bus-nudge.sh, which reads ../payload and ../templates
-# for itself. Copy the whole skill directory to the claw. A missing sibling
-# fails the run rather than being skipped.
+# for itself; and phase 25 runs install-email-gatekeeper.sh, which reads
+# ../payload/email-gatekeeper and ../templates for itself. Copy the whole skill
+# directory to the claw. A missing sibling fails the run rather than being
+# skipped.
 #
 # IDEMPOTENCY. Safe to re-run; reasoned per phase:
 #   1  preflight     read-only.
@@ -212,6 +214,12 @@
 #                    the bus path and the substrate are facts and are asserted,
 #                    the model and the permissions flag are decisions and are
 #                    kept as the claw records them.
+#   25 mail gatekeeper install-email-gatekeeper.sh owns the act and is called,
+#                    not reimplemented. The conf gains a missing key and keeps
+#                    every key it has. The routing table is STATE and is seeded
+#                    once, never rewritten: it carries this firm's own address
+#                    and its own routing decisions. NO CREDENTIAL VALUE: the
+#                    provider key is a reference resolved at start.
 #   18 authority     the registry is STATE and is seeded once, never rewritten:
 #                    it is the firm's own record of who may approve an act here,
 #                    and it moves only by somebody signing for the change. The
@@ -1497,6 +1505,30 @@ phase_1_preflight() {
   # installer would otherwise refuse mid-phase on a stage that lost it.
   [ -r "${PAYLOAD_DIR}/doc/operator-runbook.md" ] \
     || missing_payload="$missing_payload ../payload/doc/operator-runbook.md"
+  # The mail gatekeeper's own siblings. `install-email-gatekeeper.sh` is called
+  # from phase 25 and reads ../payload/email-gatekeeper and ../templates for
+  # itself, so a missing one turns a phase into a refusal rather than a silent
+  # skip. `install-email-provider-key.sh` is named here because nothing else on
+  # the claw checks it: phase 25's warn line names it as the door a person runs,
+  # and an operator who followed that line would find nothing there.
+  for s in install-email-gatekeeper.sh install-email-provider-key.sh; do
+    [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
+  done
+  [ -d "${PAYLOAD_DIR}/email-gatekeeper" ] \
+    || missing_payload="$missing_payload ../payload/email-gatekeeper"
+  for s in email-gatekeeper email; do
+    [ -r "${PAYLOAD_DIR}/email-gatekeeper/${s}" ] \
+      || missing_payload="$missing_payload ../payload/email-gatekeeper/${s}"
+  done
+  # EACH ADAPTER BY NAME, for the wake rail's reason: a present-but-short
+  # directory passes a directory test while the service reaches no provider.
+  for s in agentmail fake; do
+    [ -r "${PAYLOAD_DIR}/email-gatekeeper/email-gatekeeper-adapters/${s}" ] \
+      || missing_payload="$missing_payload ../payload/email-gatekeeper/email-gatekeeper-adapters/${s}"
+  done
+  for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json; do
+    [ -r "${TEMPLATE_DIR}/${t}" ] || missing_payload="$missing_payload ../templates/${t}"
+  done
   # At least one RETIRED generation, and this one is not tidiness.
   #
   # The reconcile recognises an unedited briefing by reproducing a retired
@@ -2199,6 +2231,24 @@ stamp_conventions() {
     || printf '%s\n' "$CLAW_BRIEFING_POINTER" >> "${home}/${PER_TASK_CORE_FILE}"
 }
 
+# git AS A PERSON, STANDING AT `/`, and the standing is the whole point.
+#
+# git stats its working directory before it does anything else, looking for a
+# repository. `-H` sets HOME and leaves the working directory where the caller
+# stood. Every member's home is 0750 by this phase's own check, so one member
+# cannot traverse into another's, and the call dies with `failed to stat`. The
+# run then reports that member's git identity as missing while it is present.
+#
+# The timer never meets this, because systemd hands the run `/`. An operator who
+# starts the updater from inside their own home does meet it, and it cost one
+# failed apply on the hub on 2026-09-04: six checks against one member, one
+# cause, and nothing in the output naming the caller's directory. `/` is the one
+# directory every account on the box can stat.
+member_git() {
+  local user="$1"; shift
+  sudo -u "$user" -H git -C / "$@"
+}
+
 # The git identity, written BY THE PERSON, through git, into an absence. Each of
 # those three rules out something simpler that is wrong here:
 #
@@ -2216,7 +2266,7 @@ stamp_conventions() {
 stamp_git_identity() {
   local user="$1" k v
   for k in "${GIT_IDENTITY_KEYS[@]}"; do
-    sudo -u "$user" -H git config --global --get "$k" >/dev/null 2>&1 && continue
+    member_git "$user" config --global --get "$k" >/dev/null 2>&1 && continue
     case "$k" in
       user.name)          v="$user" ;;
       user.email)         v="${user}@${TARGET_HOSTNAME}" ;;
@@ -2224,7 +2274,7 @@ stamp_git_identity() {
     esac
     # An attempt, with phase 8's own verify as the verdict. Fatal under errexit,
     # a refused write would end the run before any phase reported.
-    sudo -u "$user" -H git config --global "$k" "$v" || bad "could not write git ${k} for ${user}"
+    member_git "$user" config --global "$k" "$v" || bad "could not write git ${k} for ${user}"
   done
 }
 
@@ -2401,16 +2451,16 @@ phase_8_users() {
     # derived value, because a person the granted door gave a chosen address
     # keeps it and this run must not report that as wrong.
     for k in user.name user.email; do
-      v="$(sudo -u "$user" -H git config --global --get "$k" 2>/dev/null || true)"
+      v="$(member_git "$user" config --global --get "$k" 2>/dev/null || true)"
       [ -n "$v" ] || { bad "$user: git reads no ${k}, so their commits carry a guess or nothing"; all_ok=0; }
     done
-    v="$(sudo -u "$user" -H git config --global --get user.useConfigOnly 2>/dev/null || true)"
+    v="$(member_git "$user" config --global --get user.useConfigOnly 2>/dev/null || true)"
     [ "$v" = "true" ] || { bad "$user: user.useConfigOnly reads '${v}' -- git would invent an identity from the hostname"; all_ok=0; }
 
     # The known-answer control for the three reads above. A read-back that
     # returned something whatever it was asked would pass all three; this asks
     # for a key nothing sets and requires nothing back.
-    v="$(sudo -u "$user" -H git config --global --get "$GIT_PROBE_KEY" 2>/dev/null || true)"
+    v="$(member_git "$user" config --global --get "$GIT_PROBE_KEY" 2>/dev/null || true)"
     [ -z "$v" ] || { bad "$user: known-answer control FAILED -- ${GIT_PROBE_KEY} returned '${v}' and nothing sets it"; all_ok=0; }
   done
 
@@ -5652,6 +5702,98 @@ ORCHEOF
     bash -c "[ \"\$(stat -c '%a' '$ORCHESTRATE_CONF_FILE' | cut -c3)\" != '0' ]"
 }
 
+# ---------------------------------------------------------------- phase 25
+
+# APPENDED, like every phase since 15. Phase numbers here are positional and
+# renumbering would silently change what `--only 12` means on every claw and in
+# every runbook that names a phase.
+phase_25_mail_gatekeeper() {
+  head1 25 "the mail gatekeeper"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would run install-email-gatekeeper.sh: the service user, /srv/connections/email-gatekeeper,"
+    say "  the adapters, the unit, the email command, the conf, the key's reference and the routing table"
+    return 0
+  fi
+
+  # The installer owns the whole act and is called rather than reimplemented,
+  # for phase 24's reason: a second copy of the sequence would drift from the
+  # door a claw-admin runs by hand.
+  if [ ! -x "${SCRIPT_DIR}/install-email-gatekeeper.sh" ]; then
+    bad "cannot stand the mail gatekeeper: ${SCRIPT_DIR}/install-email-gatekeeper.sh is missing or not executable"
+    return 0
+  fi
+  # THE EXIT GOES INTO A VARIABLE, and that is what keeps this phase able to run
+  # on a claw nobody has wired yet. Phase 22 lost a tenant's entire apply on
+  # 2026-09-02 to a non-zero exit inside a command substitution: under
+  # `set -euo pipefail` that kills the run, eleven lines above the sentence that
+  # tells the firm how to wire the thing that was missing. `|| rc=$?` on a plain
+  # command is not that shape. It reads the status from the command itself and
+  # leaves the run alive, and unlike `|| true` it keeps the number.
+  #
+  # The installer's stdout is its JSON result and goes to a file, because this
+  # script's own stdout belongs to its own JSON alone. Its stderr is left
+  # untouched so a refusal reaches the progress stream a person reads.
+  local out="" rc=0 tmp_out=""
+  tmp_out="$(mktemp)"
+  "${SCRIPT_DIR}/install-email-gatekeeper.sh" >"$tmp_out" || rc=$?
+  out="$(cat "$tmp_out")"
+  rm -f "$tmp_out"
+  if [ -z "$out" ]; then
+    bad "install-email-gatekeeper.sh printed no result, so this claw's mail path is unknown"
+    return 0
+  elif [ "$rc" != 0 ] || printf '%s' "$out" | grep -q '"ok":false'; then
+    bad "install-email-gatekeeper.sh refused: ${out}"
+    return 0
+  fi
+  ok "the mail gatekeeper installer ran"
+
+  check "the gatekeeper is installed" test -x "${CLAW_BIN}/email-gatekeeper"
+  check "the email command is installed" test -x "${CLAW_BIN}/email"
+  check "the unit is enabled" \
+    bash -c "systemctl is-enabled email-gatekeeper.service 2>/dev/null | grep -qx enabled"
+  check "the gatekeeper conf carries no literal provider key" \
+    bash -c "! grep -qiE '^[[:space:]]*(PROVIDER_KEY|API_KEY|EMAIL_PROVIDER_KEY)[[:space:]]*=' /etc/commonclaw/email-gatekeeper.conf"
+  check "the env file holds a reference, not a value" \
+    bash -c "grep -q '^COMMONCLAW_EMAIL_PROVIDER_KEY=op://' /etc/commonclaw/email-gatekeeper.env"
+
+  # ---- the health line ----
+  #
+  # NOT CONNECTED IS A WARN AND NEVER A FAIL, for phase 22's reason. A claw whose
+  # firm has not wired a provider key, or has not made an inbox, is a claw nobody
+  # has wired one for. That is the ordinary state of a fresh claw and the run
+  # names the door instead of failing.
+  local connected="" inbox="" reason="" runbook=""
+  if command -v jq >/dev/null 2>&1; then
+    local chk=""
+    chk="$("${CLAW_BIN}/email-gatekeeper" --check 2>/dev/null)" || true
+    if [ -n "$chk" ]; then
+      connected="$(printf '%s' "$chk" | jq -r '.probe.ready // false')"
+      reason="$(printf '%s' "$chk" | jq -r '.probe.reason // ""')"
+      inbox="$(printf '%s' "$chk" | jq -r '.inbox_id // ""')"
+      runbook="$(printf '%s' "$chk" | jq -r '.runbook // ""')"
+    fi
+  fi
+  case "$connected" in
+    true) ok "the gatekeeper reaches its provider" ;;
+    *)    warn "this claw has no mail provider wired yet (${reason:-no reason given}). A person puts the key in this claw's own machine vault with: sudo /opt/commonclaw/provision-claw/scripts/install-email-provider-key.sh" ;;
+  esac
+  if [ -n "$inbox" ]; then
+    ok "this claw's inbox is ${inbox}"
+  else
+    warn "this claw has no address yet. After the key is wired, an operator makes one once with: email inbox create --username <name> --display-name \"<Name>\". The address is in every From: line a recipient sees, so it is a person's choice and never a release's"
+  fi
+
+  # THE RUNBOOK PATH, read the same way and warned about the same way. An
+  # unrecorded runbook is the ordinary state of a claw whose email orchestrator
+  # has not been launched, so it is a note and never a failure.
+  if [ -n "$runbook" ]; then
+    ok "the firm's communication runbook is recorded at ${runbook}"
+  else
+    warn "this claw's routing table records no communication runbook. The email skill's launch writes the document and then records where it put it with: email self set runbook <absolute path>. Until it does, a session that is not the email orchestrator has nowhere to look"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -5703,6 +5845,7 @@ if want_phase 21; then phase_21_memory_rail;  fi
 if want_phase 22; then phase_22_notification_rail; fi
 if want_phase 23; then phase_23_stall_check;  fi
 if want_phase 24; then phase_24_wake_rail;    fi
+if want_phase 25; then phase_25_mail_gatekeeper; fi
 
 # ---------------------------------------------------------------- the record
 #

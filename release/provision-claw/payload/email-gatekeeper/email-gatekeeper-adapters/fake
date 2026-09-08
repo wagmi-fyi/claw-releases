@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""email-gatekeeper adapter -- a fake provider, for controls only.
+
+WHAT THIS IS FOR. The whole service runs against this adapter and reaches no
+network at all. Inbound fan-out, the thread map, the send log, reconnect and the
+five acts are all driven here, with no account anywhere and no key that opens
+anything.
+
+IT ANSWERS THE SAME CONTRACT AS EVERY OTHER ADAPTER. That is the point: a
+control that ran against a different contract would prove nothing about the one
+the service uses.
+
+WHERE ITS WORLD LIVES. `EMAIL_FAKE_DIR`, and nothing outside it.
+
+  inbox.json        the one inbox this fake has, once make-inbox has been called
+  events.jsonl      inbound mail. A control appends a line and the service sees
+                    a mail arrive. `listen` tails it.
+  messages/<id>.json  and threads/<id>.json   what thread and message read back
+  outbox.jsonl      what send wrote
+
+HOW A CONTROL DRIVES A DROPPED CONNECTION. Touch `EMAIL_FAKE_DIR/drop`. The
+listener exits 3 the way a real dropped socket does, the service reconnects on
+its ladder, and removing the file lets the next attempt succeed.
+
+IT REFUSES TO RUN WITHOUT `EMAIL_FAKE_DIR`. A fake that silently invented a
+directory could be mistaken for a working provider in a run nobody meant to
+fake.
+"""
+
+import json
+import os
+import sys
+import time
+
+ROOT = os.environ.get("EMAIL_FAKE_DIR", "")
+KEY_ENV = "EMAIL_PROVIDER_KEY"
+
+
+def die(reason, code=3):
+    print(json.dumps({"error": reason}))
+    sys.exit(code)
+
+
+def path(*parts):
+    return os.path.join(ROOT, *parts)
+
+
+def load(p, fallback=None):
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return fallback
+
+
+def save(p, obj):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=2, sort_keys=True)
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+
+
+def v_probe(_req):
+    if not os.environ.get(KEY_ENV, "").strip():
+        return {"provider": "fake", "ready": False,
+                "reason": "no %s in this adapter's environment" % KEY_ENV}
+    return {"provider": "fake", "ready": True, "reason": "the fake is here"}
+
+
+def v_make_inbox(req):
+    existing = load(path("inbox.json"))
+    if existing:
+        return {"inbox_id": existing["inbox_id"], "address": existing["address"]}
+    user = req.get("username") or "agent"
+    domain = req.get("domain") or "fake.invalid"
+    rec = {
+        "inbox_id": "inbox_%s" % user,
+        "address": "%s@%s" % (user, domain),
+        "display_name": req.get("display_name", ""),
+        "created_at": now(),
+    }
+    save(path("inbox.json"), rec)
+    return {"inbox_id": rec["inbox_id"], "address": rec["address"]}
+
+
+def v_thread(req):
+    t = load(path("threads", req.get("thread_id", "") + ".json"))
+    if not t:
+        die("no such thread here: %s" % req.get("thread_id", ""))
+    return t
+
+
+def v_message(req):
+    m = load(path("messages", req.get("message_id", "") + ".json"))
+    if not m:
+        die("no such message here: %s" % req.get("message_id", ""))
+    return m
+
+
+def v_send(req):
+    n = 0
+    try:
+        with open(path("outbox.jsonl"), "r", encoding="utf-8") as fh:
+            n = sum(1 for _ in fh)
+    except OSError:
+        pass
+    mid = "msg_out_%d" % (n + 1)
+    tid = req.get("thread_id") or "thr_out_%d" % (n + 1)
+    if req.get("in_reply_to"):
+        prior = load(path("messages", req["in_reply_to"] + ".json")) or {}
+        tid = prior.get("thread_id") or tid
+    rec = dict(req)
+    rec.update({"message_id": mid, "thread_id": tid, "sent_at": now()})
+    os.makedirs(ROOT, exist_ok=True)
+    with open(path("outbox.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    return {"message_id": mid, "thread_id": tid}
+
+
+def v_listen(req):
+    inbox = req.get("inbox_id", "")
+    if not inbox:
+        die("listen was given no inbox_id")
+    p = path("events.jsonl")
+    os.makedirs(ROOT, exist_ok=True)
+    open(p, "a").close()
+    # From the end, the way a push channel delivers what arrives after you
+    # subscribe and not what arrived before.
+    fh = open(p, "r", encoding="utf-8")
+    fh.seek(0, os.SEEK_END)
+    emit({"event": "listening", "inbox_id": inbox})
+    while True:
+        if os.path.exists(path("drop")):
+            die("the fake was told to drop the connection")
+        line = fh.readline()
+        if not line:
+            time.sleep(0.2)
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        evt.setdefault("event", "received")
+        evt.setdefault("inbox_id", inbox)
+        emit(evt)
+
+
+VERBS = {
+    "probe": v_probe,
+    "make-inbox": v_make_inbox,
+    "thread": v_thread,
+    "message": v_message,
+    "send": v_send,
+    "listen": v_listen,
+}
+
+
+def main():
+    if not ROOT:
+        sys.stderr.write("this is the fake provider and it needs EMAIL_FAKE_DIR\n")
+        return 2
+    if len(sys.argv) != 2 or sys.argv[1] not in VERBS:
+        sys.stderr.write("usage: fake <%s>, JSON on stdin\n" % "|".join(sorted(VERBS)))
+        return 2
+    verb = sys.argv[1]
+    raw = sys.stdin.readline() if verb == "listen" else sys.stdin.read()
+    try:
+        req = json.loads(raw or "{}")
+    except ValueError:
+        die("stdin was not JSON", 2)
+    out = VERBS[verb](req)
+    if out is not None:
+        emit(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
