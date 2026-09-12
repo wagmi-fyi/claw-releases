@@ -25,7 +25,8 @@
 # Membership is therefore the mechanism, and its cost is that the gatekeeper's
 # account can read every inbox on this claw. It is a service account with no
 # shell and no login, and the law that rides with the bus is unchanged: no
-# credential in a message body, ever.
+# credential in a message body, ever. Being in the group does not make it a
+# person: person.sh tests the uid, and this account's uid is a system one.
 #
 # ADOPTION, NOT REVERSION (the Q62 doctrine). A re-run adopts what it finds. The
 # conf and the routing table are kept as they are, a missing conf key is
@@ -132,6 +133,12 @@ fi
 #
 # A system account with no shell and no password. It is in claw-members because
 # writing to the group-owned bus needs it, and for no other reason.
+#
+# IT IS NOT A PERSON, and the rails that read claw-members as people know it by
+# its uid. `useradd --system` allocates below UID_MIN, and person.sh counts only
+# uids inside the login range /etc/login.defs states. So the updater does not
+# ask this account for a core, and the people phase, the core phase and the
+# wake-rail phase give it nothing.
 if [ "$MODE" = dry-run ]; then
   ok "${DRY}create the ${SVC_USER} system account and ${SVC_HOME}"
 else

@@ -14,13 +14,21 @@ provider key lives in the service's memory and reaches nothing here.
   email inbox create --username U --display-name "D" [--domain D]
   email self
   email self set runbook <path>
+  email self clear runbook
   email status
 
 WHERE THE RUNBOOK PATH IS CHECKED. `self set runbook` records where the firm's
 communication runbook rests. This command resolves the path and reads it here,
 standing where the caller stands, because the service runs as its own account
 and a firm's directory is group-owned. The service refuses anything that is not
-absolute. Neither one opens the file: the value is a pointer.
+absolute. Neither one opens the file: the value is a pointer. `self clear
+runbook` puts the field back to empty, which is the only thing an empty
+argument to `self set` could have meant, and that argument stays refused.
+
+THE TABLE IS THE FILE. The service re-reads routes.json whenever the bytes on
+disk have moved on, so a change made with these verbs and a change made by
+editing the file both reach the running service, and neither needs a restart. A
+write from here keeps the key order the shipped template carries.
 
 WHAT --handle IS FOR. Pass your own bus handle on a send, so the service's log
 says which desk wrote the mail. The service records it as CLAIMED, beside the
@@ -145,6 +153,10 @@ def main():
     fset = fsub.add_parser("set")
     fset.add_argument("field", choices=["runbook"])
     fset.add_argument("value", help="an absolute path to the firm's communication runbook")
+    # A SIBLING VERB RATHER THAN A FLAG, because this command already says a
+    # change and its undoing as a pair: `route add` and `route remove`.
+    fclear = fsub.add_parser("clear")
+    fclear.add_argument("field", choices=["runbook"])
 
     sub.add_parser("status", help="is the gatekeeper connected, and to what")
 
@@ -195,6 +207,8 @@ def main():
                     "is.\n" % path)
                 return 2
             return show(call({"verb": "self-set-runbook", "path": os.path.realpath(path)}))
+        if a.self_cmd == "clear" and a.field == "runbook":
+            return show(call({"verb": "self-clear-runbook"}))
         ap.parse_args(["self", "--help"])
         return 2
     if a.cmd == "inbox":

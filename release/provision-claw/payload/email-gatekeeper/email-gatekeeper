@@ -176,16 +176,18 @@ def read_lines(path):
 def resolve_key():
     """The provider key, from a reference, through the machine credential.
 
-    Three token paths, in the order the memory check already uses: an explicit
-    environment token, the credentials directory systemd populates for this
-    unit, and root decrypting the claw's own credential by hand. Returns the key
-    or raises with a reason that names no value.
+    Two token paths, the same two the memory check uses: the credentials
+    directory systemd populates for this unit, and root decrypting the claw's own
+    credential by hand. Both read a file at the moment of use. Returns the key or
+    raises with a reason that names no value.
     """
-    # THE ENVIRONMENT FIRST, WHICH IS WHAT THE CONTROLS RIDE ON. The memory check
-    # resolves its own reference the same way and for the same reason: a control
-    # that had to reach a real vault would need a real secret to prove a
-    # mechanism that has nothing to do with one. A systemd unit starts with a
-    # clean environment, so nothing on a claw sets this.
+    # THE ONE VALUE A CONTROL MAY HAND IN, and it is the resolved key rather than
+    # a token: a control that had to reach a real vault would need a real secret
+    # to prove a mechanism that has nothing to do with one. A systemd unit starts
+    # with a clean environment, so nothing on a claw sets this.
+    #
+    # The broker token is NOT offered this way. That is the credential a slip
+    # prints, and the seam a control uses for it is a path.
     if os.environ.get(KEY_ENV):
         return os.environ[KEY_ENV]
 
@@ -198,23 +200,30 @@ def resolve_key():
     if not ref:
         raise RuntimeError("%s carries no COMMONCLAW_EMAIL_PROVIDER_KEY op:// reference" % ENVFILE)
 
+    # THE TOKEN IS READ FROM A FILE AT THE MOMENT OF USE, never taken from this
+    # process's environment. Under the unit systemd has already decrypted it into
+    # the credentials directory; run by hand as root there is no unit, and root
+    # decrypts the claw's own credential itself.
+    #
+    # An inherited variable is not a source. A member running this by hand under
+    # sudo would otherwise resolve with whatever token their own session carried,
+    # which is a different plane's credential answering for this one. The
+    # credentials directory is the seam a control points at a scratch file: it is
+    # a path, so it is safe to print and safe to put in a command line.
     tok = ""
-    if os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
-        tok = os.environ["OP_SERVICE_ACCOUNT_TOKEN"]
-    else:
-        cdir = os.environ.get("CREDENTIALS_DIRECTORY", "")
-        cpath = os.path.join(cdir, CRED_NAME) if cdir else ""
-        if cpath and os.access(cpath, os.R_OK):
-            with open(cpath, "r", encoding="utf-8") as fh:
-                tok = fh.read().strip()
-        elif os.access(CRED_FILE, os.R_OK):
-            try:
-                tok = subprocess.run(
-                    ["systemd-creds", "decrypt", "--name=" + CRED_NAME, CRED_FILE, "-"],
-                    capture_output=True, text=True, timeout=30,
-                ).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                tok = ""
+    cdir = os.environ.get("CREDENTIALS_DIRECTORY", "")
+    cpath = os.path.join(cdir, CRED_NAME) if cdir else ""
+    if cpath and os.access(cpath, os.R_OK):
+        with open(cpath, "r", encoding="utf-8") as fh:
+            tok = fh.read().strip()
+    elif os.access(CRED_FILE, os.R_OK):
+        try:
+            tok = subprocess.run(
+                ["systemd-creds", "decrypt", "--name=" + CRED_NAME, CRED_FILE, "-"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            tok = ""
     if not tok:
         raise RuntimeError(
             "no service-account token reached this process, so %s could not be resolved" % ENVFILE)
@@ -239,19 +248,55 @@ def resolve_key():
 # TWO FILES, TWO OWNERS, TWO LIFETIMES.
 #
 # routes.json is a ruling about this machine. It is seeded once at install and no
-# apply rewrites it. A person edits it, or the `email route` verbs do.
+# apply rewrites it. A person edits it, or the `email route` and `email self`
+# verbs do. THE FILE IS THE RECORD AND THIS PROCESS SERVES IT: the table is
+# re-read whenever the bytes on disk have moved on, so an edit made by hand
+# reaches the running service within one event. A process that answered its own
+# start-up copy forever would make the file a record that lies.
 #
 # threads.jsonl is this service's own memory. Append-only, because a process
 # killed mid-write must not lose the map that routes a reply back to the desk
 # that started the conversation. Last line for a thread id wins, and the file is
 # compacted at start.
+
+# THE KEY ORDER routes.json IS WRITTEN IN, which is the order the shipped
+# template carries. A write goes through one function that imposes it, so a
+# table the command has written is byte-comparable with the template it was
+# seeded from. Sorting the keys instead reorders the file on its first write
+# and leaves every later diff carrying that move.
+ROUTES_KEY_ORDER = ("_comment", "self", "default", "domains", "addresses")
+SELF_KEY_ORDER = ("address", "display_name", "inbox_id", "runbook")
+
+# The stamp a table has before it has ever been read. No stat produces it, so
+# the first refresh always loads.
+NEVER_READ = object()
+
+
+def in_key_order(obj, order):
+    """One mapping, rebuilt in a named order, with anything unnamed after it.
+
+    A key the order does not name is somebody's addition to this machine's
+    table. It keeps its place at the end rather than being dropped.
+    """
+    out = {}
+    for k in order:
+        if k in obj:
+            out[k] = obj[k]
+    for k in obj:
+        if k not in out:
+            out[k] = obj[k]
+    return out
+
+
 class State:
     def __init__(self, state_dir):
         self.dir = state_dir
         self.routes_path = os.path.join(state_dir, "routes.json")
         self.threads_path = os.path.join(state_dir, "threads.jsonl")
         self.lock = threading.Lock()
-        self.routes = self.load_routes()
+        self.routes = {}
+        self.routes_stamp = NEVER_READ
+        self.refresh_routes()
         self.threads = {}
 
     def load_routes(self):
@@ -274,15 +319,54 @@ class State:
         r.setdefault("addresses", {})
         return r
 
+    def stamp(self):
+        """What the file on disk looks like from outside, without reading it.
+
+        The inode is in it because a hand edit through an editor replaces the
+        file rather than writing into it, and the size is in it because a mtime
+        can repeat on a fast enough write.
+        """
+        try:
+            st = os.stat(self.routes_path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+    def refresh_routes(self):
+        """Re-read the table when the bytes on disk have moved on.
+
+        THE STAMP IS TAKEN BEFORE THE READ. A write that lands between the two
+        leaves the old stamp recorded, so the next call reads again. Taking it
+        afterwards would record a change this process never loaded.
+
+        A write of our own is not stamped, so the next event re-reads what we
+        just wrote. That costs one read and closes the window where a hand edit
+        arrives between the write and the stat.
+        """
+        seen = self.stamp()
+        if self.routes_stamp is not NEVER_READ and seen == self.routes_stamp:
+            return False
+        with self.lock:
+            self.routes = self.load_routes()
+            self.routes_stamp = seen
+        return True
+
     def save_routes(self):
         """Written whole, through a temp file in the same directory.
 
         `mv` from elsewhere would drop the group under /srv, so the temp file is
         made here and replaced in place.
+
+        THE ONE WRITER. Every change to the table comes through here, in the
+        template's key order, so a file this service has written and the file
+        the installer seeds differ only where a value differs.
         """
+        out = in_key_order(self.routes, ROUTES_KEY_ORDER)
+        if isinstance(out.get("self"), dict):
+            out["self"] = in_key_order(out["self"], SELF_KEY_ORDER)
         tmp = self.routes_path + ".new"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(self.routes, fh, indent=2, sort_keys=True)
+            json.dump(out, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, self.routes_path)
 
@@ -359,6 +443,13 @@ def run_adapter(settings, key, verb, payload, timeout=90):
 
     The key rides the environment. Not argv, because /proc/PID/cmdline is
     world-readable here.
+
+    A REFUSAL CARRIES ITS CAUSE UNDER `error`. That is the seam's failure key,
+    which is what both shipped adapters write and what an adapter written for
+    any other provider writes. `reason` is a different thing: a field of the
+    probe's answer, which succeeds. Reading `reason` on a failure gave a member
+    running `email inbox create` the words "no reason given" while the same
+    refusal told root, through --check, that the account answered 403.
     """
     path = settings.adapter_path()
     if not (os.path.isfile(path) and os.access(path, os.X_OK)):
@@ -379,7 +470,7 @@ def run_adapter(settings, key, verb, payload, timeout=90):
                            % (settings.adapter, verb))
     if p.returncode not in (0,):
         raise RuntimeError("the %s adapter failed '%s': %s"
-                           % (settings.adapter, verb, obj.get("reason", "no reason given")))
+                           % (settings.adapter, verb, obj.get("error", "no reason given")))
     return obj
 
 
@@ -461,6 +552,7 @@ class Gatekeeper:
                     continue
                 log("info", "a provider key resolved, so the listener starts")
                 wait = lo
+            self.state.refresh_routes()
             inbox = self.inbox_id()
             if not inbox:
                 self.connected = False
@@ -520,6 +612,9 @@ class Gatekeeper:
     def fan_out(self, evt):
         """One inbound mail becomes one bus message per target handle."""
         self.last_event = iso_now()
+        # A route added a moment ago reaches this mail. Same reading as the
+        # command's, taken here because an inbound arrives on its own thread.
+        self.state.refresh_routes()
         handles, why = self.state.route(evt.get("from", ""), evt.get("thread_id", ""))
         if not handles:
             log("warn", "a mail arrived and the table names nobody for it, not even a default")
@@ -583,6 +678,10 @@ class Gatekeeper:
 
     # -- the socket ---------------------------------------------------------
     def handle_request(self, req, peer):
+        # THE FILE IS THE RECORD. Every command reads the table as it is on
+        # disk, so an answer never comes out of a copy the process took at
+        # start and a hand edit is honoured without a restart.
+        self.state.refresh_routes()
         verb = req.get("verb", "")
         if verb == "status":
             return {
@@ -617,6 +716,8 @@ class Gatekeeper:
             return self.inbox_create(req)
         if verb == "self-set-runbook":
             return self.self_set_runbook(req)
+        if verb == "self-clear-runbook":
+            return self.self_clear_runbook(req)
         return {"ok": False, "reason": "no such verb: %s" % verb}
 
     def route_add(self, req):
@@ -692,6 +793,19 @@ class Gatekeeper:
             self.state.save_routes()
         return {"ok": True, "self": self.state.routes["self"]}
 
+    def self_clear_runbook(self, req):
+        """The recorded runbook path, returned to empty.
+
+        A FIELD A COMMAND CAN SET IS A FIELD A COMMAND CAN UNSET. Without this
+        the only road back to the seeded state was an edit by hand, and an
+        empty argument to `self set` stays refused, because a caller who meant
+        to clear says so and a caller whose variable was empty did not.
+        """
+        with self.state.lock:
+            self.state.routes.setdefault("self", {})["runbook"] = ""
+            self.state.save_routes()
+        return {"ok": True, "self": self.state.routes["self"]}
+
     def inbox_create(self, req):
         """The claw's own address, made once, by a person, after the key is wired.
 
@@ -703,7 +817,8 @@ class Gatekeeper:
         if cur.get("inbox_id"):
             return {"ok": False, "reason":
                     "this claw already has an inbox: %s. Editing routes.json by hand is the "
-                    "deliberate way to change it." % cur.get("address", cur["inbox_id"])}
+                    "deliberate way to change it, and this service re-reads the file, so the "
+                    "edit reaches it without a restart." % cur.get("address", cur["inbox_id"])}
         out = run_adapter(self.settings, self.key, "make-inbox", {
             "username": req.get("username") or "",
             "domain": req.get("domain") or "",

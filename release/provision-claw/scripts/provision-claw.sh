@@ -865,6 +865,18 @@ install_adopting() {
 # shellcheck source=core-version.sh
 . "${SCRIPT_DIR}/core-version.sh"
 
+# ----------------------------------------------------------- the person test
+#
+# ONE COPY, beside this file. The updater reads the claw's people with the same
+# test this script uses, and the answer decides who gets a core, a credential
+# grant and a wake-rail unit. person.sh says why the uid decides.
+[ -r "${SCRIPT_DIR}/person.sh" ] || {
+  printf 'missing sibling: %s/person.sh -- copy the whole skill directory\n' "$SCRIPT_DIR" >&2
+  exit 1
+}
+# shellcheck source=person.sh
+. "${SCRIPT_DIR}/person.sh"
+
 # Name shapes, and the SECOND pattern in each is what decides.
 #
 # A shell case pattern is ANCHORED AT BOTH ENDS, so `[a-z][a-z0-9-]*` reads as a
@@ -1405,7 +1417,7 @@ phase_1_preflight() {
   local s g missing_payload=""
   for s in commonclaw-backup.sh commonclaw-seat-check.sh render-template.sh \
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
-           core-version.sh commonclaw-update.sh agents-plane.sh \
+           core-version.sh person.sh commonclaw-update.sh agents-plane.sh \
            commonclaw-memory-check.sh commonclaw-notify.sh \
            commonclaw-stall-check.sh install-bus-nudge.sh \
            check-git-conventions.sh install-heartbeat-url.sh unit-health.sh; do
@@ -1598,11 +1610,18 @@ phase_1_preflight() {
     # USERS stays EMPTY on this path, and that is the safety property rather than
     # an omission: no account is created and no key is written, so an update
     # cannot re-create somebody who was offboarded.
+    #
+    # PEOPLE, BY THE PERSON TEST. The group also holds the claw's own services,
+    # which are in it to write to the bus. This set is what the people phase,
+    # the per-person core phase and the wake-rail phase iterate, so a service
+    # account read in here gets a core, a credential grant and a wake-rail unit.
+    # The second apply of 1.5.1 did exactly that to the mail service's account.
+    # person.sh says why the uid decides.
     while IFS= read -r user; do
       [ -n "$user" ] || continue
       is_unix_name "$user" || { say "member '$user' in ${MEMBERS_GROUP} is not a valid unix name"; bad_lines=1; continue; }
       PEOPLE+=("$user")
-    done < <(getent group "$MEMBERS_GROUP" 2>/dev/null | awk -F: '{n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]!="") print a[i]}')
+    done < <(cc_people_in_group "$MEMBERS_GROUP")
 
     [ "$bad_lines" -eq 0 ] || exit 1
 
@@ -2278,6 +2297,282 @@ stamp_git_identity() {
   done
 }
 
+# THE TAKE-BACK: what an earlier release gave an account that is not a person.
+#
+# The people set is read through the person test now, so no phase gives a
+# service account what a person is given. The accounts that were given it before
+# still carry it. The second apply of 1.5.1 gave the mail service's account a
+# core, a credential loader and its hook, a git identity, the core briefings, a
+# workspaces symlink, an empty authorized_keys, a wake-rail unit, and membership
+# of the group that reads this claw's broker token. This step takes each of those
+# back from every member of the members group that is not a person, and logs
+# each one by name.
+#
+# IN THE PEOPLE PHASE, because that phase is where the claw decides who is a
+# person, and this is the other half of the same decision. `--only 8` is the lever
+# an operator already reaches for when people are wrong, and a phase of its own
+# would add a number to every runbook for one step.
+#
+# ONLY WHAT THE PEOPLE RAILS WRITE, and only in the shape they write it. A file
+# holding anything else is kept and named. The mail service keeps its state and
+# its logs under the same home, and none of that is read or moved here.
+#
+# IDEMPOTENT. Every item is tested before it is taken, so a second run finds
+# nothing and says so in one line.
+#
+# NEVER THROUGH A LINK, never in a home the account does not own, and never in
+# root's home. This runs as root inside a home another account can write, so
+# every directory it enters is tested with -L first, which does not follow a
+# link.
+TB_TOOK=0
+
+# _tb_act <account> <what> <command...> ; does it, or says it would
+_tb_act() {
+  local acct="$1" what="$2"; shift 2
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would take back from ${acct}: ${what}"
+    TB_TOOK=$((TB_TOOK+1))
+    return 0
+  fi
+  if "$@" >/dev/null 2>&1; then
+    say "  took back from ${acct}: ${what}"
+    TB_TOOK=$((TB_TOOK+1))
+  else
+    bad "could not take back from ${acct}: ${what}"
+  fi
+  return 0
+}
+
+# _tb_dir <path> ; a real directory, and not a link to one
+_tb_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }
+
+# _tb_file <path> ; a regular file, and not a link to one
+_tb_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+
+# _tb_within <home> <relative dir> ; every directory from the home down to this
+# one is real. Testing the last one alone would let a link higher up carry the
+# step out of the home.
+_tb_within() {
+  local p="$1" c
+  local IFS=/
+  for c in $2; do
+    [ -n "$c" ] || continue
+    p="${p}/${c}"
+    _tb_dir "$p" || return 1
+  done
+  return 0
+}
+
+# _tb_empty_dir <home> <relative dir> ; a real directory inside the home, with
+# nothing in it
+_tb_empty_dir() { _tb_within "$1" "$2" && [ -z "$(ls -A -- "${1}/${2}" 2>/dev/null)" ]; }
+
+# _tb_in_group <account> <group>. A loop and not a grep, because a grep that
+# stops at its first match ends the pipe early and pipefail reads that as false.
+_tb_in_group() {
+  local m
+  while IFS= read -r m; do
+    [ "$m" = "$1" ] && return 0
+  done < <(cc_group_members "$2")
+  return 1
+}
+
+# _tb_rest <file> <line>... ; prints the file with those exact lines removed
+_tb_rest() {
+  local f="$1" l out
+  shift
+  out="$(cat -- "$f")"
+  for l in "$@"; do
+    out="$(printf '%s\n' "$out" | grep -vxF -- "$l" || true)"
+  done
+  printf '%s' "$out"
+}
+
+# _tb_strip <file> <line>... ; removes those lines in place, or the file when
+# nothing else is left in it. Written back THROUGH the file, as the loader's
+# hook was written, so its owner and mode stay what they were.
+_tb_strip() {
+  local f="$1" rest
+  shift
+  rest="$(_tb_rest "$f" "$@")"
+  if [ -z "${rest//[[:space:]]/}" ]; then
+    rm -f -- "$f"
+  else
+    printf '%s\n' "$rest" > "$f"
+  fi
+}
+
+# _tb_wake_off <account> ; the wake rail's own door, then a reading of the unit
+_tb_wake_off() {
+  local u="bus-nudge@${1}"
+  "${SCRIPT_DIR}/install-bus-nudge.sh" --uninstall "$1" || return 1
+  [ "$(systemctl is-enabled "${u}.service" 2>/dev/null || true)" != "enabled" ] || return 1
+  [ "$(systemctl is-enabled "${u}.timer" 2>/dev/null || true)" != "enabled" ] || return 1
+  ! systemctl is-active --quiet "${u}.service" 2>/dev/null
+}
+
+# _tb_home <account> <home> ; everything the people rails wrote in one home
+_tb_home() {
+  local acct="$1" home="$2" f d rel rest keys k ours
+  local core_files=("$PERSISTENT_CORE_FILE" "$PER_TASK_CORE_FILE")
+
+  # The core: its launcher, then each version it installed. A version is a file.
+  f="${home}/.local/bin/claude"
+  if _tb_within "$home" .local/bin && { [ -L "$f" ] || [ -f "$f" ]; }; then
+    _tb_act "$acct" "the core's launcher .local/bin/claude" rm -f -- "$f"
+  fi
+  d="${home}/.local/share/claude/versions"
+  if _tb_within "$home" .local/share/claude/versions; then
+    for f in "$d"/*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ -L "$f" ] || [ -f "$f" ]; then
+        _tb_act "$acct" "the core .local/share/claude/versions/${f##*/}" rm -f -- "$f"
+      else
+        warn "${acct}: ${f} is not a file, so it is not a core this claw installed and it was left"
+      fi
+    done
+  fi
+
+  # The credential loader. A per-home token beside it is a credential and not
+  # a loader, and the only way to retire one is a rotation, so it is named.
+  f="${home}/.config/commonclaw/agent-env.sh"
+  if _tb_within "$home" .config/commonclaw && _tb_file "$f"; then
+    _tb_act "$acct" "the credential loader .config/commonclaw/agent-env.sh" rm -f -- "$f"
+  fi
+  if [ -e "$(cc_agents_legacy_token "$home")" ]; then
+    warn "${acct}: $(cc_agents_legacy_token "$home") is a per-home copy of the claw token and was left. Run ${GRANTED_AGENTS_TOKEN}, which rotates the token and removes these in one act"
+  fi
+
+  # The loader's hook, and the .bashrc the hook was written into when there was
+  # none.
+  f="${home}/.bashrc"
+  if _tb_file "$f" && grep -qxF -- "$CC_AP_HOOK" "$f" 2>/dev/null; then
+    rest="$(_tb_rest "$f" "$CC_AP_HOOK")"
+    if [ -z "${rest//[[:space:]]/}" ]; then
+      _tb_act "$acct" "the loader's hook and the .bashrc that held nothing else" _tb_strip "$f" "$CC_AP_HOOK"
+    else
+      _tb_act "$acct" "the loader's hook in .bashrc, which carries more and is kept" _tb_strip "$f" "$CC_AP_HOOK"
+    fi
+  fi
+
+  # The git identity, which is three keys. A .gitconfig carrying anything else
+  # is somebody's decision and is left.
+  f="${home}/.gitconfig"
+  if _tb_file "$f"; then
+    keys="$(git -C / config --file "$f" --list --name-only 2>/dev/null || true)"
+    ours=1
+    for k in $keys; do
+      case "$k" in
+        user.name|user.email|user.useconfigonly) : ;;
+        *) ours=0 ;;
+      esac
+    done
+    if [ -n "$keys" ] && [ "$ours" -eq 1 ]; then
+      _tb_act "$acct" "the git identity .gitconfig" rm -f -- "$f"
+    elif [ -n "$keys" ]; then
+      warn "${acct}: ${f} carries settings besides the identity a person is given, so it was left"
+    fi
+  fi
+
+  # The core briefings. Each holds the pointer lines the people phase appends.
+  for rel in "${core_files[@]}"; do
+    f="${home}/${rel}"
+    _tb_within "$home" "$(dirname -- "$rel")" && _tb_file "$f" || continue
+    grep -qxF -e "$CONVENTION_POINTER" -e "$CLAW_BRIEFING_POINTER" -- "$f" 2>/dev/null || continue
+    rest="$(_tb_rest "$f" "$CONVENTION_POINTER" "$CLAW_BRIEFING_POINTER")"
+    if [ -z "${rest//[[:space:]]/}" ]; then
+      _tb_act "$acct" "the core briefing ${rel}" _tb_strip "$f" "$CONVENTION_POINTER" "$CLAW_BRIEFING_POINTER"
+    else
+      _tb_act "$acct" "the pointer lines in ${rel}, which carries more and is kept" \
+        _tb_strip "$f" "$CONVENTION_POINTER" "$CLAW_BRIEFING_POINTER"
+    fi
+  done
+
+  # The one hop to the workspaces, when it points where the people phase
+  # points it.
+  f="${home}/workspaces"
+  if [ -L "$f" ] && [ "$(readlink -- "$f")" = "$WORKSPACE_ROOT" ]; then
+    _tb_act "$acct" "the workspaces symlink" rm -f -- "$f"
+  fi
+
+  # The authorized_keys the people phase makes empty. One with a key in it is a
+  # person's decision about who reaches this account, so it is named.
+  f="${home}/.ssh/authorized_keys"
+  if _tb_within "$home" .ssh && _tb_file "$f"; then
+    if [ -s "$f" ]; then
+      warn "${acct}: ${f} carries a key and was left. The account has no login shell; whether a key belongs there is a person's call"
+    else
+      _tb_act "$acct" "the empty .ssh/authorized_keys" rm -f -- "$f"
+    fi
+  fi
+
+  # The directories those items lived in, deepest first, when nothing is left in
+  # them. `.claude/downloads` is where the vendor installer puts the file it
+  # installs from. A dry run empties nothing, so it names none of these.
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  for rel in .local/share/claude/versions .local/share/claude .local/share .local/bin .local \
+             .config/commonclaw .config .ssh .claude/downloads "$(dirname -- "$PERSISTENT_CORE_FILE")" \
+             "$(dirname -- "$PER_TASK_CORE_FILE")"; do
+    _tb_empty_dir "$home" "$rel" || continue
+    _tb_act "$acct" "the empty directory ${rel}" rmdir -- "${home}/${rel}"
+  done
+  return 0
+}
+
+take_back_non_people() {
+  local acct row uid home owner rc accts="" n=0
+  TB_TOOK=0
+  while IFS= read -r acct; do
+    [ -n "$acct" ] || continue
+    rc=0; cc_is_person "$acct" || rc=$?
+    [ "$rc" -eq 1 ] || continue
+    accts="${accts} ${acct}"; n=$((n+1))
+    row="$(getent passwd "$acct" 2>/dev/null | head -1 || true)"
+    uid="$(printf '%s\n' "$row" | cut -d: -f3)"
+    home="$(printf '%s\n' "$row" | cut -d: -f6)"
+    if [ "$uid" = "0" ]; then
+      warn "root is in ${MEMBERS_GROUP}. Nothing is taken back from root's home; take root out of the group by hand"
+      continue
+    fi
+
+    # The wake rail first, so nothing runs as the account while its home changes.
+    if [ "$(systemctl is-enabled "bus-nudge@${acct}.service" 2>/dev/null || true)" = "enabled" ] \
+       || [ "$(systemctl is-enabled "bus-nudge@${acct}.timer" 2>/dev/null || true)" = "enabled" ] \
+       || systemctl is-active --quiet "bus-nudge@${acct}.service" 2>/dev/null; then
+      _tb_act "$acct" "the wake-rail unit bus-nudge@${acct}, stopped and disabled" _tb_wake_off "$acct"
+    fi
+
+    # The grant on the claw's broker token. A process already running as the
+    # account keeps its groups until it restarts, and this run restarts nothing.
+    if _tb_in_group "$acct" "$CC_AGENTS_GROUP"; then
+      _tb_act "$acct" "membership of ${CC_AGENTS_GROUP}, the group that reads this claw's broker token" \
+        gpasswd -d "$acct" "$CC_AGENTS_GROUP"
+    fi
+
+    if [ -z "$home" ] || [ "$home" = "/" ] || [ -L "$home" ] || [ ! -d "$home" ]; then
+      warn "${acct}'s home '${home}' is not a directory this step will enter, so nothing in it was read"
+      continue
+    fi
+    owner="$(stat -c '%u' -- "$home" 2>/dev/null || true)"
+    if [ "$owner" != "$uid" ]; then
+      warn "${acct}'s home ${home} belongs to uid ${owner:-unknown} and not to ${acct}, so nothing in it was read"
+      continue
+    fi
+    _tb_home "$acct" "$home"
+  done < <(cc_group_members "$MEMBERS_GROUP")
+
+  if [ "$n" -eq 0 ]; then
+    ok "every member of ${MEMBERS_GROUP} is a person by uid, so there is nothing to take back"
+  elif [ "$TB_TOOK" -eq 0 ]; then
+    ok "${MEMBERS_GROUP} holds ${n} account(s) that are not people by uid:${accts}. None carries anything a person is given, so nothing was taken back"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    say "  would take back ${TB_TOOK} item(s) from ${n} account(s) that are not people by uid:${accts}"
+  else
+    ok "took back ${TB_TOOK} item(s) from ${n} account(s) that are not people by uid:${accts}. Nothing else in their homes was touched"
+  fi
+  return 0
+}
+
 # A workspace is root-owned by construction and its gitdir belongs to a member,
 # so git's ownership guard refuses the repository for every caller. Declare the
 # workspace root for each PERSON, never system-wide: a member can write repo
@@ -2360,6 +2655,21 @@ phase_8_users() {
     fi
   done
 
+  # THE ONE COMMAND, once for the claw rather than once per person. It reads the
+  # claw's file inside its own process and becomes the manager CLI, so a member
+  # types one path and their own shell never holds the credential. This is what
+  # replaced the token in every session's environment, and it is written on every
+  # run so a claw converges onto it without anybody being asked to do anything.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would install ${CC_AGENTS_WRAPPER}, the one command that reads this claw's agents vault"
+  else
+    if cc_agents_wrapper_install; then
+      [ -n "${CC_AGENTS_WRAPPER_MADE:-}" ] && say "  wrote ${CC_AGENTS_WRAPPER}"
+    else
+      bad "could not install ${CC_AGENTS_WRAPPER}: ${CC_AGENTS_WRAPPER_WHY:-no reason given}. Members have only the long form of a read."
+    fi
+  fi
+
   # The KEYS: once per key line, so somebody with a laptop and a phone
   # accumulates both rather than the second replacing the first.
   #
@@ -2376,6 +2686,11 @@ phase_8_users() {
   fi
 
   say "  people: ${#PEOPLE[@]} across ${#USERS[@]} keys   accounts created: $created   already present: $existing"
+
+  # The other half of the people read: what an earlier release gave a member of
+  # the group that is not a person. Above the dry-run return, so a dry run names
+  # what it would take.
+  take_back_non_people
   [ "$DRY_RUN" -eq 1 ] && return 0
 
   local all_ok=1
@@ -2521,6 +2836,23 @@ phase_8_users() {
     warn "this claw holds NO agents token at ${CC_AGENTS_TOKEN}, so nobody here resolves an op:// reference however correct their groups are"
     human "install it once, and it covers everybody: drop the token under umask 077 at /run/user/\$(id -u)/commonclaw-agents-token, then run ${GRANTED_AGENTS_TOKEN}"
   fi
+
+  # THE ONE COMMAND, read back off the disk it was written to. A member types
+  # this path, so a claw where it is missing or stale sends people back to the
+  # long form and, in the worst case, back to a token in their environment.
+  case "$(cc_agents_wrapper_state)" in
+    current)
+      stat_line="$(stat -c '%a %U:%G' "$CC_AGENTS_WRAPPER" 2>/dev/null || echo missing)"
+      if [ "$stat_line" = "755 root:root" ]; then
+        ok "${CC_AGENTS_WRAPPER} is ${stat_line} and carries this release's bytes, so every member reads a secret with one path and none of them can rewrite it"
+      else
+        bad "${CC_AGENTS_WRAPPER} is ${stat_line}, wanted 755 root:root -- a member who could write it would rewrite what every other member's reads go through"
+      fi ;;
+    stale)
+      bad "${CC_AGENTS_WRAPPER} is there and is not what this release writes, so nobody can say what a member's read goes through" ;;
+    absent)
+      bad "no ${CC_AGENTS_WRAPPER} on this claw, so a member has only the long form of a read" ;;
+  esac
 
   # WHERE IT RESTS, asked of the backup rail rather than asserted here. This is
   # the reading that keeps the choice of path true over time: the day somebody
@@ -5713,6 +6045,7 @@ phase_25_mail_gatekeeper() {
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would run install-email-gatekeeper.sh: the service user, /srv/connections/email-gatekeeper,"
     say "  the adapters, the unit, the email command, the conf, the key's reference and the routing table"
+    say "  would link /usr/local/bin/email at the email command, so a member reaches it by name"
     return 0
   fi
 
@@ -5758,6 +6091,39 @@ phase_25_mail_gatekeeper() {
 
   check "the gatekeeper is installed" test -x "${CLAW_BIN}/email-gatekeeper"
   check "the email command is installed" test -x "${CLAW_BIN}/email"
+
+  # ---- the one command a person types ----
+  #
+  # `/opt/commonclaw/bin` is on nobody's PATH. `/etc/environment` holds the PATH
+  # every session inherits and it is
+  # "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin";
+  # `/etc/profile` sets no PATH of its own, and
+  # `/etc/profile.d/commonclaw-runtimes.sh` adds the runtimes directory alone.
+  # So a member typing `email` gets "command not found" in a login shell and out
+  # of it, while the release's notes and the two note lines below this block
+  # tell that member to run `email inbox create` and `email self set runbook`.
+  #
+  # ONE SYMLINK, AND THE DIRECTORY STAYS OFF PATH. w180 measured the cost of
+  # putting it on: `op-agents` and everything else there stay reached by their
+  # absolute paths, so nothing a session inherits decides which broker binary a
+  # read gets. This is for the one command a person types and nothing else.
+  #
+  # THE LINK PATH IS A VARIABLE SO THE CONTROL CAN DRIVE THIS BLOCK against a
+  # scratch root and require its override to win. Nothing on a claw sets it.
+  local cmd_link="${CLAW_CMD_LINK:-/usr/local/bin/email}"
+  if [ -e "$cmd_link" ] && [ ! -L "$cmd_link" ]; then
+    # A FILE SOMEBODY PUT THERE IS SOMEBODY'S RULING, and this run does not
+    # overwrite one. The note names it so a person can look.
+    warn "${cmd_link} is a file and not a link, so it was left exactly as it is. A member typing 'email' reaches that file and not ${CLAW_BIN}/email"
+  else
+    if [ "$(readlink "$cmd_link" 2>/dev/null)" != "${CLAW_BIN}/email" ]; then
+      mkdir -p "$(dirname "$cmd_link")"
+      ln -sfn "${CLAW_BIN}/email" "$cmd_link"
+      chown -h root:root "$cmd_link" 2>/dev/null || true
+    fi
+    check "a member reaches the email command by name" \
+      bash -c "[ \"\$(readlink '${cmd_link}' 2>/dev/null)\" = '${CLAW_BIN}/email' ]"
+  fi
   check "the unit is enabled" \
     bash -c "systemctl is-enabled email-gatekeeper.service 2>/dev/null | grep -qx enabled"
   check "the gatekeeper conf carries no literal provider key" \

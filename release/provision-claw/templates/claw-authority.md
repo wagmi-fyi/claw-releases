@@ -15,8 +15,11 @@ can read it.
 | Admin | any number | approves a door, opens the claw's own operations |
 | Staff | everybody | their own work, their own agents, no privilege |
 
-Staff is the `claw-members` group. Being in it means you have a login here. It
-grants nothing, and that has not changed.
+Staff is every person in the `claw-members` group. Being in it means you have a
+login here. It grants nothing, and that has not changed.
+
+The group also holds the claw's own services, such as the mail service's
+account, because that is how a service posts to the bus. A service is not staff.
 
 To see who holds what on this claw:
 

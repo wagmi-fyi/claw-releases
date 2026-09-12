@@ -478,6 +478,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   else
     say "  would add ${PERSON} to ${CC_AGENTS_GROUP}, which is what makes ${CC_AGENTS_TOKEN} readable, as its own logged step"
     say "  would make the loader at ~/.config/commonclaw/agent-env.sh and the hook at the top of ~/.bashrc"
+    say "  would install ${CC_AGENTS_WRAPPER}, the one command that reads this claw's agents vault"
     if [ "$CLAW_TOKEN" = "present" ]; then
       say "  would leave ${PERSON} resolving op:// references from their next session, because this claw holds a token"
     else
@@ -595,6 +596,16 @@ if [ "$AGENTS_CRED" -eq 1 ]; then
     say "  loader: made ${CC_AP_ENV} and the hook at the top of ${HOME_DIR}/.bashrc"
   else
     bad "could not make the loader in ${HOME_DIR} -- ${PERSON} will resolve no credentials"
+  fi
+
+  # THE ONE COMMAND, converged here too. A person can arrive on a claw between
+  # provisioning runs, and the loader tells them a path that has to lead
+  # somewhere. This writes the claw's file rather than anything in their home,
+  # and it is the same idempotent write the provisioning run makes.
+  if cc_agents_wrapper_install; then
+    [ -n "${CC_AGENTS_WRAPPER_MADE:-}" ] && say "  the one command: wrote ${CC_AGENTS_WRAPPER}"
+  else
+    bad "could not put ${CC_AGENTS_WRAPPER} on this claw: ${CC_AGENTS_WRAPPER_WHY:-no reason given}. ${PERSON} has only the long form of a read."
   fi
 fi
 AGENTS_PLANE="$(cc_agents_plane_state "$HOME_DIR")"

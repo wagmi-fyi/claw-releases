@@ -497,17 +497,46 @@ fi
 # digest rather than on something merely being set.
 PROBE_ENV=(env -i PATH=/usr/local/bin:/usr/bin:/bin SHELL=/bin/bash)
 
-probe_len() {
-  local mode="$1" out=""
+# WHAT A SESSION RESOLVES, which is not what a session HOLDS. The loader hands a
+# session the NAME of the claw's token file, and a read takes the value inside
+# the one command that needs it. So this measures the read, in the session, the
+# way the documents tell a person to do it.
+PROBE_RESOLVE='. "$HOME/.bashrc" >/dev/null 2>&1; printf %s "$(cat "${COMMONCLAW_AGENTS_TOKEN_FILE:-/nonexistent}" 2>/dev/null)"'
+
+# WHAT A SESSION HOLDS, which after this shape must be nothing. This prints a
+# COUNT and never a value: the variable goes into another variable and only its
+# length is printed, so a probe cannot become the leak it is measuring.
+PROBE_LEAK='. "$HOME/.bashrc" >/dev/null 2>&1; __v="${OP_SERVICE_ACCOUNT_TOKEN:-}"; printf %s "${#__v}"'
+
+# Run one of those in a member's session, on either surface. `automated` is the
+# remote command a machine runs; `typed` is a person at a prompt.
+probe_run() {
+  local mode="$1" body="$2" out=""
   [ -n "$PROBE_PERSON" ] || { printf '0'; return 0; }
   case "$mode" in
     automated)
       out="$(runuser -u "$PROBE_PERSON" -- "${PROBE_ENV[@]}" "USER=${PROBE_PERSON}" "LOGNAME=${PROBE_PERSON}" "HOME=${PROBE_HOME}" \
-               bash -c '. "$HOME/.bashrc" >/dev/null 2>&1; printf %s "${#OP_SERVICE_ACCOUNT_TOKEN}"' 2>/dev/null || true)" ;;
+               bash -c "$body" 2>/dev/null || true)" ;;
     typed)
       out="$(runuser -u "$PROBE_PERSON" -- "${PROBE_ENV[@]}" "USER=${PROBE_PERSON}" "LOGNAME=${PROBE_PERSON}" "HOME=${PROBE_HOME}" TERM=dumb \
-               bash -ic 'printf %s "${#OP_SERVICE_ACCOUNT_TOKEN}"' 2>/dev/null || true)" ;;
+               bash -ic "$body" 2>/dev/null || true)" ;;
   esac
+  printf '%s' "$out"
+}
+
+# The length of what the session RESOLVES. Zero when nothing came back, which is
+# what a non-member and an unwired plane both produce.
+probe_len() {
+  local out
+  [ -n "$PROBE_PERSON" ] || { printf '0'; return 0; }
+  out="$(probe_run "$1" "$PROBE_RESOLVE")"
+  printf '%s' "${#out}"
+}
+
+# The length of what the session HOLDS in the old variable. Zero is the pass.
+probe_leak() {
+  local out
+  out="$(probe_run "$1" "$PROBE_LEAK")"
   case "$out" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$out" ;; esac
 }
 
@@ -525,7 +554,7 @@ probe_len() {
 probe_sha() {
   [ -n "$PROBE_PERSON" ] || return 0
   runuser -u "$PROBE_PERSON" -- "${PROBE_ENV[@]}" "USER=${PROBE_PERSON}" "LOGNAME=${PROBE_PERSON}" "HOME=${PROBE_HOME}" \
-    bash -c '. "$HOME/.bashrc" >/dev/null 2>&1; printf %s "$OP_SERVICE_ACCOUNT_TOKEN" | sha256sum | cut -d" " -f1' 2>/dev/null || true
+    bash -c "${PROBE_RESOLVE} | sha256sum | cut -d' ' -f1" 2>/dev/null || true
 }
 
 say ""
@@ -535,12 +564,12 @@ if [ -n "$PROBE_PERSON" ]; then
   PRE_TYPED="$(probe_len typed)"
   PRE_SHA="$(probe_sha)"
   if [ "$PRE_SHA" = "$TOKEN_SHA" ]; then
-    bad "control: ${PROBE_PERSON}'s session ALREADY exports the token this run is installing. Gate 2 would then pass without this run having done anything, so it decides nothing."
+    bad "control: ${PROBE_PERSON}'s session ALREADY resolves the token this run is installing. Gate 2 would then pass without this run having done anything, so it decides nothing."
     warn "nothing was written, and ${DROP} was NOT destroyed"
     ACTION="refused-before-write"
     finish
   fi
-  ok "control: ${PROBE_PERSON}'s session does not export the new token before this run (automated ${PRE_AUTO} bytes, typed ${PRE_TYPED}), so gate 2 has a failing branch to pass from"
+  ok "control: ${PROBE_PERSON}'s session does not resolve the new token before this run (automated ${PRE_AUTO} bytes, typed ${PRE_TYPED}), so gate 2 has a failing branch to pass from"
 else
   warn "NO member of ${CC_AGENTS_GROUP} has a wired plane on this claw, so the session legs of gate 2 cannot run. An unrun control is not a passed one: this run installs the file and proves the file, and says plainly that no session was measured."
 fi
@@ -746,14 +775,25 @@ if [ -n "$PROBE_PERSON" ]; then
   POST_AUTO="$(probe_len automated)"
   POST_TYPED="$(probe_len typed)"
   session_ok=1
-  [ "$POST_AUTO" = "${#TOKEN}" ] || { bad "gate 2e: an automated session start as ${PROBE_PERSON} exports ${POST_AUTO} bytes, not ${#TOKEN}. The loader is hooked BELOW .bashrc's interactive guard, so a remote command resolves nothing."; session_ok=0; }
-  [ "$POST_TYPED" = "${#TOKEN}" ] || { bad "gate 2e: an interactive session start as ${PROBE_PERSON} exports ${POST_TYPED} bytes, not ${#TOKEN}"; session_ok=0; }
+  [ "$POST_AUTO" = "${#TOKEN}" ] || { bad "gate 2e: an automated session start as ${PROBE_PERSON} resolves ${POST_AUTO} bytes, not ${#TOKEN}. The loader is hooked BELOW .bashrc's interactive guard, so a remote command is told nothing."; session_ok=0; }
+  [ "$POST_TYPED" = "${#TOKEN}" ] || { bad "gate 2e: an interactive session start as ${PROBE_PERSON} resolves ${POST_TYPED} bytes, not ${#TOKEN}"; session_ok=0; }
+
+  # THE OTHER HALF, and it is the reading this shape exists for. A session that
+  # resolves the token and also CARRIES it has gained nothing: the value is back
+  # in the environment, where a grep for its name or a default expansion prints
+  # it into a transcript the backup rail keeps. Zero is the pass, on both
+  # surfaces, and the count is printed rather than the variable.
+  LEAK_AUTO="$(probe_leak automated)"
+  LEAK_TYPED="$(probe_leak typed)"
+  [ "$LEAK_AUTO" = "0" ] || { bad "gate 2e: an automated session start as ${PROBE_PERSON} CARRIES ${LEAK_AUTO} bytes in OP_SERVICE_ACCOUNT_TOKEN. The loader is exporting the value, and every session on this claw is one expansion from printing it."; session_ok=0; }
+  [ "$LEAK_TYPED" = "0" ] || { bad "gate 2e: an interactive session start as ${PROBE_PERSON} CARRIES ${LEAK_TYPED} bytes in OP_SERVICE_ACCOUNT_TOKEN"; session_ok=0; }
+
   if [ "$session_ok" -eq 1 ]; then
     SESS_SHA="$(probe_sha)"
     if [ "$SESS_SHA" = "$TOKEN_SHA" ]; then
-      ok "gate 2e: a session start as ${PROBE_PERSON}, who is in ${CC_AGENTS_GROUP}, exports the token this run installed, automated and typed alike (${POST_AUTO} bytes, sha256 ${SESS_SHA:0:16})"
+      ok "gate 2e: a session start as ${PROBE_PERSON}, who is in ${CC_AGENTS_GROUP}, resolves the token this run installed, automated and typed alike (${POST_AUTO} bytes, sha256 ${SESS_SHA:0:16}), and carries 0 bytes of it in its own environment"
     else
-      bad "gate 2e: the session exports ${POST_AUTO} bytes whose digest is ${SESS_SHA:0:16}, not the ${TOKEN_SHA:0:16} that went in"
+      bad "gate 2e: the session resolves ${POST_AUTO} bytes whose digest is ${SESS_SHA:0:16}, not the ${TOKEN_SHA:0:16} that went in"
       session_ok=0
     fi
   fi
@@ -826,9 +866,11 @@ else
 fi
 
 say ""
-say "  Every member of ${CC_AGENTS_GROUP} resolves op://${AGENTS_VAULT}/... from their next"
-say "  session onward. A session already open does not pick this up: it holds the"
-say "  environment it started with. They reconnect."
+say "  Every member of ${CC_AGENTS_GROUP} resolves op://${AGENTS_VAULT}/... now, including a"
+say "  session that was already open: no session holds the value, and each read takes"
+say "  this file as it is at that moment. There is nothing to reconnect."
+say "  They read a secret with:"
+say "    ${CC_AGENTS_WRAPPER} read \"op://${AGENTS_VAULT}/<item>/<field>\""
 say "  Somebody outside that group resolves nothing, which is the boundary and not a fault."
 
 if [ "$CONVERGED" -eq 1 ]; then

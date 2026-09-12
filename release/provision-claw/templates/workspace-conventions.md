@@ -77,6 +77,23 @@ A group change takes effect on the person's next login. An existing session keep
 
 Resolve what you need from this claw's agents vault, at the moment you use it. Config files carry `op://` references. They never carry values.
 
+Read one with the claw's own command:
+
+```
+/opt/commonclaw/bin/op-agents read "op://<vault>/<item>/<field>"
+```
+
+It takes the token from the claw's own file inside that one command, so no shell of yours ever holds the value. Your session is told where that file is, in `COMMONCLAW_AGENTS_TOKEN_FILE`, and is never told what is in it. A bare `op read` resolves nothing, and that is the point: a credential sitting in every session's environment is one slip away from a transcript somebody keeps.
+
+Without the wrapper the same read is one line:
+
+```
+OP_SERVICE_ACCOUNT_TOKEN="$(cat "$COMMONCLAW_AGENTS_TOKEN_FILE")" \
+  op read "op://<vault>/<item>/<field>"
+```
+
+There is nothing to reconnect after the claw's token is rotated. Each read takes the file as it is at that moment, in a session opened before the rotation as readily as in one opened after it.
+
 **A resolution that fails because this claw has no agents vault is the answer.** Say so and stop. Provisioning does not build one; the firm that owns the claw does. Do not go looking for a value somewhere else on the machine: what you would find is a credential resting where none belongs, and using it hides the gap instead of closing it.
 
 A connection service is the better shape where a claw has one. It holds a secret under its own service user and hands a calling agent a capability rather than the credential, so the value never enters your process. A claw may have none, and then `/srv/connections/` is empty. That is not a fault.

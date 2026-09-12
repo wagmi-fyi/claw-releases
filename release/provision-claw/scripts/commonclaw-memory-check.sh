@@ -227,14 +227,18 @@ resolve_heartbeat() {
   [ -n "$ref" ] || { WHY="${MEMORY_ENV} carries no COMMONCLAW_HEARTBEAT_URL op:// reference"; return 1; }
   command -v op >/dev/null 2>&1 || { WHY="the manager CLI is not installed, so ${MEMORY_ENV} cannot be resolved"; return 1; }
 
-  # The token, from whichever plane is running us. Under the timer's unit systemd
-  # has already decrypted it. Under a hand run as root there is no unit, and root
-  # decrypts the claw's own credential itself. The notifier resolves the same two
-  # ways for the same reason.
+  # The token, READ FROM A FILE AT THE MOMENT OF USE and never taken from this
+  # process's environment. Under the timer's unit systemd has already decrypted
+  # it into the credentials directory. Under a hand run as root there is no unit,
+  # and root decrypts the claw's own credential itself. The notifier resolves the
+  # same two ways for the same reason.
+  #
+  # AN INHERITED VARIABLE IS NOT A SOURCE. A member who ran this by hand under
+  # sudo would otherwise resolve with whatever token their own session carried,
+  # which is a different plane's credential answering for this one, and it would
+  # look exactly like a working check.
   tok=""
-  if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
-    tok="$OP_SERVICE_ACCOUNT_TOKEN"
-  elif [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "${CREDENTIALS_DIRECTORY}/op-service-account" ]; then
+  if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "${CREDENTIALS_DIRECTORY}/op-service-account" ]; then
     tok="$(cat "${CREDENTIALS_DIRECTORY}/op-service-account")"
   elif [ -r "$CRED_FILE" ] && command -v systemd-creds >/dev/null 2>&1; then
     tok="$(systemd-creds decrypt --name=op-service-account "$CRED_FILE" - 2>/dev/null)" || tok=""

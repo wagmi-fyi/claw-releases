@@ -1,10 +1,11 @@
 # agents-plane.sh — the agents credential plane on one claw.
 #
 # SOURCED, never run. It holds one rule that three callers need: where this
-# claw's agents-vault token rests, which group may read it, what loads it into
-# a session, and where that loader is hooked. Phase 8 of provision-claw.sh
-# wires it for the people a build creates, onboard-person.sh wires it for
-# everybody who arrives later, and install-agents-token.sh puts the value in.
+# claw's agents-vault token rests, which group may read it, what tells a session
+# where it is, where that loader is hooked, and the one command that reads it.
+# Phase 8 of provision-claw.sh wires it for the people a build creates,
+# onboard-person.sh wires it for everybody who arrives later, and
+# install-agents-token.sh puts the value in.
 #
 # ONE FILE, ONE GROUP, and this is the shape rather than a detail of it. The
 # token is a CLAW fact, not a person fact: every person here reads the same
@@ -23,9 +24,16 @@
 # none of it. It is also the first place somebody reaches for, which is exactly
 # why the path has to be named here and read from here.
 #
-# ROTATION IS ONE WRITE. The door rewrites this one file. Sessions already open
-# hold the environment they started with, so they pick nothing up until they
-# restart. That is a fact to tell people, not a defect to hide.
+# NO SESSION CARRIES THE VALUE. A session is told the NAME of the file, and the
+# value is read inside the one command that needs it. A credential resting in
+# every session's environment is one slip away from a transcript the backup rail
+# keeps, and this claw measured that slip twice in three days: a grep for the
+# variable's name printed the value, and a shell default expansion printed it
+# again. A burn should need a deliberate read of the file.
+#
+# ROTATION IS ONE WRITE, and nothing has to reconnect. The door rewrites this one
+# file, and the next read takes the file as it is at that moment, in a session
+# opened before the rotation as readily as in one opened after it.
 #
 # NO VALUE PASSES THROUGH HERE. These functions make the empty plane and read
 # what is on disk. The value arrives through the door, and the door is the only
@@ -44,6 +52,14 @@
 CC_AGENTS_STATE_DIR="/var/lib/commonclaw"
 CC_AGENTS_TOKEN="${CC_AGENTS_STATE_DIR}/agents-token"
 CC_AGENTS_GROUP="agents-cred"
+
+# The one command a person or a session types to read a secret. It lives beside
+# the claw's other programs, which are reached by their own path rather than off
+# PATH: /opt/commonclaw/bin is on nobody's PATH here, and the drop-in that would
+# put it there is read by a login shell and not by a remote command, which is
+# the asymmetry this whole plane exists to refuse.
+CC_AGENTS_BIN_DIR="/opt/commonclaw/bin"
+CC_AGENTS_WRAPPER="${CC_AGENTS_BIN_DIR}/op-agents"
 
 # What the file must be when it is there. Root writes it; the group reads it;
 # nobody else sees a byte. Group-read is the whole access model, so the mode is
@@ -102,6 +118,20 @@ cc_agents_env_text() {
 # copy per home would put the value in every home on the box and inside the
 # backup rail with it.
 #
+# WHAT IS EXPORTED IS THE NAME OF THE FILE, NEVER ITS CONTENTS. A credential
+# sitting in every session's environment is one slip away from a transcript the
+# backup rail keeps: a grep for the variable's name printed the value once, and
+# a shell default expansion printed it again three days later. A burn should
+# need a deliberate read of the file. This name is safe to print, grep and
+# expand.
+#
+# TO READ A SECRET, take the token inside the one command that needs it:
+#   ${CC_AGENTS_WRAPPER} read "op://<vault>/<item>/<field>"
+# or, without the wrapper:
+#   OP_SERVICE_ACCOUNT_TOKEN="\$(cat "\$COMMONCLAW_AGENTS_TOKEN_FILE")" \\
+#     op read "op://<vault>/<item>/<field>"
+# The value then lives in that one command's environment and in no shell's.
+#
 # Sourced from the FIRST line of ~/.bashrc, deliberately ABOVE the interactive
 # guard Ubuntu ships there. A non-interactive remote command (ssh host 'cmd')
 # does source .bashrc, and then returns at that guard, so anything placed below
@@ -109,12 +139,12 @@ cc_agents_env_text() {
 # person types and fails when something automates is the failure this placement
 # exists to prevent.
 #
-# A session already running holds the environment it started with. After a
-# rotation, reconnect.
+# There is nothing to reconnect after a rotation. Each read takes the file as it
+# is at that moment.
 __cc_token_file="${CC_AGENTS_TOKEN}"
 if [ -r "\$__cc_token_file" ]; then
-    OP_SERVICE_ACCOUNT_TOKEN="\$(cat "\$__cc_token_file")"
-    export OP_SERVICE_ACCOUNT_TOKEN
+    COMMONCLAW_AGENTS_TOKEN_FILE="\$__cc_token_file"
+    export COMMONCLAW_AGENTS_TOKEN_FILE
 fi
 unset __cc_token_file
 CCENVEOF
@@ -259,11 +289,20 @@ cc_agents_plane_install() {
   # whose loader still names a per-home token gets this one, which is how a
   # claw converges onto the shared file.
   if ! { [ -f "$CC_AP_ENV" ] && cc_agents_env_text | cmp -s - "$CC_AP_ENV"; }; then
+    # WHICH LOADER IS BEING REPLACED, read before the write and reported as its
+    # own word. A loader that still exports the token VALUE puts a credential in
+    # every session this person starts, and replacing it is the convergence this
+    # shape exists for. Folded into a plain "loader" it would be invisible in the
+    # one run that matters. The reading names the variable and opens nothing.
+    if [ -f "$CC_AP_ENV" ] && grep -q 'export OP_SERVICE_ACCOUNT_TOKEN' "$CC_AP_ENV" 2>/dev/null; then
+      made="${made} loader-converged"
+    else
+      made="${made} loader"
+    fi
     tmp="$(mktemp "${CC_AP_DIR}/.agent-env.XXXXXX")" || return 1
     cc_agents_env_text > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chown "$person":"$person" "$tmp" && chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
     mv -f "$tmp" "$CC_AP_ENV" || { rm -f -- "$tmp"; return 1; }
-    made="${made} loader"
   fi
   chmod 0600 "$CC_AP_ENV" || return 1
   chown "$person":"$person" "$CC_AP_ENV" || return 1
@@ -289,6 +328,105 @@ cc_agents_plane_install() {
 
   CC_AP_MADE="${made# }"
   return 0
+}
+
+# ------------------------------------------------------------ the one command
+
+# The wrapper's bytes. It holds no value: it reads the claw's file inside its
+# own process and becomes `op`, so the caller's shell never carries the token
+# and no expansion of the caller's can print one.
+#
+# Every claw writes these exact bytes and the install compares against this
+# text, for the same reason the loader does.
+cc_agents_wrapper_text() {
+  cat <<CCWRAPEOF
+#!/bin/bash
+# commonclaw: read this claw's agents vault.
+#
+# THE TOKEN IS TAKEN FROM THE CLAW'S OWN FILE INSIDE THIS ONE COMMAND. It goes
+# into this process's environment and this process becomes \`op\`. Your shell
+# never holds the value, so nothing you type in that shell can print it.
+#
+#   ${CC_AGENTS_WRAPPER} read "op://<vault>/<item>/<field>"
+#
+# Every argument is handed to \`op\` unchanged.
+#
+# Reached by this path and not off PATH, like the other programs in
+# ${CC_AGENTS_BIN_DIR}. A PATH drop-in is read by a login shell and not by a
+# remote command, and a credential plane that works when a person types and
+# fails when something automates is the failure this plane refuses.
+set -u
+
+__f="\${COMMONCLAW_AGENTS_TOKEN_FILE:-${CC_AGENTS_TOKEN}}"
+if [ ! -r "\$__f" ]; then
+    printf 'op-agents: no readable agents token at %s\\n' "\$__f" >&2
+    printf 'op-agents: membership of ${CC_AGENTS_GROUP} is what makes it readable, and a group added while you were logged in reaches you at your next login\\n' >&2
+    exit 1
+fi
+
+OP_SERVICE_ACCOUNT_TOKEN="\$(cat "\$__f")"
+export OP_SERVICE_ACCOUNT_TOKEN
+if [ -z "\${OP_SERVICE_ACCOUNT_TOKEN:+set}" ]; then
+    printf 'op-agents: the agents token at %s is empty, so this claw resolves nothing\\n' "\$__f" >&2
+    exit 1
+fi
+unset __f
+
+exec op "\$@"
+CCWRAPEOF
+}
+
+# Put the one command on the claw. Idempotent, root-owned, world-executable
+# because every member runs it and none of them may rewrite it.
+#
+# Sets CC_AGENTS_WRAPPER_MADE to 'wrapper' when this call changed the bytes, and
+# CC_AGENTS_WRAPPER_WHY to the reason when it returns 1.
+#
+# IT PRINTS NOTHING, and that is what lets a caller read those two. A caller that
+# had to take the reason off stdout would run this in a command substitution,
+# which is a subshell, and the variables would never reach it.
+cc_agents_wrapper_install() {
+  local tmp
+  CC_AGENTS_WRAPPER_MADE=""
+  CC_AGENTS_WRAPPER_WHY=""
+
+  if [ -L "$CC_AGENTS_BIN_DIR" ] || [ -L "$CC_AGENTS_WRAPPER" ]; then
+    CC_AGENTS_WRAPPER_WHY="${CC_AGENTS_BIN_DIR} or ${CC_AGENTS_WRAPPER} is a symlink, and the one command will not be written through one"
+    return 1
+  fi
+
+  install -d -m 0755 -o root -g root "$CC_AGENTS_BIN_DIR" 2>/dev/null || {
+    CC_AGENTS_WRAPPER_WHY="could not make ${CC_AGENTS_BIN_DIR}"; return 1; }
+
+  if [ -f "$CC_AGENTS_WRAPPER" ] && cc_agents_wrapper_text | cmp -s - "$CC_AGENTS_WRAPPER"; then
+    chown root:root "$CC_AGENTS_WRAPPER" 2>/dev/null && chmod 0755 "$CC_AGENTS_WRAPPER" 2>/dev/null || {
+      CC_AGENTS_WRAPPER_WHY="the bytes at ${CC_AGENTS_WRAPPER} are right and its owner or mode could not be set"; return 1; }
+    return 0
+  fi
+
+  tmp="$(mktemp "${CC_AGENTS_BIN_DIR}/.op-agents.XXXXXX" 2>/dev/null)" || {
+    CC_AGENTS_WRAPPER_WHY="could not make scratch in ${CC_AGENTS_BIN_DIR}"; return 1; }
+  cc_agents_wrapper_text > "$tmp" 2>/dev/null || {
+    rm -f -- "$tmp"; CC_AGENTS_WRAPPER_WHY="could not write the wrapper bytes"; return 1; }
+  chown root:root "$tmp" 2>/dev/null && chmod 0755 "$tmp" 2>/dev/null || {
+    rm -f -- "$tmp"; CC_AGENTS_WRAPPER_WHY="could not set owner or mode on the new wrapper"; return 1; }
+  mv -f "$tmp" "$CC_AGENTS_WRAPPER" 2>/dev/null || {
+    rm -f -- "$tmp"; CC_AGENTS_WRAPPER_WHY="could not move the new wrapper into place"; return 1; }
+  CC_AGENTS_WRAPPER_MADE="wrapper"
+  return 0
+}
+
+# What the claw's one command is, in one word.
+#
+#   absent   nothing there: a session has only the long form
+#   stale    something there, and it is not what this release writes
+#   current  the bytes this release writes
+cc_agents_wrapper_state() {
+  if [ -f "$CC_AGENTS_WRAPPER" ] && cc_agents_wrapper_text | cmp -s - "$CC_AGENTS_WRAPPER"; then
+    printf 'current'; return 0
+  fi
+  [ -e "$CC_AGENTS_WRAPPER" ] && { printf 'stale'; return 0; }
+  printf 'absent'
 }
 
 # --------------------------------------------------------------- reading it

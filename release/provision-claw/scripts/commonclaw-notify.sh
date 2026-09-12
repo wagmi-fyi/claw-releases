@@ -390,15 +390,18 @@ resolve_webhook() {
 
   command -v op >/dev/null 2>&1 || { WHY="the manager CLI is not installed, so ${NOTIFY_ENV} cannot be resolved"; return 1; }
 
-  # The token, from whichever plane is running us. Under a unit systemd has
-  # already decrypted it. Under cron there is no unit, and root decrypts the
-  # claw's own credential itself -- the same file, the same host key, one layer
+  # The token, READ FROM A FILE AT THE MOMENT OF USE and never taken from this
+  # process's environment. Under a unit systemd has already decrypted it into the
+  # credentials directory. Under cron there is no unit, and root decrypts the
+  # claw's own credential itself, the same file and the same host key one layer
   # lower. Without both, this script would work from the backup timer and fail
   # from the seat check, which is the caller that needed it first.
+  #
+  # AN INHERITED VARIABLE IS NOT A SOURCE. A member who ran this by hand under
+  # sudo would otherwise post with whatever token their own session carried,
+  # which is a different plane's credential answering for this one.
   local tok=""
-  if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
-    tok="$OP_SERVICE_ACCOUNT_TOKEN"
-  elif [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "${CREDENTIALS_DIRECTORY}/op-service-account" ]; then
+  if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "${CREDENTIALS_DIRECTORY}/op-service-account" ]; then
     tok="$(cat "${CREDENTIALS_DIRECTORY}/op-service-account")"
   elif [ -r "$CRED_FILE" ] && command -v systemd-creds >/dev/null 2>&1; then
     tok="$(systemd-creds decrypt --name=op-service-account "$CRED_FILE" - 2>/dev/null)" || tok=""

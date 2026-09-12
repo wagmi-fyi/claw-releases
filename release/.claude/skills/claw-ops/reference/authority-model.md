@@ -42,6 +42,11 @@ What each role reaches:
 | the system journal and syslog | the journal groups and root |
 | the seat roster, which is a claw-level declaration rather than anybody's own state | anybody |
 | a person's own core credentials and their expiry | that person |
+| the claw's agents vault, through the claw's own read command | the `agents-cred` group |
 | another person's home | nobody but them |
 
 Name what could not be observed, every time. An absence claim derived from a permission wall is a claim about the caller, not about the claw.
+
+## Reading a secret
+
+`/opt/commonclaw/bin/op-agents read "op://<vault>/<item>/<field>"`. The token is taken from the claw's own file inside that one command, so no session on the claw holds the value and a bare `op read` resolves nothing. A session is told where the file is, in `COMMONCLAW_AGENTS_TOKEN_FILE`, and never what is in it. Membership of `agents-cred` is what makes the file readable, and a group added while somebody was logged in reaches them at their next login.

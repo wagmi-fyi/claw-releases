@@ -31,7 +31,27 @@
 #                                   refused unless a channel at or below this
 #                                   claw's own already carries the tag, and
 #                                   refused unless a person is standing at the
-#                                   run.
+#                                   run. It does NOT override the quiet window:
+#                                   a ride of a release this box classifies as
+#                                   core-moving defers unless --now is passed
+#                                   beside it, and a deferred attended run exits
+#                                   3 rather than 0.
+#
+# THE EXIT CODES. A timer reads a status and a person reads a line, and the two
+# have to agree. Every code here is a claim about what happened to this claw.
+#
+#   0  nothing to do, or the release applied. A scheduled run that deferred a
+#      release to the quiet window is also 0: a deferral is the rail working,
+#      and a timer that went red on it would page somebody every hour.
+#   1  the run refused or the apply failed. The claw is unchanged, or it is
+#      where a failed convergence left it, and the journal line says which.
+#   2  the command line is wrong. Nothing was read and nothing was fetched.
+#   3  AN ATTENDED RUN DEFERRED THE RELEASE AND APPLIED NOTHING. Same verdict
+#      line, same record, different status, because an operator or a rig
+#      reading only the status of a run somebody was standing at cannot
+#      otherwise tell a landing from a deferral. A run that returns 3 changed
+#      nothing on this claw. Pass --now to take the release outside the window.
+#      Measured on staging 2026-09-08.
 #
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
 # releases, so no machine holds a key to this one. `reference/release-rail.md` is
@@ -147,7 +167,7 @@ trap record_run EXIT
 die() { VERDICT="$1"; log err "$2"; exit 1; }
 
 # ---------------------------------------------------------------- siblings
-for s in version-compare.sh tree-digest.sh core-version.sh; do
+for s in version-compare.sh tree-digest.sh core-version.sh person.sh; do
   [ -r "${PLANE}/scripts/${s}" ] || die "plane incomplete" "missing ${PLANE}/scripts/${s}: the provisioning plane is incomplete, so this claw cannot verify a release"
 done
 # shellcheck source=version-compare.sh
@@ -156,6 +176,8 @@ done
 . "${PLANE}/scripts/tree-digest.sh"
 # shellcheck source=core-version.sh
 . "${PLANE}/scripts/core-version.sh"
+# shellcheck source=person.sh
+. "${PLANE}/scripts/person.sh"
 
 # ---------------------------------------------------------------- config
 STEP="config"
@@ -546,11 +568,15 @@ fi
 # whole payload every hour before refusing on a fact that was true before the
 # first byte moved, and the refusal never touched the failure count, so it never
 # reached the bound either. Nothing here needs the payload.
-MEMBER_LIST="$(getent group claw-members 2>/dev/null | awk -F: '{print $4}')"
-MEMBER_COUNT="$(printf '%s' "$MEMBER_LIST" | awk -F, '{n=0; for(i=1;i<=NF;i++) if($i!="") n++; print n}')"
+#
+# PEOPLE, READ THROUGH THE PERSON TEST. The group also holds the claw's own
+# services, which are in it to write to the bus and carry no core. person.sh
+# says why the uid decides and the group does not.
+MEMBER_LIST="$(cc_people_in_group claw-members)"
+MEMBER_COUNT="$(printf '%s\n' "$MEMBER_LIST" | awk 'NF { n++ } END { print n + 0 }')"
 [ -n "${MEMBER_COUNT:-}" ] || MEMBER_COUNT=0
 if [ "$MEMBER_COUNT" -eq 0 ]; then
-  die "no people set" "the claw-members group is missing or empty, so this claw cannot say whether a release would move anybody's core. Refusing rather than reporting quiet from a measurement that read nobody. This claw is unchanged and nothing was fetched"
+  die "no people set" "the claw-members group is missing or names no person, so this claw cannot say whether a release would move anybody's core. A service account in the group is not a person: person.sh tests the uid against this claw's login range. Refusing rather than reporting quiet from a measurement that read nobody. This claw is unchanged and nothing was fetched"
 fi
 
 # ---------------------------------------------------------------- fetch payload
@@ -688,11 +714,19 @@ if [ -n "$CLAUDE_WANT" ]; then
   # they may not even be behind. The reader is sourced from core-version.sh,
   # which is the same one the provisioning run uses, so the two cannot drift on
   # how much of somebody's home a routine check opens.
-  while IFS=: read -r person _; do
+  #
+  # PEOPLE ONLY, by the person test. The mail service's account is in
+  # claw-members and has no core, so asking it read as a core below the floor
+  # and deferred every release on every claw that carries the service. It also
+  # opened a login shell for a shell-less account on every tick. A real person
+  # with no core still reads as core-moving, because the provisioning run will
+  # install one for them.
+  while IFS= read -r person; do
+    [ -n "$person" ] || continue
     have="$(claude_version_for "$person")"
     r=0; version_at_least "${have:-}" "$CLAUDE_WANT" || r=$?
     [ "$r" -eq 0 ] || would_move_core=1
-  done < <(getent group claw-members | awk -F: '{n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]!="") print a[i]":"}')
+  done < <(cc_people_in_group claw-members)
 fi
 
 if { [ "$would_move_core" -eq 1 ] || [ "$DECLARED" != "quiet" ]; } && [ "$MODE_NOW" -eq 0 ]; then
@@ -773,6 +807,29 @@ if { [ "$would_move_core" -eq 1 ] || [ "$DECLARED" != "quiet" ]; } && [ "$MODE_N
   if [ "$in_window" -eq 0 ] && [ "$waited" -lt "$MAX_DEFER_HOURS" ]; then
     VERDICT="deferred to the quiet window"
     log info "release ${OFFERED} would move a core on this box (declared: ${DECLARED}); held for ${waited}h, window is ${WINDOW_START}:00 to ${WINDOW_END}:00 local, applying regardless after ${MAX_DEFER_HOURS}h"
+    # A DEFERRAL A PERSON WAS STANDING AT EXITS NON-ZERO, AND A SCHEDULED ONE
+    # DOES NOT.
+    #
+    # A ride of 1.5.1 deferred, applied nothing, and returned 0 to the operator
+    # who was watching it, over ssh, in a session whose last line was the
+    # verdict. The verdict string carries the reading and no instrument on this
+    # rail reads that string, so the only thing a rig can take from an attended
+    # run is its status. Same message, same record, different status.
+    #
+    # ATTENDANCE IS THE SAME MEASUREMENT THE RIDE REFUSAL TAKES, so the two
+    # cannot drift into disagreeing about who is standing here: no
+    # INVOCATION_ID, which means no unit started this run, and a terminal on
+    # stdin. A ride has already passed both arms at the top of this script and
+    # so lands here as attended without being asked twice.
+    #
+    # A TIMER STAYS AT 0. A deferral on a scheduled tick is the quiet window
+    # doing its job, and a unit that goes red every hour on a working rail is a
+    # page nobody can act on. This is why the status is split on attendance
+    # rather than on the verdict.
+    if [ -z "${INVOCATION_ID:-}" ] && [ -t 0 ]; then
+      log info "this run was attended and it applied nothing, so it exits 3 rather than 0. Pass --now to take ${OFFERED} outside the window"
+      exit 3
+    fi
     exit 0
   fi
   if [ "$in_window" -eq 0 ]; then
