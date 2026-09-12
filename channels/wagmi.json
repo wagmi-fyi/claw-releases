@@ -1,8 +1,7 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "wagmi",
-  "version": "1.5.1",
-  "tag": "v1.5.1",
-  "tree_digest": "7b9fbe7b04695cbd5d690d422d3fecf3a6f3502e349e2745689d880da401b5f5",
-  "note": "This pointer carries no note; a release is described by its own notes and changelog (ruled 2026-09-08)."
+  "version": "1.5.2",
+  "tag": "v1.5.2",
+  "tree_digest": "47fe781c7368c2c74fa918792f2a7e3a7760155efb260e8f808fc6be58f8d0aa"
 }
