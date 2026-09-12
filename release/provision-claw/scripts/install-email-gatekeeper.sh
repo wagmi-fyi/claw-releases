@@ -19,14 +19,20 @@
 # installs from a stage and refuses anything else by name, the way the wake
 # rail's installer does.
 #
-# THE SERVICE USER IS IN claw-members, AND THAT IS A WIDENING WORTH SAYING OUT
-# LOUD. The bus directory is group-owned by claw-members and group-writable, so
-# a process that cannot join that group cannot put a message on the bus at all.
+# THE SERVICE USER IS IN claw-bus, AND THAT IS A WIDENING WORTH SAYING OUT
+# LOUD. The bus directory is group-owned by claw-bus and group-writable, so a
+# process that cannot join that group cannot put a message on the bus at all.
 # Membership is therefore the mechanism, and its cost is that the gatekeeper's
 # account can read every inbox on this claw. It is a service account with no
 # shell and no login, and the law that rides with the bus is unchanged: no
-# credential in a message body, ever. Being in the group does not make it a
-# person: person.sh tests the uid, and this account's uid is a system one.
+# credential in a message body, ever. It is not in claw-members, which holds
+# people alone, and person.sh would not count it if it were: its uid is a
+# system one.
+#
+# THE UNIT STILL NAMES claw-members, as a supplementary group of the process.
+# The service sets its socket's group to claw-members, which is how a person's
+# session may call it, and a process can give a file only a group it holds. The
+# account is not in the group; the process holds it for that one act.
 #
 # ADOPTION, NOT REVERSION (the Q62 doctrine). A re-run adopts what it finds. The
 # conf and the routing table are kept as they are, a missing conf key is
@@ -93,7 +99,11 @@ done
 for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json; do
   [ -r "${TEMPLATE_DIR}/${t}" ] || bad "no ${TEMPLATE_DIR}/${t}. This script owns the claw's copy of it"
 done
+[ -r "${HERE}/unit-groups.sh" ] || bad "no ${HERE}/unit-groups.sh. It reads which groups the running service holds. Run this from an assembled stage"
 [ "$FAILED" = 0 ] || { printf '{"ok":false,"stage":"payload"}\n'; exit 1; }
+# unit_holds_group, shared with install-bus-nudge.sh.
+# shellcheck source=unit-groups.sh
+. "${HERE}/unit-groups.sh"
 
 # WHAT THE SERVICE RUNS RIGHT NOW, digested before the copy and again after it.
 # An instance holds the program it started with, so replacing the file underneath
@@ -131,12 +141,13 @@ fi
 
 # ------------------------------------------------------- the account + its home
 #
-# A system account with no shell and no password. It is in claw-members because
+# A system account with no shell and no password. It is in claw-bus because
 # writing to the group-owned bus needs it, and for no other reason.
 #
-# IT IS NOT A PERSON, and the rails that read claw-members as people know it by
-# its uid. `useradd --system` allocates below UID_MIN, and person.sh counts only
-# uids inside the login range /etc/login.defs states. So the updater does not
+# IT IS NOT A PERSON. It is in no group the people rails read, and they would
+# know it by its uid if it were. `useradd --system` allocates below UID_MIN,
+# and person.sh counts only uids inside the login range /etc/login.defs
+# states. So the updater does not
 # ask this account for a core, and the people phase, the core phase and the
 # wake-rail phase give it nothing.
 if [ "$MODE" = dry-run ]; then
@@ -150,12 +161,12 @@ else
       && ok "the ${SVC_USER} system account was created" \
       || bad "the ${SVC_USER} system account could not be created"
   fi
-  if getent group claw-members >/dev/null 2>&1; then
-    usermod -aG claw-members "$SVC_USER" >/dev/null 2>&1 \
-      && ok "${SVC_USER} is in claw-members, which is what lets it write a bus message" \
-      || bad "${SVC_USER} could not be put in claw-members, so it cannot put mail on the bus"
+  if getent group claw-bus >/dev/null 2>&1; then
+    usermod -aG claw-bus "$SVC_USER" >/dev/null 2>&1 \
+      && ok "${SVC_USER} is in claw-bus, which is what lets it write a bus message" \
+      || bad "${SVC_USER} could not be put in claw-bus, so it cannot put mail on the bus"
   else
-    bad "there is no claw-members group on this claw, so the gatekeeper cannot reach the bus"
+    bad "there is no claw-bus group on this claw, so the gatekeeper cannot reach the bus"
   fi
   install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SVC_HOME" \
           "${SVC_HOME}/state" "${SVC_HOME}/log"
@@ -290,6 +301,11 @@ else
 fi
 
 # ---------------------------------------------------------------------- the unit
+#
+# WHETHER THE UNIT FILE WAS HERE BEFORE THIS RUN, read before the install lays
+# it. The enable step below needs it, and after the install it reads yes on
+# every claw.
+UNIT_EXISTED=0; [ -e "${UNIT_DIR}/${UNIT}" ] && UNIT_EXISTED=1
 if [ "$MODE" = dry-run ]; then
   ok "${DRY}install ${UNIT_DIR}/${UNIT}"
 else
@@ -301,10 +317,24 @@ else
 fi
 
 # ------------------------------------------------------------------ enable it
+#
+# DELIBERATELY DISABLED MEANS A UNIT FILE THAT WAS HERE BEFORE THIS RUN AND IS
+# DISABLED. The marker is the unit file's own presence before the install, read
+# above. A unit file this run laid a moment ago also answers `disabled`, and
+# nobody chose that. `--uninstall` disables the unit and leaves its file, so a
+# later run finds it that way and leaves it off.
+#
+# THE ANSWER IS READ AS A WORD, never through a pipeline. `systemctl is-enabled`
+# exits 1 when it prints `disabled`, and under this script's pipefail the test
+# `is-enabled | grep -q '^disabled$'` took the status of systemctl and never
+# matched. So every run enabled the unit, and a unit somebody had disabled was
+# turned back on. Measured against systemd 255 on the hub on 2026-09-12. w190
+# read the bytes the other way round and asked for this measurement.
 STATE="unknown"; RESTARTS=""; WAS_ACTIVE=""
+ENABLED_WORD="$(systemctl is-enabled "$UNIT" 2>/dev/null || true)"
 if [ "$MODE" = dry-run ]; then
   ok "${DRY}enable and start ${UNIT}"
-elif systemctl is-enabled "$UNIT" 2>/dev/null | grep -q '^disabled$'; then
+elif [ "$UNIT_EXISTED" = 1 ] && [ "$ENABLED_WORD" = disabled ]; then
   warn "${UNIT} is deliberately disabled and was left off"
 else
   WAS_ACTIVE="$(systemctl is-active "$UNIT" 2>/dev/null || true)"
@@ -312,6 +342,20 @@ else
   if [ "$SVC_BEFORE" != "$SVC_AFTER" ] && [ "$WAS_ACTIVE" = active ]; then
     systemctl restart "$UNIT" >/dev/null 2>&1
     warn "${UNIT} was running the gatekeeper at ${SVC_BEFORE} and this run installed ${SVC_AFTER}, so it was restarted onto the new bytes"
+  fi
+  # A RUNNING PROCESS KEEPS THE GROUPS IT STARTED WITH, the same way it keeps
+  # its bytes. When the bus moves to another group, the service stops reaching
+  # the bus and nothing in its own state says why. So the process's groups are
+  # read from /proc and compared with the group that owns the bus root, and a
+  # process that does not hold it is restarted into the account's groups now.
+  BUS_ROOT="$(sed -n 's/^BUS_DIR="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CONF" 2>/dev/null | tail -1)"
+  HOLDS=0; unit_holds_group "$UNIT" "$BUS_ROOT" || HOLDS=$?
+  if [ "$HOLDS" -eq 1 ]; then
+    systemctl restart "$UNIT" >/dev/null 2>&1
+    warn "${UNIT} was running without the group that owns ${BUS_ROOT}, so it could not reach the bus. It was restarted into its account's groups"
+    HOLDS=0; unit_holds_group "$UNIT" "$BUS_ROOT" || HOLDS=$?
+    [ "$HOLDS" -ne 1 ] \
+      || bad "${UNIT} still runs without the group that owns ${BUS_ROOT} after its restart, so ${SVC_USER} is not in that group"
   fi
   check "${UNIT} is enabled" \
     bash -c "systemctl is-enabled '$UNIT' 2>/dev/null | grep -qx enabled"

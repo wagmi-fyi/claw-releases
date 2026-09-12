@@ -1,0 +1,796 @@
+#!/usr/bin/env python3
+"""tokens: the claw's one holder of the firm's HTTP API credentials.
+
+A row is one account at one provider, keyed provider/account. The service
+keeps each row's credential sealed in its store, refreshes a rotating one for
+every caller, and hands a session the current access token or the static key.
+It is the only process on the claw that holds a refresh token, so a provider
+that rotates on use never sees two refreshes race.
+
+  commonclaw-conn-tokens --serve     under its unit
+  commonclaw-conn-tokens --check     the health line
+
+THE ROWS are state/providers.json, plain JSON with no secret in it. THE
+CREDENTIALS are one sealed record per row in the scaffold's store. A row grants
+nothing until the seed door has seeded it.
+
+THE VERBS, one JSON request and one JSON answer over the socket:
+
+  get       a member of the row's group. The current access token, its type and
+            its expiry, or the static key. The only verb that returns a secret.
+  rejected  a member of the row's group, with the fingerprint of the token the
+            provider refused. The service refreshes once when that token is the
+            current one, and otherwise answers the newer token it already holds.
+  add       any person. Writes a row, which holds no secret.
+  seed      root alone, which is the seed door. Stores the row's seed and
+            records who it was seeded for.
+  status    any person. Each row's state, expiry, last refresh, fingerprints and
+            seeder. No value.
+  remove    a claw-admin. Deletes the row and its sealed record, and answers the
+            provider's revocation page and the seeder.
+
+No verb returns a refresh token or a client secret. A fingerprint is the first
+16 hex characters of a value's SHA-256.
+
+REFRESH IS SINGLE-FLIGHT PER ROW. One lock per row covers the read of the
+record, the decision to refresh and the write of the result. A caller that
+arrives during a refresh waits for it and receives its result. The service
+refreshes ahead of expiry, when less than a tenth of the access token's life
+remains.
+
+A DEAD REFRESH TOKEN IS NEVER RETRIED. When the provider answers
+invalid_grant, the row is marked as needing a person, the health line and
+status say so, and one bus message goes to the handle the conf names.
+"""
+
+import base64
+import datetime
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import commonclaw_connection as cc
+
+NAME = "tokens"
+
+# THE PROGRAM'S OWN SETTINGS. The conf fragment beside the manifest seeds the
+# same keys with the same values, and the controls prove the two lists agree.
+DEFAULTS = {
+    "DEFAULT_GROUP": "agents-cred",
+    "ADMIN_GROUP": "claw-admin",
+    "NOTIFY_HANDLE": "human",
+    "BUS_HANDLE": "tokens",
+    "BUS_CLI": "/opt/commonclaw/bin/bus",
+    "BUS_DIR": "/var/lib/commonclaw/bus",
+    "SEED_VAULT": "",
+    "HTTP_TIMEOUT_SECS": "30",
+}
+
+# Refresh when less than this share of the access token's life remains.
+EARLY_SHARE = 10
+
+ROW_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}/[a-z0-9][a-z0-9._-]{0,39}$")
+GROUP_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
+ACCOUNT_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
+KINDS = ("oauth", "key")
+PATHS = ("paste", "helper", "tunnel")
+ROTATES = ("yes", "no", "unknown")
+FP_HISTORY = 8
+
+# THE SEED'S FIELDS, BY KIND. The seed door asks for these names in the vault
+# item, `token add` prints them, and the laptop helper writes the oauth ones.
+# This table is the one list the other three read, through `status`.
+SEED_FIELDS = {
+    "key": {"required": ["credential"], "optional": []},
+    "oauth": {"required": ["client_id", "refresh_token"],
+              "optional": ["client_secret", "access_token", "expires_at", "registration"]},
+}
+
+# WHO MAY SEED. uid 0, which is the seed door run by root. The controls move it
+# to their own uid, because a suite does not run as root. Nothing on a claw
+# sets it, and the service says so in its journal when something has.
+SEED_UID = int(os.environ.get("COMMONCLAW_TOKENS_SEED_UID", "0") or "0")
+
+
+def fp(value):
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def now():
+    return time.time()
+
+
+def iso(ts):
+    if not ts:
+        return ""
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today():
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+class Refused(Exception):
+    """A request the service answers with a refusal. The message names no value."""
+
+
+class NeedsPerson(Exception):
+    """The provider refused the refresh token. A person seeds the row again."""
+
+
+# ------------------------------------------------------------------ groups
+def getent(db, key):
+    try:
+        p = subprocess.run(["getent", db, key], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0 or not p.stdout.strip():
+        return None
+    return p.stdout.strip().splitlines()[0].split(":")
+
+
+def group_exists(group):
+    return getent("group", group) is not None
+
+
+def in_group(user, group):
+    """True when the account is in the group, as its primary group or a member.
+
+    READ AT EACH REQUEST, from the system's own databases. A person added to a
+    row's group receives its credential at the next request, and a person taken
+    out is refused at the next one. Neither waits for a login.
+    """
+    g = getent("group", group)
+    if g is None or len(g) < 4:
+        return False
+    if user in [m for m in g[3].split(",") if m]:
+        return True
+    p = getent("passwd", user)
+    return p is not None and len(p) > 3 and p[3] == g[2]
+
+
+# ------------------------------------------------------------------- http
+def http_json(url, data=None, headers=None, timeout=30):
+    """(status, object) for one request. A body that is not JSON reads as {}."""
+    body = None
+    hdrs = {"Accept": "application/json", "User-Agent": "commonclaw-tokens"}
+    hdrs.update(headers or {})
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST" if body else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, raw = r.status, r.read()
+    except urllib.error.HTTPError as exc:
+        status, raw = exc.code, exc.read()
+    except (urllib.error.URLError, OSError) as exc:
+        raise Refused("%s did not answer: %s" % (url, str(getattr(exc, "reason", exc))[:160]))
+    try:
+        obj = json.loads(raw.decode("utf-8", "replace") or "{}")
+    except ValueError:
+        obj = {}
+    return status, obj if isinstance(obj, dict) else {}
+
+
+def url_ok(url):
+    """https, or plain http to this machine's own loopback, which is a control's."""
+    try:
+        u = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if u.scheme == "https" and u.hostname:
+        return True
+    return u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+# ---------------------------------------------------------------- service
+class Service:
+    def __init__(self, settings, store, audit):
+        self.settings = settings
+        self.store = store
+        self.audit = audit
+        self.rows_path = os.path.join(settings.state_dir, "providers.json")
+        self.rows_lock = threading.Lock()
+        self.locks = {}
+        self.locks_lock = threading.Lock()
+        self.metadata = {}
+        self.rows = self.load_rows()
+
+    # -- the rows file ----------------------------------------------------
+    def load_rows(self):
+        try:
+            with open(self.rows_path, "r", encoding="utf-8") as fh:
+                obj = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        rows = obj.get("rows", {}) if isinstance(obj, dict) else {}
+        return dict((k, v) for k, v in rows.items() if ROW_RE.match(k) and isinstance(v, dict))
+
+    def save_rows(self):
+        """A temporary file beside the rows file, renamed over it, as the store writes."""
+        text = json.dumps({"rows": self.rows}, indent=2, sort_keys=True) + "\n"
+        d = os.path.dirname(self.rows_path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".providers-", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.rows_path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def row_lock(self, name):
+        with self.locks_lock:
+            if name not in self.locks:
+                self.locks[name] = threading.Lock()
+            return self.locks[name]
+
+    # -- names a row carries --------------------------------------------
+    def hostname(self):
+        return socket.gethostname().split(".")[0]
+
+    def vault(self):
+        return self.settings.seed_vault or ("%s-machine" % self.hostname())
+
+    def item_for(self, name):
+        provider, account = name.split("/", 1)
+        return "commonclaw-conn-%s-%s-%s-%s" % (NAME, provider, account, self.hostname())
+
+    # -- the provider -----------------------------------------------------
+    def timeout(self):
+        return max(5, cc.settings.to_int(self.settings.http_timeout_secs, 30))
+
+    def provider_metadata(self, url, fresh=False):
+        hit = self.metadata.get(url)
+        if hit and not fresh and now() - hit[0] < 3600:
+            return hit[1]
+        status, obj = http_json(url, timeout=self.timeout())
+        if status != 200 or not obj.get("token_endpoint"):
+            raise Refused("the metadata at %s answered %d and names no token endpoint" % (url, status))
+        self.metadata[url] = (now(), obj)
+        return obj
+
+    def token_endpoint(self, row):
+        if row.get("token_endpoint"):
+            return row["token_endpoint"]
+        return self.provider_metadata(row["metadata"])["token_endpoint"]
+
+    def auth_methods(self, row):
+        if not row.get("metadata"):
+            return []
+        try:
+            return self.provider_metadata(row["metadata"]).get(
+                "token_endpoint_auth_methods_supported") or []
+        except Refused:
+            return []
+
+    # -- the record -------------------------------------------------------
+    def read_record(self, name):
+        try:
+            return self.store.get(name)
+        except FileNotFoundError:
+            return None
+
+    def seed_steps_hint(self, name, row):
+        return ("seed it through the %s path: token status %s names the vault item, and "
+                "sudo /opt/commonclaw/provision-claw/scripts/install-provider-seed.sh %s hands it over"
+                % (row.get("path", "paste"), name, name))
+
+    def refresh(self, name, row, rec, why):
+        """One refresh at the provider. Called with the row's lock held."""
+        data = {"grant_type": "refresh_token", "refresh_token": rec["refresh_token"]}
+        if row.get("scopes"):
+            data["scope"] = " ".join(row["scopes"])
+        if row.get("resource"):
+            data["resource"] = row["resource"]
+        headers = {}
+        secret = rec.get("client_secret") or ""
+        if secret:
+            if "client_secret_post" in self.auth_methods(row) and \
+                    "client_secret_basic" not in self.auth_methods(row):
+                data["client_id"] = rec["client_id"]
+                data["client_secret"] = secret
+            else:
+                pair = "%s:%s" % (urllib.parse.quote(rec["client_id"], safe=""),
+                                  urllib.parse.quote(secret, safe=""))
+                headers["Authorization"] = "Basic " + base64.b64encode(pair.encode()).decode()
+        else:
+            data["client_id"] = rec["client_id"]
+        status, obj = http_json(self.token_endpoint(row), data=data, headers=headers,
+                                timeout=self.timeout())
+        data = None
+        headers = None
+        if status == 200 and obj.get("access_token"):
+            old_access_fp = rec.get("access_fp", "")
+            old_refresh_fp = rec.get("refresh_fp", "")
+            rec["access_token"] = obj["access_token"]
+            rec["token_type"] = obj.get("token_type") or "Bearer"
+            life = cc.settings.to_int(obj.get("expires_in"), 0)
+            rec["issued_at"] = round(now(), 3)
+            rec["life"] = life or None
+            rec["expires_at"] = round(rec["issued_at"] + life, 3) if life else None
+            rotated = False
+            if obj.get("refresh_token") and obj["refresh_token"] != rec["refresh_token"]:
+                rec["refresh_token"] = obj["refresh_token"]
+                rotated = True
+            rec["access_fp"] = fp(rec["access_token"])
+            rec["refresh_fp"] = fp(rec["refresh_token"])
+            hist = [f for f in rec.get("previous_fps", []) if f]
+            if old_access_fp:
+                hist.append(old_access_fp)
+            rec["previous_fps"] = hist[-FP_HISTORY:]
+            rec["refreshes"] = int(rec.get("refreshes", 0)) + 1
+            rec["rotations"] = int(rec.get("rotations", 0)) + (1 if rotated else 0)
+            rec["last_refresh"] = int(now())
+            rec["needs_person"] = None
+            self.store.put(name, rec)
+            obj = None
+            self.event("refresh", row=name, why=why, access_fp=rec["access_fp"],
+                       previous_access_fp=old_access_fp, refresh_fp=rec["refresh_fp"],
+                       previous_refresh_fp=old_refresh_fp, rotated=rotated)
+            cc.log("info", "refreshed %s (%s): %s became %s%s" % (
+                name, why, old_access_fp or "none", rec["access_fp"],
+                ", the provider rotated the refresh token" if rotated else ""))
+            return rec
+        error = str(obj.get("error", ""))[:64]
+        obj = None
+        if error == "invalid_grant":
+            rec["needs_person"] = {"at": int(now()), "reason": "the provider answered invalid_grant "
+                                   "to the refresh token"}
+            self.store.put(name, rec)
+            self.event("needs-person", row=name, why=why, status=status)
+            cc.log("warn", "%s needs a person: the provider refused its refresh token" % name)
+            self.announce(name, row)
+            raise NeedsPerson(self.needs_person_sentence(name, row, rec))
+        self.event("refresh-failed", row=name, why=why, status=status, error=error)
+        raise Refused("the provider did not refresh %s: it answered %d%s" % (
+            name, status, (" " + error) if error else ""))
+
+    def needs_person_sentence(self, name, row, rec):
+        np = rec.get("needs_person") or {}
+        return ("%s needs a person: %s on %s. Nothing retries a dead refresh token. A person "
+                "walks the %s path again and the door runs with --reseed. It was seeded by %s"
+                % (name, np.get("reason", "the provider refused its refresh token"),
+                   iso(np.get("at")), row.get("path", "paste"),
+                   (row.get("seeded_by") or {}).get("account", "nobody on record")))
+
+    def announce(self, name, row):
+        """One bus message. No backticks and no value in it."""
+        s = self.settings
+        if not s.notify_handle:
+            return
+        by = (row.get("seeded_by") or {}).get("account", "nobody on record")
+        subject = "tokens: %s needs a person" % name
+        body = ("The provider refused the refresh token for %s on %s. The service does not "
+                "retry it. A person walks the %s path again, then the seed door runs with "
+                "--reseed. token status %s says more. It was seeded by %s."
+                % (name, today(), row.get("path", "paste"), name, by))
+        env = dict(os.environ)
+        env["SESSION_BUS_DIR"] = s.bus_dir
+        try:
+            p = subprocess.run([s.bus_cli, "send", s.bus_handle, s.notify_handle, subject, body],
+                               capture_output=True, text=True, env=env, timeout=30)
+            if p.returncode != 0:
+                cc.log("err", "the bus refused the message for %s: %s" % (name, p.stderr.strip()[:200]))
+        except (OSError, subprocess.SubprocessError) as exc:
+            cc.log("err", "the bus message for %s did not go: %s" % (name, str(exc)[:200]))
+
+    def current(self, name, row, rec, why):
+        """The record with a usable access token, refreshed first when it is due."""
+        exp = rec.get("expires_at")
+        life = rec.get("life")
+        due = not rec.get("access_token")
+        if exp and life:
+            due = due or (exp - now()) < (life / float(EARLY_SHARE))
+        elif exp:
+            due = due or exp <= now()
+        if not due:
+            return rec
+        try:
+            return self.refresh(name, row, rec, why)
+        except Refused:
+            if rec.get("access_token") and (not exp or exp > now()):
+                cc.log("warn", "an early refresh of %s did not land, and the current token "
+                       "still has life, so it was answered" % name)
+                return rec
+            raise
+
+    def answer_credential(self, row, rec):
+        if row["kind"] == "key":
+            return {"ok": True, "kind": "key", "key": rec["key"], "fingerprint": fp(rec["key"])}
+        out = {"ok": True, "kind": "oauth", "access_token": rec["access_token"],
+               "token_type": rec.get("token_type") or "Bearer",
+               "expires_at": rec.get("expires_at"), "expires": iso(rec.get("expires_at")),
+               "fingerprint": rec.get("access_fp", "")}
+        reg = rec.get("registration")
+        client = dict(reg) if isinstance(reg, dict) else {}
+        client.setdefault("client_id", rec.get("client_id", ""))
+        client.pop("client_secret", None)
+        client.pop("registration_access_token", None)
+        out["client"] = client
+        return out
+
+    # -- the verbs --------------------------------------------------------
+    def handle(self, req, peer):
+        verb = req.get("verb")
+        try:
+            fn = {"get": self.v_get, "rejected": self.v_rejected, "add": self.v_add,
+                  "seed": self.v_seed, "status": self.v_status,
+                  "remove": self.v_remove}.get(verb)
+            if fn is None:
+                return {"ok": False, "reason": "no verb '%s': get, rejected, add, seed, status, "
+                        "remove" % str(verb)[:32]}
+            return fn(req, peer)
+        except (Refused, NeedsPerson, cc.SealError) as exc:
+            return {"ok": False, "reason": str(exc)}
+
+    def row_for(self, req):
+        name = str(req.get("row", ""))
+        if not ROW_RE.match(name):
+            raise Refused("'%s' is not a row: provider/account, each in lowercase letters, "
+                          "digits, dots, underscores and hyphens" % name[:80])
+        row = self.rows.get(name)
+        if row is None:
+            raise Refused("this claw has no row %s. token list shows the rows it has" % name)
+        return name, row
+
+    def member_check(self, name, row, peer):
+        user = peer.get("user") or "?"
+        if not in_group(user, row["group"]):
+            self.event("refused", row=name, why="not in the row's group", group=row["group"],
+                       peer=peer)
+            raise Refused("%s is not in %s, the group that may receive %s" % (user, row["group"], name))
+
+    def v_get(self, req, peer):
+        name, row = self.row_for(req)
+        self.member_check(name, row, peer)
+        with self.row_lock(name):
+            rec = self.read_record(name)
+            if rec is None:
+                raise Refused("%s is not seeded yet, so it grants nothing: %s"
+                              % (name, self.seed_steps_hint(name, row)))
+            if rec.get("needs_person"):
+                raise NeedsPerson(self.needs_person_sentence(name, row, rec))
+            if row["kind"] == "oauth":
+                rec = self.current(name, row, rec, "get")
+            ans = self.answer_credential(row, rec)
+        self.event("get", row=name, peer=peer, access_fp=ans["fingerprint"])
+        return ans
+
+    def v_rejected(self, req, peer):
+        name, row = self.row_for(req)
+        self.member_check(name, row, peer)
+        told = str(req.get("fingerprint", ""))[:16]
+        if row["kind"] == "key":
+            raise Refused("%s holds a static key, and a static key has nothing to refresh. "
+                          "If the provider refuses it, a person replaces it and the seed door "
+                          "runs with --reseed" % name)
+        with self.row_lock(name):
+            rec = self.read_record(name)
+            if rec is None:
+                raise Refused("%s is not seeded yet, so it grants nothing: %s"
+                              % (name, self.seed_steps_hint(name, row)))
+            if rec.get("needs_person"):
+                raise NeedsPerson(self.needs_person_sentence(name, row, rec))
+            if told == rec.get("access_fp"):
+                rec = self.refresh(name, row, rec, "rejected")
+            else:
+                rec = self.current(name, row, rec, "rejected-stale")
+            ans = self.answer_credential(row, rec)
+        self.event("rejected", row=name, peer=peer, reported_fp=told, access_fp=ans["fingerprint"])
+        return ans
+
+    def v_add(self, req, peer):
+        name = str(req.get("row", ""))
+        if not ROW_RE.match(name):
+            raise Refused("'%s' is not a row: provider/account, each in lowercase letters, "
+                          "digits, dots, underscores and hyphens, 40 characters at most" % name[:80])
+        kind = str(req.get("kind") or ("key" if req.get("key") else "oauth"))
+        if kind not in KINDS:
+            raise Refused("a row's kind is oauth or key, and '%s' is neither" % kind[:16])
+        row = {"provider": name.split("/")[0], "account": name.split("/")[1], "kind": kind}
+        metadata = str(req.get("metadata") or "")
+        endpoint = str(req.get("token_endpoint") or "")
+        resource = str(req.get("resource") or "")
+        revoke = str(req.get("revoke_page") or "")
+        for label, url in (("metadata", metadata), ("token endpoint", endpoint),
+                           ("resource", resource), ("revocation page", revoke)):
+            if url and not url_ok(url):
+                raise Refused("the %s %s is not an https URL" % (label, url[:120]))
+        meta = {}
+        if kind == "oauth":
+            if not metadata and not endpoint:
+                raise Refused("an oauth row needs the provider's metadata URL, or its token "
+                              "endpoint where the provider publishes none")
+            if metadata:
+                meta = self.provider_metadata(metadata, fresh=True)
+                row["metadata"] = metadata
+            else:
+                row["token_endpoint"] = endpoint
+            if resource:
+                row["resource"] = resource
+            scopes = req.get("scopes") or []
+            if isinstance(scopes, str):
+                scopes = scopes.split()
+            row["scopes"] = [str(s)[:128] for s in scopes if str(s).strip()][:32]
+            rotates = str(req.get("rotates") or "unknown")
+            if rotates not in ROTATES:
+                raise Refused("rotates is yes, no or unknown, and '%s' is none of them" % rotates[:16])
+            row["rotates"] = rotates
+        elif metadata or endpoint or resource:
+            raise Refused("a key row is handed out as it stands and carries no metadata, "
+                          "token endpoint or resource")
+        path = str(req.get("path") or "")
+        if not path:
+            path = "helper" if (kind == "oauth" and meta.get("authorization_endpoint")) else "paste"
+        if path not in PATHS:
+            raise Refused("a seed path is paste, helper or tunnel, and '%s' is none of them" % path[:16])
+        if path in ("helper", "tunnel") and kind == "key":
+            raise Refused("a key row is seeded by paste. The %s path makes an oauth approval" % path)
+        if path in ("helper", "tunnel") and not meta.get("authorization_endpoint"):
+            raise Refused("the %s path approves in a browser, and this provider's metadata names "
+                          "no authorization endpoint. Give its metadata URL, or seed it by paste" % path)
+        group = str(req.get("group") or self.settings.default_group)
+        if not GROUP_RE.match(group) or not group_exists(group):
+            raise Refused("the group %s does not exist on this claw" % group[:40])
+        row["group"] = group
+        row["path"] = path
+        if revoke:
+            row["revoke_page"] = revoke
+        item = self.item_for(name)
+        seed = str(req.get("seed") or "op://%s/%s" % (self.vault(), item))
+        if not re.match(r"^op://[^/\s]+/[^/\s]+$", seed):
+            raise Refused("a seed reference is op://vault/item, and '%s' is not" % seed[:120])
+        row["seed"] = seed
+        row["added_by"] = {"account": peer.get("user"), "date": today()}
+        with self.rows_lock:
+            if name in self.rows:
+                raise Refused("this claw already has %s. token remove takes it off first" % name)
+            for other, r in self.rows.items():
+                if r.get("seed") == seed:
+                    raise Refused("%s already names the seed item %s, so %s cannot" % (other, seed, name))
+            self.rows[name] = row
+            self.save_rows()
+        self.event("add", row=name, peer=peer, kind=kind, path=path, group=group)
+        return {"ok": True, "row": name, "fields": row, "seed_fields": SEED_FIELDS[kind],
+                "item": seed.split("/")[3], "vault": seed.split("/")[2], "host": self.hostname(),
+                "authorization_endpoint": meta.get("authorization_endpoint", ""),
+                "registration_endpoint": meta.get("registration_endpoint", "")}
+
+    def v_seed(self, req, peer):
+        if peer.get("uid") != SEED_UID:
+            self.event("refused", verb="seed", why="not root", peer=peer)
+            raise Refused("only the seed door, run by root, seeds a row. "
+                          "sudo /opt/commonclaw/provision-claw/scripts/install-provider-seed.sh")
+        name, row = self.row_for(req)
+        seed = req.get("seed")
+        if not isinstance(seed, dict):
+            raise Refused("a seed is one object of the row's fields")
+        want = SEED_FIELDS[row["kind"]]
+        allowed = set(want["required"]) | set(want["optional"])
+        extra = sorted(k for k in seed if k not in allowed)
+        missing = [k for k in want["required"] if not str(seed.get(k) or "").strip()]
+        if extra or missing:
+            seed = None
+            raise Refused("the seed does not match %s, a %s row: %s%s" % (
+                name, row["kind"], ("missing " + ", ".join(missing)) if missing else "",
+                ("; not a field of this row: " + ", ".join(extra)) if extra else ""))
+        who = str(req.get("for") or "")
+        if not ACCOUNT_RE.match(who):
+            raise Refused("a seed records the account it was seeded for, and '%s' is not one" % who[:40])
+        with self.row_lock(name):
+            old = self.read_record(name)
+            if old is not None and not req.get("reseed"):
+                raise Refused("%s is already seeded, for %s on %s. The door takes --reseed for a "
+                              "second seed" % (name, (row.get("seeded_by") or {}).get("account", "?"),
+                                               (row.get("seeded_by") or {}).get("date", "?")))
+            if row["kind"] == "key":
+                rec = {"kind": "key", "key": str(seed["credential"]).strip()}
+            else:
+                rec = {"kind": "oauth", "client_id": str(seed["client_id"]).strip(),
+                       "refresh_token": str(seed["refresh_token"]).strip()}
+                if seed.get("client_secret"):
+                    rec["client_secret"] = str(seed["client_secret"]).strip()
+                if seed.get("access_token"):
+                    rec["access_token"] = str(seed["access_token"]).strip()
+                    exp = cc.settings.to_int(seed.get("expires_at"), 0)
+                    rec["expires_at"] = exp or None
+                    rec["issued_at"] = round(now(), 3)
+                    rec["life"] = int(exp - now()) if exp > now() else None
+                reg = seed.get("registration")
+                if isinstance(reg, str) and reg.strip():
+                    try:
+                        reg = json.loads(reg)
+                    except ValueError:
+                        reg = None
+                if isinstance(reg, dict):
+                    rec["registration"] = reg
+                rec["access_fp"] = fp(rec.get("access_token", ""))
+                rec["refresh_fp"] = fp(rec["refresh_token"])
+                rec["previous_fps"] = []
+                rec["refreshes"] = 0
+                rec["rotations"] = 0
+            rec["seeded_at"] = int(now())
+            rec["needs_person"] = None
+            seed = None
+            self.store.put(name, rec)
+            with self.rows_lock:
+                row["seeded_by"] = {"account": who, "date": today()}
+                self.save_rows()
+            self.event("seed", row=name, peer=peer, seeded_for=who, reseed=bool(req.get("reseed")))
+            ans = {"ok": True, "row": name, "kind": row["kind"], "seeded_by": row["seeded_by"]}
+            if row["kind"] == "oauth":
+                try:
+                    rec = self.current(name, row, rec, "seed")
+                except (Refused, NeedsPerson) as exc:
+                    return {"ok": False, "row": name, "seeded": True,
+                            "reason": "the seed is stored, and its first refresh did not land: %s" % exc}
+                ans.update({"expires": iso(rec.get("expires_at")), "fingerprint": rec.get("access_fp", ""),
+                            "refresh_fingerprint": rec.get("refresh_fp", "")})
+            else:
+                ans["fingerprint"] = fp(rec["key"])
+        return ans
+
+    def status_of(self, name, row):
+        out = {"row": name, "kind": row["kind"], "group": row["group"], "path": row["path"],
+               "seed": row.get("seed", ""), "seeded_by": row.get("seeded_by"),
+               "added_by": row.get("added_by"), "seed_fields": SEED_FIELDS[row["kind"]]}
+        for k in ("metadata", "token_endpoint", "resource", "scopes", "rotates", "revoke_page"):
+            if k in row:
+                out[k] = row[k]
+        try:
+            rec = self.read_record(name)
+        except cc.SealError as exc:
+            out["state"] = "unreadable"
+            out["reason"] = str(exc)
+            return out
+        if rec is None:
+            out["state"] = "unseeded"
+            return out
+        if row["kind"] == "key":
+            out["state"] = "ready"
+            out["fingerprint"] = fp(rec.get("key", ""))
+            return out
+        exp = rec.get("expires_at")
+        if rec.get("needs_person"):
+            out["state"] = "needs-person"
+            out["needs_person"] = dict(rec["needs_person"], when=iso(rec["needs_person"].get("at")))
+        elif exp and exp <= now():
+            out["state"] = "expired"
+        else:
+            out["state"] = "ready"
+        out.update({"expires": iso(exp), "expires_at": exp, "fingerprint": rec.get("access_fp", ""),
+                    "refresh_fingerprint": rec.get("refresh_fp", ""),
+                    "last_refresh": iso(rec.get("last_refresh")),
+                    "refreshes": rec.get("refreshes", 0), "rotations": rec.get("rotations", 0)})
+        return out
+
+    def v_status(self, req, peer):
+        want = str(req.get("row") or "")
+        by = str(req.get("seeded_by") or "")
+        out = []
+        for name in sorted(self.rows):
+            if want and name != want and name.split("/")[0] != want:
+                continue
+            row = self.rows[name]
+            if by and (row.get("seeded_by") or {}).get("account") != by:
+                continue
+            out.append(self.status_of(name, row))
+        if want and not out and not by:
+            raise Refused("this claw has no row %s. token list shows the rows it has" % want)
+        return {"ok": True, "rows": out, "host": self.hostname()}
+
+    def v_remove(self, req, peer):
+        name, row = self.row_for(req)
+        user = peer.get("user") or "?"
+        if peer.get("uid") != 0 and not in_group(user, self.settings.admin_group):
+            self.event("refused", verb="remove", row=name, why="not a claw-admin", peer=peer)
+            raise Refused("%s is not in %s, and removing a row is a claw-admin's act"
+                          % (user, self.settings.admin_group))
+        revocation = row.get("revoke_page", "")
+        endpoint = ""
+        if row.get("metadata"):
+            try:
+                endpoint = self.provider_metadata(row["metadata"]).get("revocation_endpoint", "")
+            except Refused:
+                endpoint = ""
+        with self.row_lock(name):
+            with self.rows_lock:
+                self.rows.pop(name, None)
+                self.save_rows()
+            try:
+                self.store.remove(name)
+            except FileNotFoundError:
+                pass
+        self.event("remove", row=name, peer=peer)
+        return {"ok": True, "row": name, "revoke_page": revocation, "revocation_endpoint": endpoint,
+                "seeded_by": row.get("seeded_by"), "seed": row.get("seed", ""),
+                "said": ("the approval still stands at the provider. Revoking it is a person's act, "
+                         "and the person who seeded the row is the one whose approval it holds")}
+
+    # -- the audit --------------------------------------------------------
+    def event(self, what, peer=None, **fields):
+        try:
+            self.audit.record(peer or {}, what, **fields)
+        except Exception as exc:
+            cc.log("err", "the audit line for %s was not written: %s" % (what, str(exc)[:200]))
+
+    def ready(self):
+        seeded = 0
+        for name in sorted(self.rows):
+            st = self.status_of(name, self.rows[name])
+            if st["state"] == "needs-person":
+                return False, "%s needs a person: the provider refused its refresh token" % name
+            if st["state"] != "unseeded":
+                seeded += 1
+        if not seeded:
+            return False, "no row is seeded yet. token add starts one"
+        return True, ""
+
+
+def settings():
+    return cc.Settings(NAME, defaults=DEFAULTS)
+
+
+def ready_over_socket(s):
+    """The running service's own reading, asked over its socket as the door's root exception."""
+    def ready():
+        from commonclaw_connection.tokens_client import TokensClient, TokensError
+        try:
+            resp = TokensClient(socket_path=s.socket, timeout=20).call({"verb": "status"})
+        except TokensError as exc:
+            return False, str(exc)
+        if not resp.get("ok"):
+            return False, resp.get("reason", "the service refused its own status")
+        seeded = 0
+        for r in resp.get("rows", []):
+            if r.get("state") == "needs-person":
+                return False, "%s needs a person: the provider refused its refresh token" % r["row"]
+            if r.get("state") != "unseeded":
+                seeded += 1
+        if not seeded:
+            return False, "no row is seeded yet. token add starts one"
+        return True, ""
+    return ready
+
+
+def main(argv):
+    if "--check" in argv:
+        s = settings()
+        return cc.print_health(s, ready_over_socket(s))
+    if "--serve" in argv:
+        s = settings()
+        if SEED_UID != 0:
+            cc.log("warn", "COMMONCLAW_TOKENS_SEED_UID moves who may seed to uid %d. Only a control "
+                   "sets it" % SEED_UID)
+        store = cc.Store(s)
+        audit = cc.AuditLog(os.path.join(s.log_dir, "audit.jsonl"))
+        svc = Service(s, store, audit)
+        cc.log("info", "%d row(s) on this claw" % len(svc.rows))
+        cc.Door(s, svc.handle, audit=audit).serve_forever()
+        return 0
+    sys.stderr.write(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

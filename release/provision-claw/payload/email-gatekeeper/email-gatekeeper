@@ -271,6 +271,26 @@ SELF_KEY_ORDER = ("address", "display_name", "inbox_id", "runbook")
 # the first refresh always loads.
 NEVER_READ = object()
 
+# THE MODE OF EVERY FILE THIS SERVICE WRITES, set here and not left to the
+# umask. The installer seeds routes.json at 0640. A write through the command
+# made a new file under systemd's default umask of 0022 and renamed it over the seed,
+# so the table came back 0644, and threads.jsonl the same way. Measured on
+# staging on 2026-09-12. The directories above are 0750, so nobody outside the
+# group gained a read. The file still has to match what the release seeded. The
+# socket's mode is set in this program for the same reason.
+STATE_FILE_MODE = 0o640
+
+
+def open_new_private(path):
+    """A fresh file at STATE_FILE_MODE, whatever umask this process runs under.
+
+    fchmod after the open, because the mode os.open is given passes through
+    the umask and could come out tighter than the seed.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, STATE_FILE_MODE)
+    os.fchmod(fd, STATE_FILE_MODE)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
 
 def in_key_order(obj, order):
     """One mapping, rebuilt in a named order, with anything unnamed after it.
@@ -298,6 +318,7 @@ class State:
         self.routes_stamp = NEVER_READ
         self.refresh_routes()
         self.threads = {}
+        self.learned = {}
 
     def load_routes(self):
         try:
@@ -365,13 +386,19 @@ class State:
         if isinstance(out.get("self"), dict):
             out["self"] = in_key_order(out["self"], SELF_KEY_ORDER)
         tmp = self.routes_path + ".new"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open_new_private(tmp) as fh:
             json.dump(out, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, self.routes_path)
 
     def load_threads(self):
+        """The map, last line for a thread winning, with the time each was learned.
+
+        The time comes from the same line as the handle, so a thread that moved
+        to another desk carries the time it moved.
+        """
         seen = {}
+        learned = {}
         for line in read_lines(self.threads_path):
             line = line.strip()
             if not line:
@@ -384,26 +411,48 @@ class State:
             handle = rec.get("handle")
             if tid and handle:
                 seen[tid] = handle
+                if rec.get("ts"):
+                    learned[tid] = rec["ts"]
+                else:
+                    learned.pop(tid, None)
         self.threads = seen
+        self.learned = learned
         return seen
 
     def compact_threads(self):
-        """One line per thread, written once at start. Bounded growth, no loss."""
+        """One line per thread, written once at start. Bounded growth, no loss.
+
+        EACH THREAD KEEPS THE TIME IT WAS LEARNED. Compaction wrote the time of
+        the compaction onto every line, so each restart replaced when a thread
+        was learned with when the service last started. A restart is due
+        whenever the program's bytes change. Found on staging on 2026-09-12. A
+        line that carried no time is written with none, and no time is invented
+        for it.
+
+        THE COMPACTION STAMPS ITSELF ONCE, on a first line that names no thread,
+        so load_threads passes over it.
+        """
         self.load_threads()
         tmp = self.threads_path + ".new"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open_new_private(tmp) as fh:
+            fh.write(json.dumps({"compacted_at": iso_now(),
+                                 "threads": len(self.threads)}) + "\n")
             for tid, handle in sorted(self.threads.items()):
-                fh.write(json.dumps({"thread_id": tid, "handle": handle,
-                                     "ts": iso_now()}) + "\n")
+                rec = {"thread_id": tid, "handle": handle}
+                if tid in self.learned:
+                    rec["ts"] = self.learned[tid]
+                fh.write(json.dumps(rec) + "\n")
         os.replace(tmp, self.threads_path)
 
     def remember_thread(self, thread_id, handle):
         if not thread_id or not handle:
             return
         with self.lock:
+            ts = iso_now()
             self.threads[thread_id] = handle
+            self.learned[thread_id] = ts
             append_json(self.threads_path,
-                        {"thread_id": thread_id, "handle": handle, "ts": iso_now()})
+                        {"thread_id": thread_id, "handle": handle, "ts": ts})
 
     def route(self, sender, thread_id):
         """Which handles a mail reaches, and why.
@@ -433,7 +482,12 @@ def iso_now():
 
 
 def append_json(path, obj):
-    with open(path, "a", encoding="utf-8") as fh:
+    """One line appended. A file made here is made at STATE_FILE_MODE.
+
+    An append leaves an existing file's mode as it finds it.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, STATE_FILE_MODE)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(obj, sort_keys=True) + "\n")
 
 
@@ -519,6 +573,7 @@ class Gatekeeper:
         self.connected = False
         self.last_event = ""
         self.last_reason = ""
+        self.probe_passed = False
         self.stop = threading.Event()
 
     # -- inbound ------------------------------------------------------------
@@ -556,6 +611,20 @@ class Gatekeeper:
             inbox = self.inbox_id()
             if not inbox:
                 self.connected = False
+                # THE PROBE'S REFUSAL OUTRANKS THE MISSING INBOX. On the hub on
+                # 2026-09-12 the key resolved and the provider answered 403,
+                # while a member's status read "names no inbox yet". A member
+                # who follows that sentence runs `email inbox create` and meets
+                # the 403 there. So the service asks the same probe --check
+                # asks, and holds its reason where status reads it. A refused
+                # probe is asked again on the reconnect ladder.
+                refusal = self.probe_refusal()
+                if refusal:
+                    self.last_reason = "the provider probe did not pass: %s" % refusal
+                    self.stop.wait(wait + random.uniform(0, wait * 0.25))
+                    wait = min(hi, wait * 2)
+                    continue
+                wait = lo
                 self.last_reason = "routes.json names no inbox yet: run `email inbox create`"
                 self.stop.wait(10)
                 continue
@@ -571,6 +640,23 @@ class Gatekeeper:
             log("warn", "listener stopped (%s); reconnecting in about %ds" % (self.last_reason, wait))
             self.stop.wait(wait + random.uniform(0, wait * 0.25))
             wait = min(hi, wait * 2)
+
+    def probe_refusal(self):
+        """The probe's reason for not passing with the key this process holds.
+
+        Empty once the probe has passed for this key. After that the listener
+        is what reads the provider, and its own failure carries its own reason.
+        """
+        if self.probe_passed:
+            return ""
+        try:
+            probe = run_adapter(self.settings, self.key, "probe", {}, timeout=30)
+        except Exception as exc:
+            return str(exc)[:300]
+        if probe.get("ready"):
+            self.probe_passed = True
+            return ""
+        return str(probe.get("reason") or "the probe gave no reason")[:300]
 
     def pump(self, inbox):
         path = self.settings.adapter_path()

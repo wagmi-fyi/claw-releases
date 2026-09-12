@@ -134,6 +134,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
   || { printf 'no agents-plane.sh beside this script\n' >&2; exit 1; }
 . "${SCRIPT_DIR}/agents-plane.sh"
 
+# The one test for whether an account is a person, which every rail on the claw
+# reads. This door refuses a name a system account holds and verifies the
+# account it made, and both answers come from there.
+# shellcheck source=person.sh
+[ -r "${SCRIPT_DIR}/person.sh" ] \
+  || { printf 'no person.sh beside this script\n' >&2; exit 1; }
+. "${SCRIPT_DIR}/person.sh"
+
 TOKEN_DOOR="${SCRIPT_DIR}/install-agents-token.sh"
 
 # The contract with the provisioning plane. Phase 8 writes these exact values.
@@ -142,6 +150,8 @@ CONVENTIONS="/etc/commonclaw/workspace-conventions.md"
 CONVENTION_POINTER="Workspace conventions for this claw: read ${CONVENTIONS} before working under ${WORKSPACE_ROOT}."
 ADMIN_LOG="/etc/commonclaw/admin-log.md"
 MEMBERS_GROUP="claw-members"
+# Every person is in this one too. It owns the claw's session bus.
+BUS_GROUP="claw-bus"
 CLAW_BRIEFING="${WORKSPACE_ROOT}/CLAUDE.md"
 
 # Phase 8 writes these same three settings, into the same absence.
@@ -300,7 +310,8 @@ esac
 # leaving a half-made account behind.
 if getent passwd "$PERSON" >/dev/null 2>&1; then
   existing_uid="$(id -u "$PERSON" 2>/dev/null || echo 0)"
-  if [ "$existing_uid" -lt 1000 ]; then
+  person_rc=0; cc_is_person "$PERSON" || person_rc=$?
+  if [ "$person_rc" -eq 1 ]; then
     say "'${PERSON}' is a system account on this claw (uid ${existing_uid}). Choose another name."
   else
     say "'${PERSON}' already exists on this claw (uid ${existing_uid})."
@@ -437,6 +448,11 @@ getent group "$MEMBERS_GROUP" >/dev/null 2>&1 || {
   say "Provisioning creates the group in the same phase that creates that file. Run the provisioning plane rather than creating it here."
   exit 1
 }
+getent group "$BUS_GROUP" >/dev/null 2>&1 || {
+  say "no ${BUS_GROUP} group on this claw, so a person made here could never post on the claw's session bus."
+  say "Provisioning creates the group. Run the provisioning plane rather than creating it here."
+  exit 1
+}
 
 # The caller behind sudo, not root. A person appearing on a machine is recorded
 # with who let them in, and "root" would record nothing.
@@ -473,6 +489,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   say "  would stamp the claw-briefing pointer into ${PER_TASK_CORE_FILE} alone"
   say "  would set their git identity to ${FULL_NAME} <${EMAIL}>, and refuse a guessed one"
   say "  would add ${PERSON} to ${MEMBERS_GROUP}, which owns ${CLAW_BRIEFING} and nothing else"
+  say "  would add ${PERSON} to ${BUS_GROUP}, which owns the claw's session bus and nothing else"
   if [ "$AGENTS_CRED" -eq 0 ]; then
     say "  would add ${PERSON} to NO credential group: --no-agents-cred was passed, so this person resolves nothing by decision"
   else
@@ -557,6 +574,11 @@ done
 # works here. The group is the only thing that makes that file theirs.
 gpasswd -a "$PERSON" "$MEMBERS_GROUP" >/dev/null
 
+# Their sessions join the claw's session bus when they start, and the bus group
+# is what lets a session post there. Without it they reach no bus until the next
+# provisioning run.
+gpasswd -a "$PERSON" "$BUS_GROUP" >/dev/null
+
 # ------------------------------------------------ the credential group grant
 #
 # ITS OWN STEP, AND ITS OWN LINE OF OUTPUT. This is the grant that decides
@@ -633,7 +655,7 @@ fi
 say ""
 say "=== VERIFY ==="
 
-if getent passwd "$PERSON" >/dev/null 2>&1 && [ "$(id -u "$PERSON")" -ge 1000 ]; then
+if cc_is_person "$PERSON"; then
   ok "account ${PERSON} exists at uid $(id -u "$PERSON")"
 else
   bad "account ${PERSON} does not exist, or is not a person's uid"
@@ -783,6 +805,10 @@ groups_text=" $(id -nG "$PERSON" 2>/dev/null || true) "
 case "$groups_text" in
   *" ${MEMBERS_GROUP} "*) ok "${PERSON} is in ${MEMBERS_GROUP}, so ${CLAW_BRIEFING} is theirs to write at their next login" ;;
   *) bad "${PERSON} is not in ${MEMBERS_GROUP} -- they could read the claw's own briefing and never write it" ;;
+esac
+case "$groups_text" in
+  *" ${BUS_GROUP} "*) ok "${PERSON} is in ${BUS_GROUP}, so their sessions post on the claw's session bus from their next login" ;;
+  *) bad "${PERSON} is not in ${BUS_GROUP} -- their sessions would join no bus" ;;
 esac
 
 # The join above adds a group to somebody. These say what that group is worth,

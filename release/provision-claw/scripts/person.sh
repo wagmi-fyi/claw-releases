@@ -9,22 +9,28 @@
 #                         core read in the classifier
 #   provision-claw.sh     the people set on an update, which the people phase,
 #                         the per-person core phase and the wake-rail phase all
-#                         iterate, and the step in the people phase that takes
-#                         back what an earlier release gave an account that is
-#                         not a person
+#                         iterate, and the two steps in the people phase that
+#                         take back what an earlier release gave an account that
+#                         is not a person and move that account to the bus group
+#   onboard-person.sh     the refusal of a name a system account holds, and the
+#                         verify that the account it made is a person
+#   install-agents-token.sh
+#                         the search for a person to prove the token as, and for
+#                         per-home copies of the token
 #
 # It is one file for the reason version-compare.sh is one file. A second copy of
 # the test would drift, and the answer it would drift on is who gets a core, a
 # credential grant and a wake-rail unit.
 #
-# WHY THE UID AND NOT THE GROUP. `claw-members` holds every person on the claw,
-# and it also holds the claw's own services. The mail service's account is in it
-# because the bus directory belongs to that group and a process outside the
-# group cannot post a bus message. So membership says who may write to the bus.
-# It does not say who is a person, and three rails read it as if it did: the
-# updater deferred every release on a claw with the mail service, and the second
-# apply of 1.5.1 gave that account a core, a credential loader, the group that
-# reads the claw's broker token, and a wake-rail unit.
+# WHY THE UID AS WELL AS THE GROUP. `claw-members` holds people alone. Services
+# that post on the bus are in `claw-bus`, and the people phase moves any service
+# it finds in `claw-members` there. The group is the first check and the uid is
+# the second, because one group once answered both questions: 1.5.1 put the mail
+# service's account in `claw-members` to reach the bus, the updater deferred
+# every release on that claw, and the second apply gave the account a core, a
+# credential loader, the group that reads the claw's broker token, and a
+# wake-rail unit. A group is written by whoever runs `gpasswd`. The uid is what
+# the machine handed the account when it made it.
 #
 # The uid says it. The machine hands a login account a uid inside the range
 # /etc/login.defs states, UID_MIN to UID_MAX, which is 1000 to 60000 on Ubuntu.

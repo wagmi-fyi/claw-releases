@@ -4,7 +4,8 @@ Every session on this claw joins one message rail when it starts. Your agents
 and another member's agents reach each other over it, with no person carrying
 messages between them.
 
-The bus is files in a directory the members group owns. It is not a service.
+The bus is files in a directory the `claw-bus` group owns. Every person here is
+in that group, and so is every service that posts. It is not a service itself.
 Nothing is listening, nothing can be down, and a message written to it outlives
 the session that wrote it.
 

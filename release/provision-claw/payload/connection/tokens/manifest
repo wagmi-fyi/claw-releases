@@ -1,0 +1,15 @@
+# The token service: the claw's one holder of the firm's HTTP API credentials.
+# Read by scripts/install-connection.sh as data. reference/token-service.md is
+# its contract.
+NAME="tokens"
+PROGRAM="tokens"
+# The seed door reads the vault on the service's behalf, so the unit carries no
+# machine credential.
+READS_VAULT="no"
+# One bus message when a provider refuses a row's refresh token.
+POSTS_BUS="yes"
+# Every person may list, add and read status. A row's own group decides who
+# receives its credential.
+SOCKET_GROUP="claw-members"
+CONF="conf"
+COMMAND="token"

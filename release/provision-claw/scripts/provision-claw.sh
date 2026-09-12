@@ -110,9 +110,11 @@
 # commonclaw-stall-check.sh with its conf and two units from ../templates; and
 # phase 24 runs install-bus-nudge.sh, which reads ../payload and ../templates
 # for itself; and phase 25 runs install-email-gatekeeper.sh, which reads
-# ../payload/email-gatekeeper and ../templates for itself. Copy the whole skill
-# directory to the claw. A missing sibling fails the run rather than being
-# skipped.
+# ../payload/email-gatekeeper and ../templates for itself; and phase 26 runs
+# install-connection.sh for each name in ../payload/connection/connections.list,
+# and that script reads ../payload/connection and ../templates for itself. Copy
+# the whole skill directory to the claw. A missing sibling fails the run rather
+# than being skipped.
 #
 # IDEMPOTENCY. Safe to re-run; reasoned per phase:
 #   1  preflight     read-only.
@@ -129,8 +131,8 @@
 #                    known template generation byte for byte, so the second run
 #                    finds every one of them already current and writes nothing.
 #                    A member-authored briefing is never written at all.
-#                    groupadd -f for the members group and for the credential
-#                    group. The CLAW-WIDE briefing is
+#                    groupadd -f for the members group, the credential group
+#                    and the bus group. The CLAW-WIDE briefing is
 #                    seeded only into an absence; where it exists its bytes are
 #                    never touched and only its group and mode converge.
 #   8  users         useradd guarded; each key line, each home symlink, and each
@@ -140,7 +142,9 @@
 #                    VALUE: the claw's agents token is a file a door writes, and
 #                    this phase reads its mode and never its contents. The git
 #                    identity is written into an absence, so a chosen address
-#                    survives every re-run.
+#                    survives every re-run. An account in the members group
+#                    that is not a person moves to the bus group once; a second
+#                    run finds none.
 #   9  codex         skipped when the installed version is AT OR ABOVE the floor.
 #                    When it does install it replaces the binaries; a running
 #                    session keeps its handle, a new exec takes the new binary.
@@ -175,7 +179,9 @@
 #                    member needs for both the bus and the claw's agents token,
 #                    so the phase reads it back as the member rather than
 #                    inferring it. The bus home and the programs are overwritten;
-#                    handles on the board are not.
+#                    handles on the board are not. The bus tree moves to the bus
+#                    group with its modes kept, and the count says how many
+#                    paths moved; a second run moves none.
 #   17 runtimes      the roots, the PATH drop-in and the member doc are written
 #                    to an end state. The convergence installs only what a
 #                    manifest declares, only what the member-plane log already
@@ -220,6 +226,12 @@
 #                    once, never rewritten: it carries this firm's own address
 #                    and its own routing decisions. NO CREDENTIAL VALUE: the
 #                    provider key is a reference resolved at start.
+#   26 connections   install-connection.sh owns the act and is called once per
+#                    shipped connection. It adopts the conf and the env, mints a
+#                    data key only into an absence, and restarts a service only
+#                    when what it runs changed, so a second run changes nothing.
+#                    NO CREDENTIAL VALUE: the data key goes from the kernel into
+#                    systemd-creds on a descriptor and rests sealed.
 #   18 authority     the registry is STATE and is seeded once, never rewritten:
 #                    it is the firm's own record of who may approve an act here,
 #                    and it moves only by somebody signing for the change. The
@@ -581,11 +593,24 @@ WRAPPER_SHA256="95a492ed7f583208f3f8c048865a8ce5cfe30db504a91711a37649759d3a6aa4
 # sessions' own working substrate.
 #
 # WHAT IT CARRIES DEPENDS ON WIDE MODE, and on nothing else. With wide mode off
-# it carries no privilege at all: no sudoers file names it and it owns exactly
-# one path, which phase 8 proves rather than states. With wide mode on, phase 19
+# it carries no privilege at all: no sudoers file names it, and it owns exactly
+# one path, which phase 16 proves rather than states. With wide mode on, phase 19
 # writes the ONE file that names it, and phase 8 still refuses every other one.
 # A group that owns one file carries what that file carries.
+#
+# IT HOLDS PEOPLE AND NOTHING ELSE. Wide mode grants root to this group, and the
+# people phases read it as the claw's people, so a service in it would be handed
+# both. A service joins the bus group below instead.
 MEMBERS_GROUP="claw-members"
+
+# The group that may write on the claw's session bus: every person, and every
+# service that posts there. It owns the bus tree and nothing else.
+#
+# A SECOND GROUP BECAUSE THERE ARE TWO QUESTIONS. "Who is a person" and "who may
+# post a bus message" have different answers as soon as a service posts, and one
+# group answering both enrolled the mail service as a person. Phase 7 creates
+# this group, phase 8 enrols into it, and phase 16 hands it the bus.
+BUS_GROUP="claw-bus"
 
 # WIDE MODE'S DROP-IN. One fixed name, so turning the switch on and off is
 # idempotent in both directions: the phase either lays this path or removes it,
@@ -625,10 +650,11 @@ CODEX_MACHINE_SKILLS="/etc/codex/skills"
 # the homes apart, which is what homes are for.
 #
 # THE MESSAGES ARE VISIBLE TO EVERY MEMBER, BY DESIGN. The bus home is group
-# `claw-members` and group-writable, so anybody with a login here reads every
-# inbox on it. That is the trust plane this claw already runs on and not a
-# weakening of it. The standing law is unchanged and applies here in full: a
-# credential never goes in a message body. See ${BUS_DOC}.
+# `claw-bus` and group-writable, and every person and every service that posts
+# is in that group, so each of them reads every inbox on it. That is the trust
+# plane this claw already runs on and not a weakening of it. The standing law is
+# unchanged and applies here in full: a credential never goes in a message body.
+# See ${BUS_DOC}.
 STATE_ROOT="/var/lib/commonclaw"
 BUS_HOME="${STATE_ROOT}/bus"
 BUS_DOC="${ETC_ROOT}/session-bus.md"
@@ -1419,7 +1445,7 @@ phase_1_preflight() {
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
            core-version.sh person.sh commonclaw-update.sh agents-plane.sh \
            commonclaw-memory-check.sh commonclaw-notify.sh \
-           commonclaw-stall-check.sh install-bus-nudge.sh \
+           commonclaw-stall-check.sh install-bus-nudge.sh unit-groups.sh \
            check-git-conventions.sh install-heartbeat-url.sh unit-health.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
@@ -1539,6 +1565,42 @@ phase_1_preflight() {
       || missing_payload="$missing_payload ../payload/email-gatekeeper/email-gatekeeper-adapters/${s}"
   done
   for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json; do
+    [ -r "${TEMPLATE_DIR}/${t}" ] || missing_payload="$missing_payload ../templates/${t}"
+  done
+  # The connection scaffold's own siblings. `install-connection.sh` is called
+  # from phase 26 and reads ../payload/connection and ../templates for itself,
+  # so a missing one turns a phase into a refusal rather than a silent skip. The
+  # list is how the phase knows which connections a release ships, so a stage
+  # without it cannot say.
+  [ -r "${SCRIPT_DIR}/install-connection.sh" ] \
+    || missing_payload="$missing_payload install-connection.sh"
+  [ -r "${PAYLOAD_DIR}/connection/connections.list" ] \
+    || missing_payload="$missing_payload ../payload/connection/connections.list"
+  # EACH MODULE BY NAME, for the wake rail's reason: a present-but-short
+  # library passes a directory test while every service fails at its import.
+  for s in __init__ __main__ audit door health ladder log settings store vault \
+           tokens_client mcp_storage http_auth; do
+    [ -r "${PAYLOAD_DIR}/connection/lib/commonclaw_connection/${s}.py" ] \
+      || missing_payload="$missing_payload ../payload/connection/lib/commonclaw_connection/${s}.py"
+  done
+  # The token service, the first connection the list names. The installer
+  # refuses its manifest mid-phase when a file the manifest names is missing, so
+  # each is named here. The seed door and the laptop helper are named because
+  # `token add` sends a person to both, and nothing else on the claw checks them:
+  # the helper is laid in the claw's doc directory by install-bus-nudge.sh.
+  [ -r "${PAYLOAD_DIR}/connection/tokens/manifest" ] \
+    || missing_payload="$missing_payload ../payload/connection/tokens/manifest"
+  [ -r "${PAYLOAD_DIR}/connection/tokens/tokens" ] \
+    || missing_payload="$missing_payload ../payload/connection/tokens/tokens"
+  [ -r "${PAYLOAD_DIR}/connection/tokens/token" ] \
+    || missing_payload="$missing_payload ../payload/connection/tokens/token"
+  [ -r "${PAYLOAD_DIR}/connection/tokens/conf" ] \
+    || missing_payload="$missing_payload ../payload/connection/tokens/conf"
+  [ -r "${SCRIPT_DIR}/install-provider-seed.sh" ] \
+    || missing_payload="$missing_payload install-provider-seed.sh"
+  [ -r "${PAYLOAD_DIR}/doc/token-helper.py" ] \
+    || missing_payload="$missing_payload ../payload/doc/token-helper.py"
+  for t in commonclaw-conn.service commonclaw-conn.socket; do
     [ -r "${TEMPLATE_DIR}/${t}" ] || missing_payload="$missing_payload ../templates/${t}"
   done
   # At least one RETIRED generation, and this one is not tidiness.
@@ -2139,6 +2201,7 @@ claw_briefing() {
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would create group ${MEMBERS_GROUP}"
     say "  would create group ${CC_AGENTS_GROUP}, the read boundary on ${CC_AGENTS_TOKEN}"
+    say "  would create group ${BUS_GROUP}, the write boundary on ${BUS_HOME}"
     if [ -e "$CLAW_BRIEFING" ]; then
       say "  would keep ${CLAW_BRIEFING} byte for byte, and set it root:${MEMBERS_GROUP} 0664"
     else
@@ -2168,6 +2231,14 @@ claw_briefing() {
   # exist, and the people join in phase 8 and in the onboarding door.
   groupadd -f --system "$CC_AGENTS_GROUP" 2>/dev/null || groupadd -f "$CC_AGENTS_GROUP"
   check "group ${CC_AGENTS_GROUP} exists" getent group "$CC_AGENTS_GROUP"
+
+  # THE BUS GROUP, made here for the same reason, and before the phase that lays
+  # the bus. Phase 8 enrols into it and runs before phase 16, so a group made in
+  # phase 16 would reach phase 8 absent on the first apply that carries it. It
+  # holds every person and every service that posts a bus message; the members
+  # group above holds people alone.
+  groupadd -f --system "$BUS_GROUP" 2>/dev/null || groupadd -f "$BUS_GROUP"
+  check "group ${BUS_GROUP} exists" getent group "$BUS_GROUP"
 
   if [ -e "$CLAW_BRIEFING" ]; then
     say "  keeping ${CLAW_BRIEFING} -- its content belongs to the people here"
@@ -2531,7 +2602,7 @@ take_back_non_people() {
     uid="$(printf '%s\n' "$row" | cut -d: -f3)"
     home="$(printf '%s\n' "$row" | cut -d: -f6)"
     if [ "$uid" = "0" ]; then
-      warn "root is in ${MEMBERS_GROUP}. Nothing is taken back from root's home; take root out of the group by hand"
+      warn "root is in ${MEMBERS_GROUP}. Nothing is taken back from root's home; the move below takes root out of the group"
       continue
     fi
 
@@ -2569,6 +2640,54 @@ take_back_non_people() {
     say "  would take back ${TB_TOOK} item(s) from ${n} account(s) that are not people by uid:${accts}"
   else
     ok "took back ${TB_TOOK} item(s) from ${n} account(s) that are not people by uid:${accts}. Nothing else in their homes was touched"
+  fi
+  return 0
+}
+
+# THE MOVE: an account in the members group that is not a person leaves it for
+# the bus group.
+#
+# The members group holds people alone. Wide mode grants it root, and the people
+# phases read it as the claw's people. A service that posts on the bus needs the
+# bus group and nothing else. Releases before this one put the mail service's
+# account in the members group, because that group owned the bus then.
+#
+# AFTER THE TAKE-BACK, which finds its accounts in the members group. Run first,
+# this step would hide them from it.
+#
+# INTO THE BUS GROUP FIRST, and out of the members group second, so an account
+# that posts is never in neither. With no bus group, nobody moves.
+#
+# A process already running as the account keeps the groups it started with.
+# The installer that owns its unit restarts it. This step restarts nothing.
+move_non_people_to_bus() {
+  local acct rc moved="" n=0
+  if ! getent group "$BUS_GROUP" >/dev/null 2>&1; then
+    bad "there is no ${BUS_GROUP} group, so no account that is not a person was moved out of ${MEMBERS_GROUP} -- phase 7 creates it, and this run skipped it"
+    return 0
+  fi
+  while IFS= read -r acct; do
+    [ -n "$acct" ] || continue
+    rc=0; cc_is_person "$acct" || rc=$?
+    [ "$rc" -eq 1 ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      say "  would move ${acct} from ${MEMBERS_GROUP} to ${BUS_GROUP}: it is not a person by uid"
+    elif gpasswd -a "$acct" "$BUS_GROUP" >/dev/null 2>&1 \
+         && gpasswd -d "$acct" "$MEMBERS_GROUP" >/dev/null 2>&1; then
+      say "  moved ${acct} from ${MEMBERS_GROUP} to ${BUS_GROUP}: it is not a person by uid, and it keeps its place on the bus"
+    else
+      bad "could not move ${acct} from ${MEMBERS_GROUP} to ${BUS_GROUP}"
+      continue
+    fi
+    moved="${moved} ${acct}"; n=$((n+1))
+  done < <(cc_group_members "$MEMBERS_GROUP")
+
+  if [ "$n" -eq 0 ]; then
+    ok "every member of ${MEMBERS_GROUP} is a person by uid, so no account was moved to ${BUS_GROUP}"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    say "  would move ${n} account(s) from ${MEMBERS_GROUP} to ${BUS_GROUP}:${moved}"
+  else
+    ok "moved ${n} account(s) that are not people by uid from ${MEMBERS_GROUP} to ${BUS_GROUP}:${moved}"
   fi
   return 0
 }
@@ -2624,6 +2743,14 @@ phase_8_users() {
       gpasswd -a "$user" "$MEMBERS_GROUP" >/dev/null 2>&1 || true
     else
       bad "group ${MEMBERS_GROUP} does not exist -- phase 7 creates it, and this run skipped it"
+    fi
+
+    # And the bus group, which is what lets their sessions post a bus message.
+    # A person is in both groups; a service is in this one alone.
+    if getent group "$BUS_GROUP" >/dev/null 2>&1; then
+      gpasswd -a "$user" "$BUS_GROUP" >/dev/null 2>&1 || true
+    else
+      bad "group ${BUS_GROUP} does not exist -- phase 7 creates it, and this run skipped it"
     fi
 
     # THE CREDENTIAL PLANE: the group grant, then the loader. Neither is a
@@ -2688,9 +2815,10 @@ phase_8_users() {
   say "  people: ${#PEOPLE[@]} across ${#USERS[@]} keys   accounts created: $created   already present: $existing"
 
   # The other half of the people read: what an earlier release gave a member of
-  # the group that is not a person. Above the dry-run return, so a dry run names
-  # what it would take.
+  # the group that is not a person, and then the account itself, which moves to
+  # the bus group. Above the dry-run return, so a dry run names both.
   take_back_non_people
+  move_non_people_to_bus
   [ "$DRY_RUN" -eq 1 ] && return 0
 
   local all_ok=1
@@ -2710,6 +2838,10 @@ phase_8_users() {
     case "$user_groups" in
       *" ${MEMBERS_GROUP} "*) : ;;
       *) bad "$user is not in ${MEMBERS_GROUP} -- ${CLAW_BRIEFING} would be readable and not writable for them"; all_ok=0 ;;
+    esac
+    case "$user_groups" in
+      *" ${BUS_GROUP} "*) : ;;
+      *) bad "$user is not in ${BUS_GROUP} -- their sessions could not post a bus message"; all_ok=0 ;;
     esac
     if [ -L "${home}/workspaces" ] && [ "$(readlink "${home}/workspaces")" = "$WORKSPACE_ROOT" ]; then :
     else bad "${home}/workspaces is not a symlink to ${WORKSPACE_ROOT}"; all_ok=0; fi
@@ -2806,9 +2938,9 @@ phase_8_users() {
   # between a report and a claim.
   if [ "$all_ok" -eq 1 ]; then
     if [ "${#USERS[@]}" -gt 0 ]; then
-      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them; every key present exactly once"
+      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP} and ${BUS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them; every key present exactly once"
     else
-      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them. The key-uniqueness leg is build-only and did NOT run on this update"
+      ok "every person: home 750, authorized_keys 600, no sudo, in ${MEMBERS_GROUP} and ${BUS_GROUP}, workspaces symlink, one conventions pointer per core, the claw-briefing pointer once in ${PER_TASK_CORE_FILE} and absent from ${PERSISTENT_CORE_FILE}, in ${CC_AGENTS_GROUP}, the credential loader at 0700/0600 with one hook and no token in the home, a git identity git itself reads with useConfigOnly true and none above them. The key-uniqueness leg is build-only and did NOT run on this update"
     fi
   fi
 
@@ -2869,19 +3001,19 @@ phase_8_users() {
   # WHAT THE MEMBERS GROUP DOES NOT CARRY, measured rather than asserted.
   #
   # Everybody on the claw is in this group, so anything it reached would be
-  # reached by everybody. Two readings say it carries no grant and owns only
-  # what this release declares. Both fail branches are reachable: a sudoers file
-  # naming the group trips the first, and any UNDECLARED group-owned path trips
-  # the second.
+  # reached by everybody. This reading says it carries no grant beyond the one
+  # wide mode lays. A sudoers file naming the group trips it.
   #
-  # `|| true` on the first reading, and it is not decoration. Under `set -e`
-  # with `pipefail` a grep that matches NOTHING exits 1, and that is the PASSING
+  # WHAT THE GROUP OWNS IS READ IN PHASE 16, after the bus tree moves to the bus
+  # group. Read here, the first apply that carries the move would find the bus
+  # still under this group and fail on a tree the same run moves eight phases
+  # later.
+  #
+  # `|| true` on the reading, and it is not decoration. Under `set -e` with
+  # `pipefail` a grep that matches NOTHING exits 1, and that is the PASSING
   # world here, so without it the run dies at the exact moment the group is
   # clean and writes zero bytes of JSON. Measured on staging, not reasoned: that
-  # check's pass branch was the unreachable one. The second reading needs no
-  # such guard: its `find` sits in a process substitution whose exit status the
-  # `while` never consumes, so a permission-denied walk cannot kill the run
-  # either.
+  # check's pass branch was the unreachable one.
   #
   # WIDE MODE MOVES WHAT THIS READING EXPECTS AND DOES NOT SUSPEND IT. With the
   # switch on, ONE file may name the group and it is the one phase 19 owns. Every
@@ -2907,82 +3039,15 @@ phase_8_users() {
     fi
   fi
 
-  # WHERE OWNERSHIP IS A GRANT, and nowhere else. The pruned trees are pruned
-  # for a reason each, not for speed:
-  #   /proc /sys /dev /run   pseudo filesystems, and -xdev would not do this job
-  #                          -- it stops at the root filesystem and would miss a
-  #                          separately mounted /home.
-  #   /tmp /var/tmp          already world-writable at 1777, so group ownership
-  #                          there confers nothing beyond what the directory
-  #                          already confers on everybody.
-  #   /home                  every home is 0750, so nobody outside it traverses
-  #                          in, and a group on a file inside one reaches nobody.
-  #
-  # Measured on staging 2026-08-11, and this is why the exclusions exist: the
-  # first form of this check scanned everything and went RED because a byte copy
-  # of the briefing taken with `cp -p` kept its group. A run that fails for an
-  # act with no consequence is the seat-check lesson again -- a warning that
-  # fires on a healthy claw teaches its reader to ignore the one that matters.
-  #
-  # PRUNED RATHER THAN LISTED. An allowlist of system roots would silently stop
-  # covering a top-level directory somebody adds later. The exclusions are the
-  # trees where the property provably does not hold, so everything else stays in
-  # scope by default.
-  #
-  # WHAT THE RELEASE DECLARES THIS GROUP MAY OWN. Two entries, and the check
-  # compares against them rather than against one hardcoded path:
-  #   ${CLAW_BRIEFING}   one file, laid 0664 root:${MEMBERS_GROUP} by phase 7.
-  #   ${BUS_HOME}        the shared bus, laid 2770 setgid root:${MEMBERS_GROUP}
-  #                      by phase 16, AND EVERYTHING UNDER IT.
-  #
-  # WHY THIS CHANGED. The earlier form asserted the group owned EXACTLY ONE path
-  # anywhere. Phase 16 of the same release creates the bus group-owned, and
-  # phase 8 runs before phase 16, so a first apply passed on a box with no bus
-  # yet and every apply after it failed on the bus the previous run left. That
-  # is not the group reaching something it should not. It is the release's own
-  # artifact, working as designed, measured by a check whose premise stopped
-  # being true when the bus shipped.
-  #
-  # THE BUS IS A TREE AND NOT A PATH, and that is not a convenience. The home is
-  # setgid, so every file written there carries the group by design, and the set
-  # GROWS WITH TRAFFIC: one cursor and one inbox per handle that ever registers,
-  # plus the board, the lock and the log. A declaration naming the directory
-  # alone would pass provisioning and go red at the first `bus init`.
-  #
-  # ACCEPTING THE SUBTREE GRANTS NOTHING THE DIRECTORY DOES NOT ALREADY GRANT.
-  # ${BUS_HOME} is 2770 and group-writable, so a member already creates, reads
-  # and removes files under it. This is the same reasoning the /tmp exclusion
-  # above rests on, applied to a directory this release lays on purpose.
-  #
-  # DECLARED, NOT PRUNED, and the difference is the whole point. Pruning
-  # ${STATE_ROOT} would stop sweeping a tree where the property still matters: a
-  # group-owned file sitting BESIDE the bus under ${STATE_ROOT} is exactly the
-  # quiet grant this check exists to find, and it is still found. Only the bus
-  # subtree is forgiven, and only because the release lays it.
-  #
-  # ONE-DIRECTIONAL, deliberately. A declared path that is ABSENT is not a
-  # failure here. Phase 8 runs before phase 16, so on a first build the bus does
-  # not exist and the briefing is all there is. The property this check defends
-  # is that nothing UNDECLARED carries the group, and an absence cannot violate
-  # it. Each declared path's own existence and mode is checked by the phase that
-  # lays it, which is where that check belongs.
-  #
-  # NO REGEX ON A PATH. The declared entries are matched with `case` against
-  # quoted variables, which compares literally. A grep -v of "^${BUS_HOME}/"
-  # would treat the path as a pattern, and a declared path is data.
-  local undeclared="" swept=""
-  while IFS= read -r swept; do
-    case "$swept" in
-      "$CLAW_BRIEFING"|"$BUS_HOME"|"$BUS_HOME"/*) continue ;;
-    esac
-    undeclared="${undeclared}${swept} "
-  done < <(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \
-                     -o -path /tmp -o -path /var/tmp -o -path /home \) -prune \
-             -o -group "$MEMBERS_GROUP" -print 2>/dev/null | LC_ALL=C sort)
-  if [ -z "${undeclared// /}" ]; then
-    ok "${MEMBERS_GROUP} owns only what this release declares: ${CLAW_BRIEFING}, and ${BUS_HOME} with its contents"
+  # THE BUS GROUP CARRIES NO GRANT, whatever wide mode says. It holds the
+  # services that post on the bus, and a service is not staff. Read as the group
+  # a grant names, so a script path that happens to contain the word is not a
+  # hit.
+  grants="$(grep -rlsF "%${BUS_GROUP}" "$SUDOERS_MAIN" "${SUDOERS_DIR}/" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ' || true)"
+  if [ -z "${grants// /}" ]; then
+    ok "no sudoers file names ${BUS_GROUP}: the group that holds the claw's services carries no grant"
   else
-    bad "${MEMBERS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${undeclared}-- declared: ${CLAW_BRIEFING} and the ${BUS_HOME} tree"
+    bad "sudoers file(s) name ${BUS_GROUP}: ${grants}-- that group holds services, and a service carries no grant on this claw"
   fi
 
   human "each person completes their own core logins in their own home"
@@ -4477,24 +4542,186 @@ TIMEOF
 
 # ---------------------------------------------------------------- phase 16
 
+# THE BUS TREE MOVES TO THE BUS GROUP, and its modes come back as they were.
+#
+# Two things carry a group under the bus home, and a move has to reach both. The
+# owning group of every path is one. The ACL is the other: the default ACL this
+# phase sets on the home is copied onto every file and directory created under
+# it, so each one carries a named entry for the group that owned the bus when it
+# was made. A chgrp alone would leave the members group holding the whole bus
+# through those entries.
+#
+# ONE DUMP, ONE RENAME, ONE RESTORE. getfacl writes the tree's owner, group,
+# setgid bit and every ACL entry. The rename changes the owning group of every
+# path to the bus group, and every entry naming the members group to name the
+# bus group, and nothing else. setfacl --restore writes the dump back, so every
+# mode, owner, flag and entry permission returns exactly as it was read.
+#
+# An entry that would duplicate one already naming the bus group is dropped, so
+# a path somebody fixed by hand does not make the restore refuse.
+#
+# _bus_regroup_awk <count|rewrite> ; reads a getfacl dump on stdin
+_bus_regroup_awk() {
+  awk -v mode="$1" -v old="$MEMBERS_GROUP" -v new="$BUS_GROUP" '
+    function flush(   i, line, ch, pre, keep) {
+      if (n == 0) return
+      ch = 0; delete have
+      for (i = 1; i <= n; i++) {
+        if (index(L[i], "group:" new ":") == 1) have["a"] = 1
+        if (index(L[i], "default:group:" new ":") == 1) have["d"] = 1
+      }
+      for (i = 1; i <= n; i++) {
+        line = L[i]; keep = 1
+        if (index(line, "# group: ") == 1) {
+          if (substr(line, 10) != new) { line = "# group: " new; ch = 1 }
+        } else if (index(line, "group:" old ":") == 1) {
+          ch = 1
+          if (have["a"]) keep = 0
+          else line = "group:" new ":" substr(line, length("group:" old ":") + 1)
+        } else if (index(line, "default:group:" old ":") == 1) {
+          ch = 1
+          if (have["d"]) keep = 0
+          else line = "default:group:" new ":" substr(line, length("default:group:" old ":") + 1)
+        }
+        if (keep) out[++m] = line
+      }
+      if (ch) moved++
+      if (mode == "rewrite") { for (i = 1; i <= m; i++) print out[i]; print "" }
+      n = 0; m = 0
+    }
+    /^$/ { flush(); next }
+    { L[++n] = $0 }
+    END { flush(); if (mode == "count") print moved + 0 }'
+}
+
+# bus_tree_regroup ; moves the tree and says how many paths it moved
+#
+# Two passes at most. A file written between the dump and the restore was made
+# in a directory that still carried the members group, and the second pass
+# moves it. The read-back after that is the verdict.
+bus_tree_regroup() {
+  local pass dump left total=0
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    bad "getfacl and setfacl are not both on this claw, so ${BUS_HOME} was NOT moved to ${BUS_GROUP}. Phase 3 installs them"
+    return 0
+  fi
+  for pass in 1 2; do
+    dump="$(getfacl -R -p -E "$BUS_HOME" 2>/dev/null)" || true
+    left="$(printf '%s\n' "$dump" | _bus_regroup_awk count)"
+    [ "$left" -gt 0 ] || break
+    printf '%s\n' "$dump" | _bus_regroup_awk rewrite | setfacl --restore=- 2>/dev/null || true
+    total=$((total + left))
+  done
+  if [ "$total" -eq 0 ]; then
+    say "  every path under ${BUS_HOME} already belongs to ${BUS_GROUP}, so nothing was moved"
+  else
+    say "  moved ${total} path(s) under ${BUS_HOME} to ${BUS_GROUP}, owning group and ACL entries, with their modes, owners and setgid bits kept"
+  fi
+  left="$(getfacl -R -p -E "$BUS_HOME" 2>/dev/null | _bus_regroup_awk count)"
+  if [ "$left" = "0" ]; then
+    ok "every path under ${BUS_HOME} belongs to ${BUS_GROUP}, and no ACL entry under it names ${MEMBERS_GROUP}"
+  else
+    bad "${left} path(s) under ${BUS_HOME} still carry ${MEMBERS_GROUP} or another group after the move, so the bus is not ${BUS_GROUP}'s alone"
+  fi
+  return 0
+}
+
+# WHAT EACH GROUP OWNS, measured rather than asserted, and read after the move.
+#
+# The members group owns the claw briefing and nothing else. The bus group owns
+# the bus tree and nothing else. Everybody is in the first and every service
+# that posts is in the second, so anything either one reached would be reached
+# by all of them. Any UNDECLARED path owned by either group trips its reading.
+#
+# HERE AND NOT IN THE PEOPLE PHASE, because this phase moves the bus. The people
+# phase runs first, and on the first apply that carries the move it would find
+# the bus still under the members group.
+#
+# WHERE OWNERSHIP IS A GRANT, and nowhere else. The pruned trees are pruned for
+# a reason each, not for speed:
+#   /proc /sys /dev /run   pseudo filesystems, and -xdev would not do this job
+#                          -- it stops at the root filesystem and would miss a
+#                          separately mounted /home.
+#   /tmp /var/tmp          already world-writable at 1777, so group ownership
+#                          there confers nothing beyond what the directory
+#                          already confers on everybody.
+#   /home                  every home is 0750, so nobody outside it traverses
+#                          in, and a group on a file inside one reaches nobody.
+#
+# Measured on staging 2026-08-11, and this is why the exclusions exist: the
+# first form of this check scanned everything and went RED because a byte copy
+# of the briefing taken with `cp -p` kept its group. A run that fails for an
+# act with no consequence teaches its reader to ignore the one that matters.
+#
+# PRUNED RATHER THAN LISTED. An allowlist of system roots would silently stop
+# covering a top-level directory somebody adds later.
+#
+# THE BUS IS A TREE AND NOT A PATH. The home is setgid, so every file written
+# there carries the group by design, and the set grows with traffic. Accepting
+# the subtree grants nothing the directory does not already grant: the home is
+# 2770, so a member of the group already creates, reads and removes files in
+# it. DECLARED, NOT PRUNED: a file owned by either group sitting BESIDE the bus
+# under ${STATE_ROOT} is exactly the quiet grant this reading exists to find.
+#
+# ONE WALK FOR BOTH GROUPS, printing each path's group beside it. The walk sits
+# in a process substitution whose exit status the loop never consumes, so a
+# permission-denied walk cannot kill the run.
+#
+# NO REGEX ON A PATH. The declared entries are matched with `case` against
+# quoted variables, which compares literally.
+group_ownership_sweep() {
+  local g p members_extra="" bus_extra=""
+  while IFS=$'\t' read -r g p; do
+    [ -n "$p" ] || continue
+    if [ "$g" = "$MEMBERS_GROUP" ]; then
+      case "$p" in "$CLAW_BRIEFING") continue ;; esac
+      members_extra="${members_extra}${p} "
+    elif [ "$g" = "$BUS_GROUP" ]; then
+      case "$p" in "$BUS_HOME"|"$BUS_HOME"/*) continue ;; esac
+      bus_extra="${bus_extra}${p} "
+    fi
+  done < <(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \
+                     -o -path /tmp -o -path /var/tmp -o -path /home \) -prune \
+             -o \( -group "$MEMBERS_GROUP" -o -group "$BUS_GROUP" \) -printf '%g\t%p\n' 2>/dev/null \
+             | LC_ALL=C sort)
+  if [ -z "${members_extra// /}" ]; then
+    ok "${MEMBERS_GROUP} owns only what this release declares: ${CLAW_BRIEFING}"
+  else
+    bad "${MEMBERS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${members_extra}-- declared: ${CLAW_BRIEFING} alone"
+  fi
+  if [ -z "${bus_extra// /}" ]; then
+    ok "${BUS_GROUP} owns only what this release declares: ${BUS_HOME} with its contents"
+  else
+    bad "${BUS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${bus_extra}-- declared: the ${BUS_HOME} tree alone"
+  fi
+  return 0
+}
+
 phase_16_session_bus() {
   head1 16 "the claw's shared session bus"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would converge ${STATE_ROOT} to 0755 root:root and say whether it was adopted or moved,"
-    say "  create ${BUS_HOME} 2770 root:${MEMBERS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
+    say "  move every path under ${BUS_HOME} to group ${BUS_GROUP} with its mode kept, and count them,"
+    say "  create ${BUS_HOME} 2770 root:${BUS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
     say "  register the session-start join in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
-    say "  and read a member's own traverse and write before running the join as them"
+    say "  read a member's own traverse and write before running the join as them,"
+    say "  and read that ${MEMBERS_GROUP} owns only ${CLAW_BRIEFING} and ${BUS_GROUP} only the bus"
     return 0
   fi
 
   # THE GROUP IS THE WHOLE ACCESS MODEL, so its absence is a refusal and not a
-  # warning. Creating the group here would hand the bus to a set of people
-  # nobody has decided on; `claw-members` is written where people are made.
-  if ! getent group "$MEMBERS_GROUP" >/dev/null 2>&1; then
-    bad "no ${MEMBERS_GROUP} group on this claw, so there is nobody to share a bus between -- phase 8 makes it"
-    return 0
-  fi
+  # warning. Creating it here would hand the bus to a group nobody has been put
+  # in yet: phase 7 makes it and phase 8 enrols into it, both before this phase.
+  # The members group is read too, because the move below renames it and the
+  # ownership reading measures it.
+  local g
+  for g in "$BUS_GROUP" "$MEMBERS_GROUP"; do
+    if ! getent group "$g" >/dev/null 2>&1; then
+      bad "no ${g} group on this claw, so the bus was not laid -- phase 7 makes it"
+      return 0
+    fi
+  done
 
   # ---- the state root, and the one mode that decides whether any of this works ----
   #
@@ -4544,21 +4771,28 @@ phase_16_session_bus() {
   # cross-member message fails and every one after it. The setgid bit is what
   # makes every file on this bus reachable by every member regardless of who
   # wrote it.
-  install -d -m 2770 -o root -g "$MEMBERS_GROUP" "$BUS_HOME"
+  #
+  # AN EXISTING TREE MOVES FIRST, so the count names every path this run moved,
+  # the home included. A claw laid by an earlier release has its bus under the
+  # members group. A second run finds nothing to move and says so.
+  [ -d "$BUS_HOME" ] && bus_tree_regroup
+  install -d -m 2770 -o root -g "$BUS_GROUP" "$BUS_HOME"
   chmod 2770 "$BUS_HOME"        # install -d honors the umask on some coreutils; this does not
-  check "${BUS_HOME} is 2770 root:${MEMBERS_GROUP} -- setgid, group-writable, closed to the world" \
-    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_HOME')\" = '2770 root:${MEMBERS_GROUP}' ]"
+  check "${BUS_HOME} is 2770 root:${BUS_GROUP} -- setgid, group-writable, closed to the world" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_HOME')\" = '2770 root:${BUS_GROUP}' ]"
 
   # Default ACLs, the same instrument a workspace uses. The setgid bit carries
   # the group down; it does not carry the group's WRITE bit down, and a member
   # running with a 022 umask would create files their peers cannot append to.
   if command -v setfacl >/dev/null 2>&1; then
-    setfacl -d -m "g:${MEMBERS_GROUP}:rwx" -m "g:${MEMBERS_GROUP}:rwx" "$BUS_HOME" 2>/dev/null \
+    setfacl -d -m "g:${BUS_GROUP}:rwx" -m "g:${BUS_GROUP}:rwx" "$BUS_HOME" 2>/dev/null \
       && ok "default ACL on ${BUS_HOME}: a member's umask cannot lock their peers out of a file they create" \
       || warn "could not set the default ACL on ${BUS_HOME} -- the bus still works, but a member with a 022 umask can write a file their peers cannot append to"
   else
     warn "setfacl absent, so ${BUS_HOME} has no default ACL"
   fi
+
+  group_ownership_sweep
 
   # ---- the two programs every member's session runs ----
   install -d -m 0755 -o root -g root "$CLAW_BIN"
@@ -4654,7 +4888,7 @@ phase_16_session_bus() {
     || bad "${member} CANNOT traverse ${STATE_ROOT} (it is $(stat -c '%a %U:%G' "$STATE_ROOT" 2>/dev/null || echo missing)). Nothing under it is reachable to them, the bus and the claw's agents token included. This phase sets that mode; something else moved it after."
   [ "$reach_bus" -eq 1 ] \
     && ok "${member} can enter ${BUS_HOME}" \
-    || bad "${member} CANNOT enter ${BUS_HOME} (it is $(stat -c '%a %U:%G' "$BUS_HOME" 2>/dev/null || echo missing)). Check they are in ${MEMBERS_GROUP} and that the directory is 2770 root:${MEMBERS_GROUP}."
+    || bad "${member} CANNOT enter ${BUS_HOME} (it is $(stat -c '%a %U:%G' "$BUS_HOME" 2>/dev/null || echo missing)). Check they are in ${BUS_GROUP} and that the directory is 2770 root:${BUS_GROUP}."
   [ "$reach_write" -eq 1 ] \
     && ok "${member} can write in ${BUS_HOME}, so their session can register a handle" \
     || bad "${member} CANNOT write in ${BUS_HOME}. A member who can read the bus and not write it joins nothing and reports no error of their own."
@@ -4680,7 +4914,7 @@ phase_16_session_bus() {
     local pruned
     if pruned="$(jq --arg h "$probe_handle" 'del(.[$h])' "$board")"; then
       printf '%s\n' "$pruned" > "$board"
-      chgrp "$MEMBERS_GROUP" "$board" 2>/dev/null || true
+      chgrp "$BUS_GROUP" "$board" 2>/dev/null || true
       chmod 0660 "$board" 2>/dev/null || true
     fi
   fi
@@ -6179,6 +6413,114 @@ phase_25_mail_gatekeeper() {
   fi
 }
 
+# ---------------------------------------------------------------- phase 26
+
+# APPENDED, like every phase since 15, so no phase number anybody has written
+# down moves.
+#
+# ONE INSTALLER FOR EVERY CONNECTION SERVICE. The release carries a list of the
+# connections it ships, and this phase runs install-connection.sh once for each
+# name on it. The installer owns the whole act and is called rather than
+# reimplemented, for phase 24's reason. A release that ships no connection runs
+# it for none and says so.
+#
+# TWO READINGS OVER EVERY CONNECTION ON THE CLAW, shipped by this release or by
+# an earlier one: no service account is a person or a member of the people
+# group, and every connection unit sets NoNewPrivileges. Both are properties a
+# firm relies on without being able to see, so the run reads them on every
+# apply rather than trusting the installer that wrote them.
+phase_26_connections() {
+  head1 26 "the connection services"
+
+  local list="${PAYLOAD_DIR}/connection/connections.list" names="" n
+  if [ -r "$list" ]; then
+    names="$(sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$list" | grep -v '^$' || true)"
+  else
+    bad "this release carries no ${list}, so which connections it ships is unknown"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -z "$names" ]; then
+      say "  this release ships no connection, so install-connection.sh would run for none"
+    else
+      for n in $names; do say "  would run install-connection.sh ${n}"; done
+    fi
+    say "  would read every svc- account and every commonclaw-conn- unit on this claw"
+    return 0
+  fi
+
+  if [ -z "$names" ]; then
+    ok "this release ships no connection, so install-connection.sh ran for none"
+  elif [ ! -x "${SCRIPT_DIR}/install-connection.sh" ]; then
+    bad "cannot stand the connections: ${SCRIPT_DIR}/install-connection.sh is missing or not executable"
+    return 0
+  fi
+
+  # THE VERDICT IS READ AS PHASE 25 READS ITS OWN: the exit into a variable,
+  # the JSON into a file, and a result that says "ok":false is a failure
+  # whatever the exit said.
+  local out="" rc=0 tmp_out="" health=""
+  for n in $names; do
+    rc=0
+    tmp_out="$(mktemp)"
+    COMMONCLAW_CONN_VAULT="$VAULT" COMMONCLAW_CONN_HOSTNAME="$TARGET_HOSTNAME" \
+      "${SCRIPT_DIR}/install-connection.sh" "$n" >"$tmp_out" || rc=$?
+    out="$(tail -n 1 "$tmp_out")"
+    rm -f "$tmp_out"
+    if [ -z "$out" ]; then
+      bad "install-connection.sh ${n} printed no result, so the connection ${n} is in an unknown state"
+      continue
+    elif [ "$rc" != 0 ] || printf '%s' "$out" | grep -q '"ok":false'; then
+      bad "install-connection.sh ${n} refused: ${out}"
+      continue
+    fi
+    ok "the connection ${n} is installed"
+    # NOT READY IS A NOTE AND NEVER A FAIL, for phase 22's reason: a connection
+    # nobody has wired yet is the ordinary state of a fresh claw.
+    health="$(printf '%s' "$out" | sed -n 's/.*"health":\({.*}\)}$/\1/p')"
+    warn "the connection ${n}'s health: ${health:-no health line}"
+  done
+
+  # ---- every service account on the claw ----
+  local acct accounts="" wrong=0
+  accounts="$(getent passwd | cut -d: -f1 | grep '^svc-' || true)"
+  for acct in $accounts; do
+    if cc_is_person "$acct"; then
+      bad "${acct} has a uid inside this claw's login range, so every rail reads it as a person"
+      wrong=1
+    fi
+    case $'\n'"$(cc_group_members "$MEMBERS_GROUP")"$'\n' in
+      *$'\n'"${acct}"$'\n'*)
+        bad "${acct} is in ${MEMBERS_GROUP}, the claw's people. A service account is in no people group"
+        wrong=1 ;;
+    esac
+  done
+  if [ -z "$accounts" ]; then
+    ok "this claw has no connection service account"
+  elif [ "$wrong" = 0 ]; then
+    ok "no connection service account is a person or sits in ${MEMBERS_GROUP}: $(printf '%s ' $accounts)"
+  fi
+
+  # ---- every connection unit on the claw ----
+  #
+  # THE UNIT DIRECTORY IS A VARIABLE SO THE CONTROL CAN DRIVE THIS BLOCK against
+  # a scratch root. Nothing on a claw sets it.
+  local unit_dir="${CLAW_UNIT_DIR:-/etc/systemd/system}" u units=0 loose=""
+  for u in "$unit_dir"/commonclaw-conn-*.service; do
+    [ -f "$u" ] || continue
+    units=$((units + 1))
+    grep -qx 'NoNewPrivileges=yes' "$u" || loose="${loose} $(basename "$u")"
+  done
+  if [ "$units" = 0 ]; then
+    ok "this claw has no connection unit"
+  elif [ -z "$loose" ]; then
+    ok "every connection unit sets NoNewPrivileges (${units})"
+  else
+    bad "these connection units do not set NoNewPrivileges:${loose}"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 
 # Installed HERE rather than beside `on_exit`, and the placement is deliberate.
@@ -6231,6 +6573,7 @@ if want_phase 22; then phase_22_notification_rail; fi
 if want_phase 23; then phase_23_stall_check;  fi
 if want_phase 24; then phase_24_wake_rail;    fi
 if want_phase 25; then phase_25_mail_gatekeeper; fi
+if want_phase 26; then phase_26_connections;     fi
 
 # ---------------------------------------------------------------- the record
 #

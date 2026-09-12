@@ -1,0 +1,8 @@
+# The connections this release ships, one name per line.
+#
+# Phase 26 of provision-claw.sh runs scripts/install-connection.sh once for
+# each name here. Each name has a directory beside this file holding its
+# manifest and its program. A line that starts with # is a comment.
+#
+# A release that ships none leaves this list empty, and the phase says so.
+tokens

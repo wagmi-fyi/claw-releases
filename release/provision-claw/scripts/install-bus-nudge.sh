@@ -39,8 +39,10 @@
 #
 # ADOPTION, NOT REVERSION (the Q62 doctrine). A re-run adopts what it finds.
 # An existing conf is kept as it is. An instance somebody deliberately disabled
-# stays disabled and is reported. A unit file this claw owns is converged and
-# the change is reported. Nothing here overwrites a decision a person made.
+# or masked stays off and is reported. The record under
+# /var/lib/commonclaw/bus-nudge-enabled is how this script knows it enabled
+# one. A unit file this claw owns is converged and the change is reported.
+# Nothing here overwrites a decision a person made.
 #
 # EXIT CODES. 0 the rail is standing. 1 something this script owns did not
 # take. 2 usage.
@@ -52,6 +54,12 @@ CONF="/etc/commonclaw/bus-nudge.conf"
 UNIT_DIR="/etc/systemd/system"
 MANAGED_SETTINGS="/etc/claude-code/managed-settings.json"
 ORCHESTRATE_CONF="/etc/orchestrate.conf"
+# One empty file per account whose instance this installer has enabled. It is
+# how a later run tells a person's disable from an instance nobody enabled yet.
+# Outside the backup rail's targets, like the enablement it describes: a claw
+# rebuilt from a snapshot carries neither, so its first run enables every
+# watcher.
+ENABLED_RECORD="/var/lib/commonclaw/bus-nudge-enabled"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAYLOAD_DIR="${HERE}/../payload"
 TEMPLATE_DIR="${HERE}/../templates"
@@ -105,7 +113,12 @@ done
 [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] || bad "no ${PAYLOAD_DIR}/bus-nudge-adapters — the core refuses to deliver without one, and the assembler vendors it beside the program"
 [ -r "${TEMPLATE_DIR}/wake-rail.md" ] || bad "no ${TEMPLATE_DIR}/wake-rail.md — this script owns the claw's copy of it"
 [ -r "${PAYLOAD_DIR}/doc/operator-runbook.md" ] || bad "no ${PAYLOAD_DIR}/doc/operator-runbook.md — this script owns the claw's copy of it"
+[ -r "${PAYLOAD_DIR}/doc/token-helper.py" ] || bad "no ${PAYLOAD_DIR}/doc/token-helper.py: this script owns the claw's copy of it"
+[ -r "${HERE}/unit-groups.sh" ] || bad "no ${HERE}/unit-groups.sh. It reads which groups a running watcher holds. Run this from an assembled stage"
 [ "$FAILED" = 0 ] || { printf '{"ok":false,"stage":"payload"}\n'; exit 1; }
+# unit_holds_group, shared with install-email-gatekeeper.sh.
+# shellcheck source=unit-groups.sh
+. "${HERE}/unit-groups.sh"
 
 # WHAT THE RAIL RUNS RIGHT NOW, digested before the copy and again after it.
 # An instance holds the program it started with. Replacing the file underneath a
@@ -142,9 +155,12 @@ fi
 
 # ------------------------------------------------------------- the claw's docs
 #
-# TWO FILES, ONE PLACE. `wake-rail.md` says how this rail reaches a session and
+# THREE FILES, ONE PLACE. `wake-rail.md` says how this rail reaches a session and
 # is the member's reading. `operator-runbook.md` is the operator's, and it rides
 # in the payload rather than in templates because nothing renders it.
+# `token-helper.py` is the token service's laptop helper. A person copies it
+# from here to their own computer. Members read this directory, and the
+# provisioning plane beside it is closed to them.
 #
 # WRITTEN TO AN END STATE AND REPORTED BY DIGEST, which is the law the notifier's
 # two config files already follow. They carry the release's own words rather than
@@ -154,7 +170,8 @@ fi
 # copy on the box may be one somebody edited, and a line in this output is the
 # only way anybody learns it is gone.
 for pair in "${TEMPLATE_DIR}/wake-rail.md:wake-rail.md" \
-            "${PAYLOAD_DIR}/doc/operator-runbook.md:operator-runbook.md"; do
+            "${PAYLOAD_DIR}/doc/operator-runbook.md:operator-runbook.md" \
+            "${PAYLOAD_DIR}/doc/token-helper.py:token-helper.py"; do
   src="${pair%:*}"; dst="${DOC_DIR}/${pair##*:}"
   if [ "$MODE" = dry-run ]; then ok "${DRY}install ${dst}"; continue; fi
   if [ ! -e "$dst" ]; then
@@ -331,7 +348,26 @@ for a in "${ACCOUNTS[@]}"; do
 
   # A person who turned this off turned it off. A re-run that re-enabled it
   # would make the switch a suggestion.
-  if systemctl is-enabled "bus-nudge@${a}.service" 2>/dev/null | grep -q '^disabled$'; then
+  #
+  # DELIBERATELY OFF MEANS MASKED, OR DISABLED AFTER THIS INSTALLER ENABLED IT.
+  # An instance nobody has enabled yet also answers `disabled`, so the word
+  # alone cannot tell a new person from a person who switched the rail off.
+  # A template instance has no unit file of its own to read, so this installer
+  # writes a record for each account it enables, and a disabled instance with a
+  # record is one somebody turned off. `systemctl disable --now` or `mask` is
+  # the switch. Removing the record makes the next run treat the account as new.
+  #
+  # THE ANSWER IS READ AS A WORD, never through a pipeline. `is-enabled` exits 1
+  # when it prints `disabled`, and under this script's pipefail the test
+  # `is-enabled | grep -q '^disabled$'` never matched. Every run enabled every
+  # instance, and a watcher a person had disabled came back on at the next
+  # apply. Measured against systemd 255 on the hub on 2026-09-12 (w196).
+  en_word="$(systemctl is-enabled "bus-nudge@${a}.service" 2>/dev/null || true)"
+  if [ "$en_word" = masked ]; then
+    warn "bus-nudge@${a}.service is masked and was left off"
+    continue
+  fi
+  if [ "$en_word" = disabled ] && [ -e "${ENABLED_RECORD}/${a}" ]; then
     warn "bus-nudge@${a}.service is deliberately disabled and was left off"
     continue
   fi
@@ -347,6 +383,20 @@ for a in "${ACCOUNTS[@]}"; do
     systemctl restart "bus-nudge@${a}.service" >/dev/null 2>&1
     warn "bus-nudge@${a}.service was running the rail at ${RAIL_BEFORE} and this run installed ${RAIL_AFTER}, so it was restarted onto the new bytes"
   fi
+  # A RUNNING PROCESS KEEPS THE GROUPS IT STARTED WITH, the same way it keeps
+  # its bytes. When the shared bus moves to another group, a watcher started
+  # before the move reads no inbox there and nudges nobody, and nothing in its
+  # own output says why. So its groups are read from /proc and compared with
+  # the group that owns the shared bus, and a watcher that does not hold it is
+  # restarted into the account's groups now.
+  holds=0; unit_holds_group "bus-nudge@${a}.service" "$SHARED_BUS" || holds=$?
+  if [ "$holds" -eq 1 ]; then
+    systemctl restart "bus-nudge@${a}.service" >/dev/null 2>&1
+    warn "bus-nudge@${a}.service was running without the group that owns ${SHARED_BUS}, so it could read no inbox there. It was restarted into ${a}'s groups"
+    holds=0; unit_holds_group "bus-nudge@${a}.service" "$SHARED_BUS" || holds=$?
+    [ "$holds" -ne 1 ] \
+      || bad "bus-nudge@${a}.service still runs without the group that owns ${SHARED_BUS} after its restart, so ${a} is not in that group"
+  fi
 
   # WHAT THIS COUNTS IS INSTALLED AND ENABLED, NEVER RUNNING.
   #
@@ -359,6 +409,13 @@ for a in "${ACCOUNTS[@]}"; do
   # as a note, so a person reading the output still learns it.
   check "bus-nudge@${a}.service is enabled" \
     bash -c "systemctl is-enabled 'bus-nudge@${a}.service' 2>/dev/null | grep -qx enabled"
+  # The record is written once the instance reads enabled, so it never claims
+  # an enable that did not land.
+  if [ "$(systemctl is-enabled "bus-nudge@${a}.service" 2>/dev/null || true)" = enabled ]; then
+    install -d -m 0755 -o root -g root "$ENABLED_RECORD" \
+      && : > "${ENABLED_RECORD}/${a}" \
+      || bad "could not record that bus-nudge@${a}.service was enabled, so a later disable of it may be undone"
+  fi
   check "bus-nudge@${a}.timer is enabled" \
     bash -c "systemctl is-enabled 'bus-nudge@${a}.timer' 2>/dev/null | grep -qx enabled"
   state="$(systemctl is-active "bus-nudge@${a}.service" 2>/dev/null || true)"

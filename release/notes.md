@@ -1,220 +1,192 @@
-- **A secret is now read with one command, and the token is no longer sitting in
-  your shell.** Until this release every session on a claw started with the
-  broker token in its environment. Anything that printed a variable could print
-  it, and a printed credential lands in a transcript the backup rail keeps for
-  the whole retention window. Deleting the transcript afterwards reaches none of
-  the copies. This release takes the value out of every session and puts the read
-  in one place.
+- **After this update, quit and reopen the desktop app once on each claw you
+  use.** This release moves the session bus, the message rail your agents use to
+  reach each other, to a group of its own. A program that is already running
+  keeps the access it started with. So a session you opened before the update
+  cannot post on the bus after it, and a session you open afterwards posts as
+  before. One reconnect per claw is the whole change for you, and there is no
+  period where both ways work.
 
-  **What changes for a person.** A bare `op read` stops working. Read a secret
-  with the claw's own command instead:
+  **If you run orchestrations,** respawn their delegates after the update, for
+  the same reason. A delegate started before the update cannot report on the
+  bus.
 
-  ```
-  /opt/commonclaw/bin/op-agents read "op://<vault>/<item>/<field>"
-  ```
+  **You do not have to restart anything else.** The watchers that tell a session
+  it has bus mail, and the mail service, are restarted by the update itself when
+  they need the new group.
 
-  It takes the token from the claw's file inside that one command and hands it to
-  the manager. Your shell never holds the value. Every argument goes through
-  unchanged, so anything you could type after `op` you can type after
-  `op-agents`. Without the wrapper the same read is one line:
+  **Take the update in a quiet moment,** when no orchestration is in the middle
+  of a unit. Nothing on the bus is lost or rewritten. Every message, inbox and
+  handle stays where it was.
 
-  ```
-  OP_SERVICE_ACCOUNT_TOKEN="$(cat "$COMMONCLAW_AGENTS_TOKEN_FILE")" \
-    op read "op://<vault>/<item>/<field>"
-  ```
+- **Your claw can now hold your firm's API credentials, and keep the ones that
+  renew themselves working.** Some providers hand out a login token that changes
+  each time it is renewed. When two agents renew it at once, one of them breaks
+  it. Your claw now runs one service that holds each of these credentials, renews
+  it for everybody, and hands your agents the current one. It holds a plain API
+  key the same way.
 
-  **What changes for a session.** The same thing, and nothing else. An agent
-  session is told where the token file is, in `COMMONCLAW_AGENTS_TOKEN_FILE`, and
-  is never told what is in it. That variable holds a path, so printing it,
-  grepping for it and expanding it are all safe.
+  **Adding a provider.** On the claw, type:
 
-  **There is nothing to reconnect after a rotation, and that is new.** No session
-  holds the value, so each read takes the file as it is at that moment. A session
-  you opened this morning resolves a token rotated this afternoon. Before this
-  release a rotation reached a session only when that session restarted.
+      token add <provider>/<account> --metadata <the provider's OAuth address>
 
-  **You do not have to do anything.** The apply rewrites the loader in every home
-  on the claw and installs the command. A person who had the old shape gets the
-  new one on the same run. A session you already have open keeps the value it
-  started with until you close it.
+  or `token add <provider>/<account> --key` for a plain API key. The command
+  prints the steps for that provider, with the name of the item to create in
+  your firm's password manager. Your agent can walk you through them. There are
+  three ways, and the command picks one:
 
-  **Nothing about who can read the token changed.** Membership of `agents-cred`
-  is still the whole access model, the file is still `640 root:agents-cred`, and
-  it still rests outside every path the backup rail captures. Somebody outside
-  that group still resolves nothing.
+  - **Paste** the values from the provider's own page into that item in your
+    password manager app.
+  - **Approve in your browser** with a small helper you copy from the claw and
+    run on your own computer with `uv`. It writes the item for you.
+  - **Approve through a tunnel** to the claw, for a provider that has to send you
+    back to the claw itself.
 
-  **The claw's own services changed the same way.** The memory check, the
-  notifier and the mail gatekeeper each read their token out of a file at the
-  moment they use it. None of them takes a credential out of an inherited
-  variable any more, so running one by hand under `sudo` can no longer resolve
-  with whatever token your own session was carrying.
+  Then a person with administrator rights on the claw runs the one command the
+  steps name, and the credential is in place. `token check <provider>/<account>`
+  proves it works.
 
-- **Releases stop waiting for the quiet window on a claw with the mail service,
-  and the mail service's account loses what it was given by mistake.** Your
-  claw keeps one group for everybody who works on it, and since 1.5.0 the mail
-  service's own account is in that group too, because that is how it posts to
-  the session bus. Parts of the update read the group as the list of people on
-  your claw. So they asked the mail account for its Claude Code version, found
-  none, and held every release for the 04:00 to 06:00 window. A second update
-  on the same release went further and set the mail account up like a person:
-  a Claude Code install, the file that loads your claw's credentials, access to
-  the claw's vault token, and a unit that watches for bus mail.
+  **What your agents do.** Your agents ask the service for the current token each
+  time they call the provider, through a small library already on the claw, in
+  `/opt/commonclaw/lib/python`. When the provider refuses a token, the service
+  renews it once and every agent gets the new one. A provider that stops
+  accepting the renewal shows up in `token status`, and one message goes to your
+  firm's desk.
 
-  From this release your claw tells a person from a service by the account's
-  number. People get numbers from 1000 to 60000. Services are made with numbers
-  below that. Every part of the update that means "the people on this claw" now
-  asks that question first.
+  **Who can use what.** Each credential names a group of your people. The default
+  is the people who can already read your firm's credentials, and you can narrow
+  it to one team. `token status --seeded-by <person>` lists what a person set up,
+  so when somebody leaves you know what to hand over.
 
-  **What you see on the next apply.** The people step names each thing it takes
-  back from the mail account, one line each, and says how many. The mail
-  service keeps its messages, its routing table, its logs and its settings
-  exactly as they are, and it is not restarted. A second apply takes back
-  nothing and says so. On a claw that never had the mail service, the step says
-  there is nothing to take back.
+  **The claw never prints a token.** The `token` command, the helper and the
+  administrator's command show a short fingerprint in its place. Nobody types a
+  credential into a conversation or a shell at any step.
 
-  **One more release waits, and it is this one.** Your claw decides whether to
-  wait for the window using the update program it already has. So on a claw
-  with the mail service, this release itself still waits for the window, or for
-  an operator who applies it by hand with `--now`. Releases after this one are
-  decided by the fixed program and do not wait on the mail account.
+  **How the service is built.** It runs under its own account, which is never
+  counted as a person on your claw. It answers only the people on your claw,
+  plus any account your claw's settings name. What it keeps between restarts is
+  locked with a key that opens on this machine alone, so a backup copy of it
+  opens nowhere else. The same frame will carry other services that hold a
+  credential for your firm.
 
-  **What you have to do: nothing.** The mail account stays in the shared group,
-  because it still needs to post to the bus. A process already running as the
-  mail account keeps the access it started with until it restarts. Nothing in
-  this release needs that restart.
+  **What you see on the next apply.** A new step installs the token service,
+  prints its health as a note, and checks that no service account on the claw is
+  counted as a person. The health note reads not ready until a provider is added
+  and its credential is in place, and that is the ordinary state of a claw that
+  has none.
 
-- **A change to your claw's routing table now reaches the mail service straight
-  away.** The routing table is the file that says which desk a message goes to
-  and what your claw's own address and communication runbook are. It has always
-  been the record. Until this release the service read it once when it started
-  and answered from that copy for as long as it ran, so an edit you made by hand
-  was invisible until somebody restarted the service. The documents told you to
-  edit the file and did not tell you it would not be read.
+  **What you have to do: nothing,** until you want to add a provider.
 
-  The service now checks the file before every command it answers and before
-  every mail it routes, and re-reads it whenever the bytes have changed. An edit
-  made by hand takes effect on the next thing that happens. Nothing has to be
-  restarted.
+- **The session bus gets its own group, and the group for people holds people
+  only.** Until now one group on your claw did two jobs. It listed the people who
+  work here, and it decided who could post on the session bus. The mail service
+  posts on the bus, so it had to be in that group, and parts of the claw then
+  treated it as a person. On a claw with wide mode on, that also put the mail
+  service's account inside the grant that gives people root.
 
-  Measured on staging on 2026-09-08: with the file on disk holding one value,
-  `email self` answered the old one until the unit was restarted.
+  From this release there are two groups. `claw-members` lists the people on your
+  claw and nothing else. `claw-bus` decides who may post on the bus: every
+  person, and every service that posts there, such as the mail service and the
+  token service. The update moves the bus over to `claw-bus` and moves the mail
+  service's account out of `claw-members`. This move is why you reconnect once,
+  as the first entry says.
 
-  **What to do.** Nothing. A claw takes this on its next update, and your
-  routing table is not rewritten by an update.
+  **For whoever runs the claw.** `claw-members` is every person, and it is what
+  wide mode's root grant names, so that grant now reaches people and nobody else.
+  `claw-bus` carries no grant of any kind, and the update checks that no sudoers
+  file names it. A person you add with the onboarding door joins both groups. A
+  service joins `claw-bus` alone, from its own installer. The apply says how many
+  paths it moved to `claw-bus` and names each account it moved. A second apply
+  moves nothing and says so.
 
-- **`email self clear runbook` puts the recorded runbook path back to empty.**
-  `email self set runbook <path>` records where your firm's communication
-  runbook rests. There was no way back through the command, so the only road to
-  an empty field was editing the file. Now the command says both directions.
+- **The conventions your agents read now describe where this claw keeps
+  credentials.** Every agent on your claw reads one conventions file before it
+  works. Until this release it said one credential rests on the claw and
+  described the claw's services in a way that was never built. It now says what
+  is true.
 
-  An empty argument to `set` is still refused. Clearing a field is something you
-  say on purpose, and a caller whose variable came out empty did not say it.
+  - A static secret, such as an API key, still comes from your claw's agents
+    vault through the same one command, `op-agents read`.
+  - A credential that serves the whole firm can be held by a service on the
+    claw. Your agents reach each service by a command named for what it hands
+    out: `email` for the firm's mail, and `token` for the firm's accounts at
+    other providers. An agent asks the token service for the current token and
+    never refreshes one itself. The library it asks with is in
+    `/opt/commonclaw/lib/python`.
+  - Every credential on the claw serves the whole firm. A personal one, such as
+    your own mailbox, stays on your own machine, and your personal agent reaches
+    the claw over mail when it needs to.
 
-  Your claw's own address has no such verb, and that is deliberate. The address
-  is in every `From:` line anybody who writes to you ever sees, so changing it
-  means telling everybody who holds the old one. Editing the file is the slow
-  door that step deserves, and the service now picks that edit up on its next
-  reading.
+  **What you have to do: nothing.** The file is replaced on the next apply, and a
+  session reads the new one the next time it starts.
 
-- **A write by the command leaves the file in the shape the release seeded it
-  in.** The service used to sort the table's fields when it wrote, so the first
-  write moved `self` past three of its siblings and every later comparison
-  carried that move. Every write now goes through one function that keeps the
-  order the shipped template carries. A table your claw has written and the
-  template it was seeded from differ only where a value differs.
+  **For whoever runs the claw.** The reference now says that each connection
+  service's data key rests on the claw beside the machine credential, sealed by
+  the host key. A rebuilt claw starts each service with an empty store and takes
+  its seed from the vault again. A token service row seeded through the tunnel
+  has no copy in the vault, so on a rebuilt claw a person walks the tunnel again.
 
-  **What to do.** Nothing. A table already written in the old order is put back
-  into the template's order by the next write the command makes.
+- **Smaller fixes.**
 
-- **You can type `email` and reach the command.** `/opt/commonclaw/bin` is on
-  nobody's PATH, in a login shell or out of it, so a member who followed the
-  release notes and typed `email inbox create` got `command not found`. An
-  apply now links `/usr/local/bin/email` at the command, which is a directory
-  every shell on this system already searches.
+  - **`email status` now says when the mail provider refuses your claw's key.**
+    Before this release, a claw whose key the provider turned away read
+    "routes.json names no inbox yet". Anyone who followed that line ran
+    `email inbox create` and only then met the real answer. The status line now
+    gives the provider's own answer, for example "the account answered 403". Fix
+    the key first. The inbox comes after it.
+  - **A watcher you turned off stays off.** If you ran
+    `systemctl disable --now bus-nudge@<you>` to stop the bus-mail watcher, every
+    update used to turn it back on. From this release the update leaves it off
+    and says so in a note. A watcher you disabled before this release has no
+    record of being on yet, so this one update turns it on once. Disable it again
+    afterwards and it stays off.
+  - **`op-agents` names the right cause when it cannot read the token.** On a
+    claw that has no agents token at all, it used to tell you to check your group
+    membership. It now says the claw has no token and names the command that
+    installs one. When the token is there and you cannot read it, it still names
+    the group.
+  - **Files the mail service writes keep the permissions the install gives
+    them.** A change made through the `email` command used to leave the routing
+    table at 0644. The service now writes its files at 0640. Restarting the
+    service no longer changes the time each mail thread was first seen.
+  - **One update applies at a time.** Once your claw carries this release, an
+    update started by hand while the scheduled one is running stops at once,
+    names the run that holds the claw, and changes nothing. Run it again when
+    that one ends.
 
-  The directory itself stays off PATH. Everything else in it, the credential
-  broker included, is still reached by its full path, so nothing a session
-  inherits decides which program a read gets. One link, for the one command a
-  person types.
-
-  A file somebody put at `/usr/local/bin/email` is left exactly as it is, and
-  the apply says so in a note rather than replacing it.
-
-  **What to do.** Nothing. A claw takes this on its next update.
-
-- **A refused mail call now tells you what the provider said.** The part that
-  talks to your mail provider reports its cause under one name and the service
-  read another, so `email inbox create` against a key the provider rejects
-  answered "no reason given". The same refusal told root, through a command
-  only root can run, that the account answered 403.
-
-  The service now reads the cause the provider's adapter actually writes, so
-  the sentence reaches whoever typed the command.
-
-  **What to do.** Nothing.
-
-- **An update that holds a release back now says so in its exit status when a
-  person was watching it.** A claw defers a release to the quiet window when
-  applying it would replace a core somebody could be working in. That is the
-  rail doing its job, and a scheduled update that defers still reports success,
-  the way it always has. What changed is the case where an operator ran the
-  update by hand: it now returns 3 instead of 0, so a person or a script reading
-  only the status cannot take a run that applied nothing for a run that landed
-  the release. The line the update prints is word for word what it printed
-  before, and the record it writes carries the same verdict.
-
-  **What you have to do: nothing.** If you never run updates by hand, the status
-  your claw reports is unchanged. If you do, an update that returns 3 has
-  changed nothing on your box and its message says when it will land. Pass
-  `--now` to take the release straight away.
-
-  The update that applies this release is the one your claw already carries, so
-  the new status arrives with this release and is first used by the next one.
-
-- **A channel pointer no longer carries a written note.** The file the release
-  rail publishes for each tier is what tells your claw which release to take. It
-  used to carry a paragraph somebody wrote by hand alongside the version, the
-  tag and the checksum. That paragraph described the same release the release's
-  own notes describe, nothing kept the two in step, and once published it could
-  not be corrected. It is gone, and the pointer now holds machine fields only.
-
-  **What you have to do: nothing.** Your claw never read that field. What a
-  release is stays where you already read it: these notes, and the changelog
-  entry your claw writes when the release lands.
-
-## Errata for releases 1.5.0 and 1.5.1
+## Errata for release 1.5.2
 
 Published notes cannot be edited after the fact, so the corrections are here.
 
-**Both releases show `email` as a command you type, and on every claw that took
-them it was not found.** Their notes give `email inbox create` and
-`email self set runbook` as the steps a firm takes. The program was installed
-at `/opt/commonclaw/bin/email`, and that directory is on no shell's PATH, so the
-bare name answered `command not found`. The full path worked the whole time.
-From this release the bare name works as the notes said.
+**1.5.2 says the mail service is not restarted by that update, and it was.** The
+update installed a new version of the service's program, so the service
+restarted onto it. Its messages, routing table, logs and settings were kept as
+the notes said. On restart the service rewrote the time it had first seen each
+mail thread. This release keeps those times.
 
-**1.5.1 describes the mail account's effect on updates as a delay alone, and a
-second update did more.** Its notes say a claw carrying the mail service takes
-its updates in the early morning and that nothing is skipped or fails. That part
-holds. They do not say that a second update on the same release set the mail
-account up like a person: a Claude Code install in its home, the credential
-loader, membership of the group that reads the vault token, and a bus-mail
-watcher. Measured on the hub on 2026-09-08. This release takes each of those
-back, as the second entry above says.
+**1.5.2 says a write by the `email` command leaves the routing table in the shape
+the release seeded it in.** The contents and their order held. The file's
+permissions did not: a write left it at 0644 where the install makes it 0640.
+Both directories above it are closed to accounts outside the service's group,
+so nobody else could read it. This release writes it at 0640.
+
+**1.5.2 says that release itself still waits for the quiet window on a claw that
+carries the mail service.** That depends on whether the mail account had been
+given a core by an earlier update. Where it had one, the update applied without
+waiting, measured on 2026-09-12. `--now` was the safe instruction in both cases.
 
 ## What somebody has to do
 
-**The operator who applies this release by hand passes `--now` on a claw that
-carries the mail service.** The choice to wait for the window is made by the
-update program the claw already has, which is 1.5.1's, and that program still
-reads the mail account as a person with no Claude Code. So this one release
-still defers on such a claw, whatever it declares. `--now` is the flag the rail
-carries for a person standing at the box, and it also walks past a claw pinned
-to manual updates. Read the verdict line the update prints as well as its exit
-status: the program deciding this ride is the one that still returns 0 when it
-defers. Releases after this one are decided by this release's program, which
-tells a person from a service by the account's number, and they do not wait on
-the mail account.
+**Each person reconnects the desktop app once on each claw after the update,**
+and each orchestration respawns its delegates. The first entry says why.
+
+**Whoever applies this release by hand passes `--now` on a claw pinned to manual
+updates.** That flag is what walks a person standing at the box past the manual
+setting. A claw that updates on its own takes this release on its next scheduled
+run, whatever the hour, so choose the moment by applying it by hand in a quiet
+one.
+
+**The update installs one package where it is missing,** the distribution's
+`python3-cryptography`, which the token service uses to lock what it keeps.
 
 The two items 1.4.0 named still stand: put this claw's channel webhook into its
 vault, and enrol this claw's dead-man check. The two mail steps 1.5.1 named

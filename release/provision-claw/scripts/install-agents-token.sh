@@ -226,6 +226,14 @@ trap cleanup EXIT
   || { printf 'no agents-plane.sh beside this script -- a missing sibling fails the run rather than being skipped\n' >&2; exit 1; }
 . "${SCRIPT_DIR}/agents-plane.sh"
 
+# The one test for whether an account is a person, which every rail on the claw
+# reads. The probe below looks for a person, and so does the sweep for per-home
+# copies of the token.
+# shellcheck source=person.sh
+[ -r "${SCRIPT_DIR}/person.sh" ] \
+  || { printf 'no person.sh beside this script -- a missing sibling fails the run rather than being skipped\n' >&2; exit 1; }
+. "${SCRIPT_DIR}/person.sh"
+
 for t in op jq sha256sum install stat runuser; do
   command -v "$t" >/dev/null 2>&1 || refuse "this claw has no ${t}, which this door needs"
 done
@@ -296,9 +304,8 @@ DROP="${DROP_DIR}/${DROP_NAME}"
 # start and a system account has none. The first one in the group with a wired
 # plane is enough: the file is one file, so a second member proves nothing the
 # first did not.
-while IFS=: read -r u _ uid _ _ home _; do
-  [ "$uid" -ge 1000 ] 2>/dev/null || continue
-  [ "$uid" -lt 65000 ] 2>/dev/null || continue
+while IFS=: read -r u _ _ _ _ home _; do
+  cc_is_person "$u" || continue
   [ -d "$home" ] || continue
   if [ -f "$(cc_agents_legacy_token "$home")" ]; then
     LEGACY_HOMES+=("$home"); LEGACY_PEOPLE+=("$u")

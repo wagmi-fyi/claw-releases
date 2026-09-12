@@ -1,0 +1,53 @@
+# RENDERED once per connection by scripts/install-connection.sh, which fills in
+# the connection's name and the bus directory. render-template.sh never touches
+# this file.
+#
+# A LINE THAT BEGINS WITH A BRACKETED WORD IS KEPT OR DROPPED BY THE INSTALLER.
+# "[vault]" lines stay only when the manifest says READS_VAULT=yes, and "[bus]"
+# lines only when it says POSTS_BUS=yes. The word and the comment mark are
+# taken off a line that stays.
+#
+# THE DATA KEY REACHES THIS PROCESS AND NOTHING ELSE. systemd decrypts the
+# sealed key into this unit's own credentials directory, in memory, readable by
+# this unit's account alone. The machine credential rides the same way, and
+# only for a service that reads a vault. A service that does not read one holds
+# no token that opens the machine vault, which is where the backup password
+# sits.
+#
+# THE SOCKET IS THE SOCKET UNIT'S. It is made by root with the conf's group, so
+# this account never needs to be a member of the group whose members may call
+# it. It stays open while this service restarts, so a caller waits instead of
+# finding no socket.
+[Unit]
+Description=Connection service {{NAME}}: one holder of a firm credential
+Documentation=file:/opt/commonclaw/doc/operator-runbook.md
+Requires=commonclaw-conn-{{NAME}}.socket
+After=commonclaw-conn-{{NAME}}.socket network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=svc-{{NAME}}
+Group=svc-{{NAME}}
+#[bus] SupplementaryGroups=claw-bus
+Environment=COMMONCLAW_CONN_NAME={{NAME}}
+Environment=PYTHONPATH=/opt/commonclaw/lib/python
+LoadCredentialEncrypted=conn-{{NAME}}-key:/etc/commonclaw/credentials/conn-{{NAME}}-key.cred
+#[vault] LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/opt/commonclaw/bin/commonclaw-conn-{{NAME}} --serve
+Restart=always
+RestartSec=30
+# A write this service makes leaves 0640 and a directory 0750. The store makes
+# its own directory 0700 and the files in it are ciphertext.
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/connections/{{NAME}}
+#[bus] ReadWritePaths={{BUS_DIR}}
+
+[Install]
+WantedBy=multi-user.target

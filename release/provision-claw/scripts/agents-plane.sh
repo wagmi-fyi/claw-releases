@@ -276,6 +276,14 @@ cc_agents_backup_captures() {
 # Idempotent, and it holds no value. Returns 0 when the plane is in place.
 #
 # Sets CC_AP_MADE to what this call changed, for a caller that reports.
+#
+# THE CONVERGE WORD IS PRINTED HERE, on stderr, as one line. It was set into
+# CC_AP_MADE and no caller read it: phase 8, the onboarding door and the token
+# door each report the plane in their own words, and the 1.5.2 apply that
+# converged staging's member printed nothing saying so. Found on 2026-09-12.
+# One line here reaches all three callers and any later one. It goes to stderr
+# because each caller's stdout is its JSON result. No caller runs this function
+# inside a command substitution, so the line does not hide CC_AP_MADE from one.
 cc_agents_plane_install() {
   local person="$1" home="$2" tmp made=""
   cc_agents_paths "$home"
@@ -303,6 +311,13 @@ cc_agents_plane_install() {
     cc_agents_env_text > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chown "$person":"$person" "$tmp" && chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
     mv -f "$tmp" "$CC_AP_ENV" || { rm -f -- "$tmp"; return 1; }
+    # Printed once the new loader is in place, so the line never claims a
+    # convergence that did not land.
+    case "$made" in
+      *loader-converged*)
+        printf '  loader-converged: %s exported the token value into every session %s started. It now exports the name of %s alone\n' \
+          "$CC_AP_ENV" "$person" "$CC_AGENTS_TOKEN" >&2 ;;
+    esac
   fi
   chmod 0600 "$CC_AP_ENV" || return 1
   chown "$person":"$person" "$CC_AP_ENV" || return 1
@@ -336,6 +351,11 @@ cc_agents_plane_install() {
 # own process and becomes `op`, so the caller's shell never carries the token
 # and no expansion of the caller's can print one.
 #
+# ITS REFUSAL NAMES THE CAUSE IT MEASURED. It said "membership of agents-cred is
+# what makes it readable" on staging, where the member was in the group and the
+# file had never existed. Found on 2026-09-12. It now tests existence and
+# readability apart.
+#
 # Every claw writes these exact bytes and the install compares against this
 # text, for the same reason the loader does.
 cc_agents_wrapper_text() {
@@ -358,8 +378,16 @@ cc_agents_wrapper_text() {
 set -u
 
 __f="\${COMMONCLAW_AGENTS_TOKEN_FILE:-${CC_AGENTS_TOKEN}}"
+# ABSENT AND UNREADABLE ARE TWO CAUSES, and each has its own sentence. Absent is
+# said only when the directory can be searched, because only then is the
+# absence measured.
+if [ ! -e "\$__f" ] && [ -x "\$(dirname -- "\$__f")" ]; then
+    printf 'op-agents: this claw has no agents token at %s, so nothing here resolves\\n' "\$__f" >&2
+    printf 'op-agents: a person with root installs one for the whole claw with install-agents-token.sh. Joining a group changes nothing until it is there\\n' >&2
+    exit 1
+fi
 if [ ! -r "\$__f" ]; then
-    printf 'op-agents: no readable agents token at %s\\n' "\$__f" >&2
+    printf 'op-agents: you cannot read the agents token at %s\\n' "\$__f" >&2
     printf 'op-agents: membership of ${CC_AGENTS_GROUP} is what makes it readable, and a group added while you were logged in reaches you at your next login\\n' >&2
     exit 1
 fi

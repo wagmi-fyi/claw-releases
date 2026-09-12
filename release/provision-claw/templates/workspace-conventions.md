@@ -75,7 +75,9 @@ A group change takes effect on the person's next login. An existing session keep
 
 **Never write a credential into a file in a workspace.** A workspace is group-owned, git-initialized and backed up, so a secret written here is committed, kept in snapshots after you delete it, and readable by everyone in the group.
 
-Resolve what you need from this claw's agents vault, at the moment you use it. Config files carry `op://` references. They never carry values.
+Every credential on this claw serves the whole firm. A personal credential, such as your own mailbox or a login of your own, stays on your own machine. Your personal agent runs there and reaches this claw over mail when it needs to.
+
+Resolve a static secret, such as an API key, from this claw's agents vault at the moment you use it. Config files carry `op://` references. They never carry values.
 
 Read one with the claw's own command:
 
@@ -96,7 +98,7 @@ There is nothing to reconnect after the claw's token is rotated. Each read takes
 
 **A resolution that fails because this claw has no agents vault is the answer.** Say so and stop. Provisioning does not build one; the firm that owns the claw does. Do not go looking for a value somewhere else on the machine: what you would find is a credential resting where none belongs, and using it hides the gap instead of closing it.
 
-A connection service is the better shape where a claw has one. It holds a secret under its own service user and hands a calling agent a capability rather than the credential, so the value never enters your process. A claw may have none, and then `/srv/connections/` is empty. That is not a fault.
+A connection service is the better shape where this claw has one. It holds a firm credential under its own account and answers you over a socket, and a refresh token or a client secret never leaves it. Each has a command named for what it hands out: `email` sends and reads the firm's mail, and `token` shows which firm accounts at which providers the token service holds a current token for. The token service is the one owner of every rotating credential here, so a skill asks it for the current token, reports a rejected token back to it, and never refreshes a token itself. The Python library a session uses to ask it is in `/opt/commonclaw/lib/python`. A claw may have no connection service, and then `/srv/connections/` is empty. That is not a fault.
 
 ## Git here
 

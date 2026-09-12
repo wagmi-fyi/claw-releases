@@ -1,0 +1,24 @@
+# The token service's own keys. The program falls back to the same values.
+#
+# DEFAULT_GROUP the group a row names when token add is given none. Its
+#   members may receive the row's credential. A row can narrow it.
+DEFAULT_GROUP="agents-cred"
+
+# ADMIN_GROUP the group whose members may remove a row.
+ADMIN_GROUP="claw-admin"
+
+# NOTIFY_HANDLE the bus handle told when a provider refuses a row's refresh
+#   token. Empty sends nothing, and status and the health line still say it.
+NOTIFY_HANDLE="human"
+
+# BUS_HANDLE the handle the service's bus message comes from.
+BUS_HANDLE="tokens"
+BUS_CLI="/opt/commonclaw/bin/bus"
+BUS_DIR="/var/lib/commonclaw/bus"
+
+# SEED_VAULT the vault a new row's seed item is named in. Empty means this
+#   claw's machine vault, {hostname}-machine.
+SEED_VAULT=""
+
+# HTTP_TIMEOUT_SECS how long one call to a provider may take.
+HTTP_TIMEOUT_SECS="30"

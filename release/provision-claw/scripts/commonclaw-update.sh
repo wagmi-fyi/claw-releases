@@ -53,6 +53,12 @@
 #      nothing on this claw. Pass --now to take the release outside the window.
 #      Measured on staging 2026-09-08.
 #
+# ONE RUN AT A TIME. A run takes a lock on /run/commonclaw-update.lock before it
+# reads what the claw carries, and holds it to its exit. A second run that finds
+# the lock held exits 1 at once and has read and written nothing but its own
+# run-log record. A timer tick and a ride never apply side by side. `--check`
+# takes no lock.
+#
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
 # releases, so no machine holds a key to this one. `reference/release-rail.md` is
 # the contract and this script implements it; read that first.
@@ -88,6 +94,9 @@ FLEET_STAGE=/root/fleet-stage
 # stage itself says whether it is a way back. A dotfile, because the stage is
 # also a payload tree and this is not part of the payload.
 APPLY_INCOMPLETE=.commonclaw-apply-incomplete
+# The lock every applying run holds. Under /run, so a reboot clears it with the
+# processes that could have held it.
+APPLY_LOCK=/run/commonclaw-update.lock
 
 MODE_NOW=0; CHECK_ONLY=0; RIDE_TAG=""; RIDE_FROM=""
 while [ $# -gt 0 ]; do
@@ -254,6 +263,44 @@ DEFER_DIR=/var/lib/commonclaw/updater
 case "$MODE" in auto|manual) : ;; *) die "bad mode" "MODE in ${UPDATER_CONF} must be auto or manual, not '${MODE}'" ;; esac
 [ -n "$RELEASE_REPO" ] || die "no repo" "RELEASE_REPO is unset in ${UPDATER_CONF}: there is nowhere to pull from"
 
+# ---------------------------------------------------------------- one run at a time
+STEP="take the apply lock"
+# TWO RUNS ON ONE APPLY. Nothing stopped a timer tick and an attended ride from
+# running side by side. Measured on a tenant claw on 2026-09-12: the ride had to be timed
+# by hand to start after the hour's tick. Two runs each read the state file,
+# the deferral stamp and the failure count, and each writes them back from what
+# it read. One of them can also rotate the stage the other is applying from.
+#
+# THE LOCK IS TAKEN BEFORE THE FIRST READ OF THE CLAW'S STATE, so everything a
+# run decides comes from state no other run is writing. It is held to the exit,
+# because the fd stays open until the process ends.
+#
+# A SECOND RUN REFUSES AND DOES NOT WAIT. The refusal sits above every read and
+# every write the rail's bounds depend on, so it leaves the deferral stamp, the
+# failure count and the state file exactly as the holder leaves them. A refused
+# tick loses nothing: the next tick reads the pointer again. A refused ride
+# tells the person standing at it which run holds the lock, and they decide.
+# A run that waited would sit silent behind an apply it cannot see, and a tick
+# queued behind a hung apply would hide the hang. It exits 1, because it is a
+# refusal. A tick refused behind a hung apply then shows red every hour, and
+# that is a page somebody can act on.
+#
+# --check TAKES NO LOCK. It writes nothing, and a lock file is a write.
+#
+# THE PROVISIONING RUN DOES NOT INHERIT THE LOCK. Its invocation below closes
+# fd 9, so a process it leaves running cannot hold the lock after this run ends.
+if [ "$CHECK_ONLY" -eq 0 ]; then
+  command -v flock >/dev/null 2>&1 \
+    || die "no flock" "flock is not on this claw, so this run cannot prove it is the only one applying. Refusing. This claw is unchanged and nothing was fetched"
+  exec 9<>"$APPLY_LOCK" \
+    || die "lock unavailable" "could not open ${APPLY_LOCK}. This claw is unchanged and nothing was fetched"
+  if ! flock -n 9; then
+    lock_holder="$(head -n 1 "$APPLY_LOCK" 2>/dev/null | cut -c1-120)"
+    die "another run holds the apply" "another run of this script holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}). This run read nothing and changed nothing. Run it again when that run has ended"
+  fi
+  printf 'pid %s since %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APPLY_LOCK"
+fi
+
 # ---------------------------------------------------------------- what we carry
 STEP="read carried version"
 # NO STATE MEANS NOTHING HAS BEEN TAKEN YET, which compares below every release.
@@ -294,10 +341,10 @@ fi
 # every hour, forever, on a box with nobody watching.
 #
 # THE RECORD SAYS HOW THE RELEASE GOT HERE, and that is one field because the
-# next tick has to be explainable from it. A claw that rode a tag sits AHEAD of
-# its own channel pointer, so the tick after the ride reads "already at or above"
-# and skips, and nothing in the record would tell a reader that apart from a
-# pointer that never moved.
+# next tick has to be explainable from it. A claw that rode a tag from a lower
+# tier can sit ahead of its own channel pointer, so the tick after the ride reads
+# "already at or above" and skips, and nothing in the record would tell a reader
+# that apart from a pointer that never moved.
 #
 # write_state <version> <tag> <digest> <applied_at> <previous> <verdict> <failing> <count> <applied_from>
 write_state() {
@@ -943,7 +990,7 @@ set +e
   --bucket "$BUCKET" --s3-endpoint "$ENDPOINT" \
   --skills-manifest "${FLEET_STAGE}/skills.yaml" \
   --release-notes "$NOTES" --release-class "$CLASS" --revision "$REV" \
-  > "${STAGE}/run.json" 2> "${STAGE}/run.log"
+  > "${STAGE}/run.json" 2> "${STAGE}/run.log" 9>&-
 apply_rc=$?
 set -e
 
@@ -1141,7 +1188,7 @@ if [ "$CARRIED" != "0.0.0" ]; then
           printf 'This release landed on this claw as part of the update to %s, whose entry is above. It is recorded here so the account of what changed is complete.\n\n' "$OFFERED"
           cat "${STAGE}/x-notes.md"
         } > "${STAGE}/x-entry.md"
-        if "$crossing_writer" --revision "$crossing_rev" --class "$crossing_class" --notes "${STAGE}/x-entry.md" >&2; then
+        if "$crossing_writer" --revision "$crossing_rev" --class "$crossing_class" --notes "${STAGE}/x-entry.md" >&2 9>&-; then
           log info "changelog entry written for the skipped release ${v} (${crossing_rev}, class ${crossing_class})"
         else
           log warning "the changelog entry for the skipped release ${v} FAILED to write; that release landed on this claw and its people have no record of it"
@@ -1157,7 +1204,17 @@ if [ "$OUTSIDE_WINDOW" -eq 1 ]; then
   VERDICT="applied outside the quiet window"
   log warning "release ${OFFERED} applied OUTSIDE the quiet window after the deferral bound was reached"
 elif [ -n "$RIDE_TAG" ]; then
-  log info "release ${OFFERED} applied from the ride of ${OFFERED_TAG}; this claw now carries it and is AHEAD of the ${CHANNEL} pointer, so every tick reads 'already at or above' and changes nothing until that pointer passes it"
+  # LEVEL OR AHEAD IS SAID ONLY FROM A POINTER THIS RUN READ. A ride from this
+  # claw's own pointer read that pointer, and it names the release that just
+  # landed, so the claw is level with it. That is every ride by a tier's first
+  # claw. This line said AHEAD there, and staging read it on 2026-09-12 while
+  # level with its own pointer. A ride from a lower tier never read this claw's
+  # own pointer, so the line says that instead of guessing.
+  if [ "$RIDE_FROM" = "$CHANNEL" ]; then
+    log info "release ${OFFERED} applied from the ride of ${OFFERED_TAG}; this claw now carries it and is level with its own ${CHANNEL} pointer, which names this release, so every tick reads 'already at or above' and changes nothing until that pointer names a newer one"
+  else
+    log info "release ${OFFERED} applied from the ride of ${OFFERED_TAG} off the ${RIDE_FROM} pointer; this claw now carries it. This run did not read its own ${CHANNEL} pointer, so every tick reads 'already at or above' and changes nothing until that pointer names a release newer than ${OFFERED}"
+  fi
 else
   log info "release ${OFFERED} applied; this claw now carries it"
 fi

@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""token -- the firm's HTTP API credentials on this claw, through the token service.
+
+  token list
+  token status [provider[/account]] [--seeded-by ACCOUNT]
+  token add <provider>/<account> [--key] [--metadata URL] [--token-endpoint URL]
+            [--resource URL] [--path paste|helper|tunnel] [--group GROUP]
+            [--rotates yes|no|unknown] [--scope SCOPE]... [--revoke-page URL]
+  token check <provider>/<account>
+  token remove <provider>/<account>
+
+A row is one account at one provider. `add` writes it and prints the steps of
+its seed path. A row grants nothing until a person has walked those steps and
+the seed door has handed the seed to the service. `check` proves a credential
+comes back and prints its expiry and fingerprint.
+
+THIS COMMAND NEVER PRINTS A CREDENTIAL. A session that needs one uses an
+adapter, which keeps the credential inside the process that calls the
+provider: commonclaw_connection.http_auth for an HTTP API, and
+commonclaw_connection.mcp_storage for the MCP Python SDK. Both live under
+/opt/commonclaw/lib/python. reference/token-service.md in the provisioning
+skill says more.
+
+WHO MAY DO WHAT. Every person may list, add, read status and check a row whose
+group they are in. Removing a row is a claw-admin's act. Seeding is root's,
+through the seed door.
+
+EXIT CODES. 0 the service answered ok. 1 it refused. 2 usage. 4 it could not be
+reached.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.environ.get("COMMONCLAW_CONN_LIB", "/opt/commonclaw/lib/python"))
+from commonclaw_connection.tokens_client import TokensClient, TokensError  # noqa: E402
+
+DOOR = "/opt/commonclaw/provision-claw/scripts/install-provider-seed.sh"
+HELPER = "/opt/commonclaw/doc/token-helper.py"
+TUNNEL_PORT = 8765
+
+
+def call(req):
+    try:
+        return TokensClient().call(req)
+    except TokensError as exc:
+        sys.stderr.write("%s\n" % exc)
+        sys.exit(4)
+
+
+def refused(resp):
+    sys.stderr.write("refused: %s\n" % resp.get("reason", "no reason given"))
+    return 1
+
+
+def when(r):
+    exp = r.get("expires_at")
+    if not exp:
+        return r.get("expires") or "-"
+    left = int(exp - time.time())
+    if left <= 0:
+        return "%s (expired)" % r.get("expires")
+    if left < 3600:
+        return "%s (in %d min)" % (r.get("expires"), left // 60)
+    return "%s (in %.1f h)" % (r.get("expires"), left / 3600.0)
+
+
+def seeder(r):
+    s = r.get("seeded_by") or {}
+    return ("%s on %s" % (s.get("account"), s.get("date"))) if s.get("account") else "not seeded"
+
+
+def seed_steps(name, row, item, vault, host, fields):
+    path = row.get("path")
+    door = "sudo %s %s" % (DOOR, name)
+    out = ["", "The seed path for %s is %s." % (name, path)]
+    if path == "paste":
+        req = ", ".join(fields.get("required", []))
+        opt = ", ".join(fields.get("optional", []))
+        out += [
+            "  1. In your password manager app, open the vault %s." % vault,
+            "  2. Make an item named %s." % item,
+            "  3. Give it a field for each of: %s." % req,
+        ]
+        if row.get("kind") == "oauth":
+            out.append("     These may be added too, when the provider gave them: %s." % opt)
+        out += [
+            "     Paste each value from the provider's own page. Nobody types a value into a",
+            "     conversation or a shell.",
+            "  4. A person with root on this claw runs:",
+            "       %s" % door,
+            "  5. Then: token check %s" % name,
+        ]
+    elif path == "helper":
+        extra = "".join(" --scope %s" % s for s in row.get("scopes") or [])
+        if row.get("resource"):
+            extra += " --resource %s" % row["resource"]
+        out += [
+            "  1. On your own computer you need uv, a browser, and your password manager's",
+            "     command line (op), signed in with write on the vault %s." % vault,
+            "  2. Copy the helper from this claw:",
+            "       scp %s:%s ." % (host, HELPER),
+            "  3. Run it:",
+            "       uv run token-helper.py --metadata %s --vault %s --item %s%s"
+            % (row.get("metadata"), vault, item, extra),
+            "  4. Approve in the browser. The helper writes the seed into %s and prints no value." % item,
+            "  5. A person with root on this claw runs:",
+            "       %s" % door,
+            "  6. Then: token check %s" % name,
+        ]
+    else:
+        out += [
+            "  1. From your own computer, open a tunnel for one port:",
+            "       ssh -L %d:127.0.0.1:%d %s" % (TUNNEL_PORT, TUNNEL_PORT, host),
+            "  2. In that shell, a person with root runs:",
+            "       %s --authorize --port %d" % (door, TUNNEL_PORT),
+            "  3. Open the link it prints, on your own computer, and approve. The door seeds",
+            "     the row straight from the approval.",
+            "     The vault holds no copy of this seed, so on a rebuilt claw a person walks",
+            "     this path again.",
+            "  4. Then: token check %s" % name,
+        ]
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="token", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="print the service's answer as JSON")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("list", help="every row on this claw and its state")
+    s = sub.add_parser("status", help="expiry, last refresh, fingerprints and seeder")
+    s.add_argument("row", nargs="?", default="")
+    s.add_argument("--seeded-by", dest="seeded_by", default="")
+    a = sub.add_parser("add", help="write a row and print the steps of its seed path")
+    a.add_argument("row")
+    a.add_argument("--key", action="store_true", help="a static key, handed out as it stands")
+    a.add_argument("--metadata", default="", help="the provider's OAuth metadata URL")
+    a.add_argument("--token-endpoint", dest="token_endpoint", default="",
+                   help="the token endpoint, where the provider publishes no metadata")
+    a.add_argument("--resource", default="", help="the MCP resource the token is for")
+    a.add_argument("--path", default="", choices=["", "paste", "helper", "tunnel"])
+    a.add_argument("--group", default="", help="who may receive it; the conf's default otherwise")
+    a.add_argument("--rotates", default="unknown", choices=["yes", "no", "unknown"])
+    a.add_argument("--scope", action="append", default=[])
+    a.add_argument("--revoke-page", dest="revoke_page", default="",
+                   help="the provider's page where a person revokes the approval")
+    c = sub.add_parser("check", help="prove a credential comes back")
+    c.add_argument("row")
+    r = sub.add_parser("remove", help="delete a row; a claw-admin's act")
+    r.add_argument("row")
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 2
+
+    if args.cmd in ("list", "status"):
+        req = {"verb": "status"}
+        if args.cmd == "status" and args.row:
+            req["row"] = args.row
+        if args.cmd == "status" and args.seeded_by:
+            req["seeded_by"] = args.seeded_by
+        resp = call(req)
+        if not resp.get("ok"):
+            return refused(resp)
+        if args.json:
+            print(json.dumps(resp, indent=2, sort_keys=True))
+            return 0
+        rows = resp.get("rows", [])
+        if not rows:
+            print("no row on this claw%s" % (" seeded by %s" % args.seeded_by
+                                              if getattr(args, "seeded_by", "") else ""))
+            return 0
+        for r in rows:
+            if args.cmd == "list":
+                print("%-32s %-13s %-6s %s" % (r["row"], r["state"], r["kind"], seeder(r)))
+                continue
+            print("%s" % r["row"])
+            print("  state        %s" % r["state"])
+            if r.get("needs_person"):
+                print("  needs        a person: %s, on %s" % (r["needs_person"].get("reason"),
+                                                            r["needs_person"].get("when")))
+            print("  kind         %s" % r["kind"])
+            print("  group        %s" % r["group"])
+            print("  seeded by    %s" % seeder(r))
+            print("  seed path    %s" % r["path"])
+            print("  seed item    %s" % r.get("seed", ""))
+            if r["kind"] == "oauth":
+                print("  expires      %s" % when(r))
+                print("  last refresh %s" % (r.get("last_refresh") or "-"))
+                print("  fingerprint  %s" % (r.get("fingerprint") or "-"))
+                print("  refresh fp   %s" % (r.get("refresh_fingerprint") or "-"))
+                print("  refreshes    %s, of which the provider rotated the refresh token %s"
+                      % (r.get("refreshes", 0), r.get("rotations", 0)))
+                print("  rotates      %s" % r.get("rotates", "unknown"))
+            elif r.get("fingerprint"):
+                print("  fingerprint  %s" % r["fingerprint"])
+        return 0
+
+    if args.cmd == "add":
+        req = {"verb": "add", "row": args.row, "kind": "key" if args.key else "oauth",
+               "metadata": args.metadata, "token_endpoint": args.token_endpoint,
+               "resource": args.resource, "path": args.path, "group": args.group,
+               "rotates": args.rotates, "scopes": args.scope, "revoke_page": args.revoke_page}
+        resp = call(req)
+        if not resp.get("ok"):
+            return refused(resp)
+        if args.json:
+            print(json.dumps(resp, indent=2, sort_keys=True))
+            return 0
+        row = resp["fields"]
+        print("%s is on this claw. It grants nothing until it is seeded." % resp["row"])
+        print("  kind %s, group %s, seed item %s in %s" % (row["kind"], row["group"],
+                                                          resp["item"], resp["vault"]))
+        for line in seed_steps(resp["row"], row, resp["item"], resp["vault"], resp["host"],
+                               resp.get("seed_fields") or {}):
+            print(line)
+        return 0
+
+    if args.cmd == "check":
+        try:
+            cred = TokensClient().get(args.row)
+        except TokensError as exc:
+            return refused({"reason": str(exc)})
+        out = {"ok": True, "row": args.row, "kind": cred.get("kind"),
+               "fingerprint": cred.get("fingerprint"), "expires": cred.get("expires", ""),
+               "expires_at": cred.get("expires_at")}
+        cred = None
+        if args.json:
+            print(json.dumps(out, indent=2, sort_keys=True))
+            return 0
+        if out["kind"] == "key":
+            print("%s: a key came back. fingerprint %s" % (args.row, out["fingerprint"]))
+        else:
+            print("%s: a token came back. expires %s, fingerprint %s"
+                  % (args.row, when(out), out["fingerprint"]))
+        return 0
+
+    if args.cmd == "remove":
+        resp = call({"verb": "remove", "row": args.row})
+        if not resp.get("ok"):
+            return refused(resp)
+        if args.json:
+            print(json.dumps(resp, indent=2, sort_keys=True))
+            return 0
+        s = resp.get("seeded_by") or {}
+        print("%s is off this claw, and its sealed record is gone." % resp["row"])
+        print("The approval still stands at the provider. Revoking it is a person's act.")
+        if s.get("account"):
+            print("  seeded by        %s on %s. Theirs is the approval the provider holds." % (
+                s["account"], s.get("date")))
+        if resp.get("revoke_page"):
+            print("  revoke it at     %s" % resp["revoke_page"])
+        if resp.get("revocation_endpoint"):
+            print("  the provider's revocation endpoint is %s" % resp["revocation_endpoint"])
+        if not resp.get("revoke_page") and not resp.get("revocation_endpoint"):
+            print("  the row named no revocation page. The provider's own account settings list")
+            print("  the apps a person has approved.")
+        if resp.get("seed"):
+            print("  the seed item    %s is still in the vault, and a person deletes it there." % resp["seed"])
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
