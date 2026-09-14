@@ -1,7 +1,7 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "staging",
-  "version": "1.6.0",
-  "tag": "v1.6.0",
-  "tree_digest": "c9e106147eb2867e2fa73354e43fadb708890617a044484766201acfa5d02346"
+  "version": "1.6.1",
+  "tag": "v1.6.1",
+  "tree_digest": "972e4b14c1f7cce119cb97eb4fb162089b054fd9d4739a93e3bb5d2b4abe9486"
 }
