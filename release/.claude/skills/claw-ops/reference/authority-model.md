@@ -49,4 +49,4 @@ Name what could not be observed, every time. An absence claim derived from a per
 
 ## Reading a secret
 
-`/opt/commonclaw/bin/op-agents read "op://<vault>/<item>/<field>"`. The token is taken from the claw's own file inside that one command, so no session on the claw holds the value and a bare `op read` resolves nothing. A session is told where the file is, in `COMMONCLAW_AGENTS_TOKEN_FILE`, and never what is in it. Membership of `agents-cred` is what makes the file readable, and a group added while somebody was logged in reaches them at their next login.
+`/opt/commonclaw/bin/op-agents read "op://<vault>/<item>/<field>"`. The token is taken from the claw's own file inside that one command, so no session on the claw holds the value and a bare `op read` resolves nothing. A session is told where the file is, in `COMMONCLAW_AGENTS_TOKEN_FILE`, and never what is in it. Membership of `agents-cred` is what makes the file readable, and a group added reaches only a process that starts after it. `/etc/commonclaw/workspace-conventions.md` says what ends the old ones, under Access.

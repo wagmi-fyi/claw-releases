@@ -13,6 +13,8 @@ the service uses.
 WHERE ITS WORLD LIVES. `EMAIL_FAKE_DIR`, and nothing outside it.
 
   inbox.json        the one inbox this fake has, once make-inbox has been called
+                    with a username. Its absence is how a control reads that a
+                    refused create reached no provider.
   events.jsonl      inbound mail. A control appends a line and the service sees
                     a mail arrive. `listen` tails it.
   messages/<id>.json  and threads/<id>.json   what thread and message read back
@@ -76,10 +78,14 @@ def v_probe(_req):
 
 
 def v_make_inbox(req):
+    # The same refusal as every adapter, before the fake's world is read. A fake
+    # that picked a name would prove nothing about the adapters that refuse.
+    user = (req.get("username") or "").strip()
+    if not user:
+        die("make-inbox needs a username, so nothing was asked of the provider", 2)
     existing = load(path("inbox.json"))
     if existing:
         return {"inbox_id": existing["inbox_id"], "address": existing["address"]}
-    user = req.get("username") or "agent"
     domain = req.get("domain") or "fake.invalid"
     rec = {
         "inbox_id": "inbox_%s" % user,

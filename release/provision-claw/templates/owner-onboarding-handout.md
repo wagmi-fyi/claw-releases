@@ -207,6 +207,19 @@ to us rather than something anyone can fix on the machine. That is by design.
 Keep the private half in your password manager, as step 4 describes, and it is a
 short problem instead of a long one.
 
+**Connecting an account your firm holds at another provider.** Your accounting
+software is a common example. Your assistant walks you through the steps. The
+last one is a command an admin runs on the claw, from their own login:
+
+```bash
+sudo /opt/commonclaw/provision-claw/scripts/install-provider-seed.sh <provider>/<account>
+```
+
+Your assistant gives you the exact line. It reads what you saved in your firm's
+password manager and hands it to the claw, which keeps the connection working
+after that. It asks for no password and shows no credential. When it works, the
+last word it prints is `seeded`.
+
 ## If something does not work
 
 **The mobile app rejects your key.** Almost always the format. Redo step 3 exactly — a key from `ssh-keygen` alone will not be accepted.

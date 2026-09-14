@@ -91,6 +91,13 @@ DEFAULTS = {
 # core sets it and every adapter reads it, and a name written twice drifts once.
 KEY_ENV = "EMAIL_PROVIDER_KEY"
 
+# NOTHING THIS SERVICE PRINTS CARRIES A BACKTICK. A reader quotes a reason into a
+# double-quoted shell string, and the shell runs whatever sits between two
+# backticks. On 2026-09-14 that ran the command this sentence named, with no
+# name, and the provider picked one. A command is named in single quotes.
+NO_INBOX_REASON = ("routes.json names no inbox yet: a person makes it with "
+                   "'email inbox create --username NAME'")
+
 
 def log(level, msg):
     """Everything this service says goes to the journal. Never to a bus.
@@ -625,7 +632,7 @@ class Gatekeeper:
                     wait = min(hi, wait * 2)
                     continue
                 wait = lo
-                self.last_reason = "routes.json names no inbox yet: run `email inbox create`"
+                self.last_reason = NO_INBOX_REASON
                 self.stop.wait(10)
                 continue
             try:
@@ -723,7 +730,7 @@ class Gatekeeper:
     def do_send(self, req, peer):
         inbox = self.inbox_id()
         if not inbox:
-            return {"ok": False, "reason": "routes.json names no inbox yet: run `email inbox create`"}
+            return {"ok": False, "reason": NO_INBOX_REASON}
         payload = {
             "inbox_id": inbox,
             "to": req.get("to") or [],
@@ -900,6 +907,13 @@ class Gatekeeper:
         ever sees. Changing it later means telling everybody who has one.
         """
         cur = self.state.routes.get("self") or {}
+        # A CREATE NAMES ITS INBOX. The provider picks a name when it is given
+        # none, and the service would record that name and listen on it. The
+        # command refuses first and every adapter refuses after, and this
+        # refusal covers a caller on the socket and an adapter that does not.
+        if not (req.get("username") or "").strip():
+            return {"ok": False, "reason":
+                    "an inbox create needs a username, so nothing was asked of the provider"}
         if cur.get("inbox_id"):
             return {"ok": False, "reason":
                     "this claw already has an inbox: %s. Editing routes.json by hand is the "

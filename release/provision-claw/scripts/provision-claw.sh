@@ -104,7 +104,7 @@
 # source the one substitution rule from render-template.sh beside them;
 # phase 11 and 12 install commonclaw-backup.sh and commonclaw-seat-check.sh from
 # beside this file; phase 13 installs every script beside this one into the
-# granted prefix, and grants the four it names; phase 21 installs
+# granted prefix, and grants the ones GRANTED_SCRIPTS names; phase 21 installs
 # commonclaw-memory-check.sh from beside this file and its unit and timer from
 # ../templates; phase 22 installs commonclaw-notify.sh; phase 23 installs
 # commonclaw-stall-check.sh with its conf and two units from ../templates; and
@@ -514,6 +514,7 @@ GRANTED_ACCESS="${INSTALL_PREFIX}/scripts/manage-workspace-access.sh"
 GRANTED_PERSON_KEYS="${INSTALL_PREFIX}/scripts/manage-person-keys.sh"
 GRANTED_RUNTIMES="${INSTALL_PREFIX}/scripts/manage-runtimes.sh"
 GRANTED_AUTHORITY="${INSTALL_PREFIX}/scripts/manage-claw-authority.sh"
+GRANTED_SEED="${INSTALL_PREFIX}/scripts/install-provider-seed.sh"
 
 # ONE list, four uses: what preflight requires beside this script, what the
 # sudoers alias names, what the scope control requires the member's listing to
@@ -522,7 +523,7 @@ GRANTED_AUTHORITY="${INSTALL_PREFIX}/scripts/manage-claw-authority.sh"
 GRANTED_SCRIPTS=("$GRANTED_SCAFFOLD" "$GRANTED_RETIRE" "$GRANTED_ONBOARD" "$GRANTED_TOKEN" \
                  "$GRANTED_AGENTS_TOKEN" "$GRANTED_MODE" "$GRANTED_DESTROY" \
                  "$GRANTED_ACCESS" "$GRANTED_PERSON_KEYS" "$GRANTED_RUNTIMES" \
-                 "$GRANTED_AUTHORITY")
+                 "$GRANTED_AUTHORITY" "$GRANTED_SEED")
 
 # The adjacent script the grant does NOT name. It is installed deliberately: a
 # refusal only proves scope when the refused path exists, is root-owned, and
@@ -1518,6 +1519,12 @@ phase_1_preflight() {
   # missing one turns a phase into a refusal rather than a silent skip.
   [ -r "${PAYLOAD_DIR}/bus-nudge" ] \
     || missing_payload="$missing_payload ../payload/bus-nudge"
+  # The rail loads session-guard at start and refuses to run without it, and
+  # the sweeper beside the rail loads the same file.
+  [ -r "${PAYLOAD_DIR}/session-guard" ] \
+    || missing_payload="$missing_payload ../payload/session-guard"
+  [ -r "${PAYLOAD_DIR}/session-sweep" ] \
+    || missing_payload="$missing_payload ../payload/session-sweep"
   [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] \
     || missing_payload="$missing_payload ../payload/bus-nudge-adapters"
   # EACH ADAPTER BY NAME, and not just the directory. A present-but-short
@@ -1535,6 +1542,10 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/bus-nudge@.service"
   [ -r "${TEMPLATE_DIR}/bus-nudge@.timer" ] \
     || missing_payload="$missing_payload ../templates/bus-nudge@.timer"
+  [ -r "${TEMPLATE_DIR}/session-sweep@.service" ] \
+    || missing_payload="$missing_payload ../templates/session-sweep@.service"
+  [ -r "${TEMPLATE_DIR}/session-sweep@.timer" ] \
+    || missing_payload="$missing_payload ../templates/session-sweep@.timer"
   [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
     || missing_payload="$missing_payload ../templates/wake-rail.md"
   # The operator's runbook, which the same installer lays beside the member's
@@ -2473,12 +2484,14 @@ _tb_strip() {
   fi
 }
 
-# _tb_wake_off <account> ; the wake rail's own door, then a reading of the unit
+# _tb_wake_off <account> ; the wake rail's own door, then a reading of the units,
+# the sweeper's timer among them
 _tb_wake_off() {
   local u="bus-nudge@${1}"
   "${SCRIPT_DIR}/install-bus-nudge.sh" --uninstall "$1" || return 1
   [ "$(systemctl is-enabled "${u}.service" 2>/dev/null || true)" != "enabled" ] || return 1
   [ "$(systemctl is-enabled "${u}.timer" 2>/dev/null || true)" != "enabled" ] || return 1
+  [ "$(systemctl is-enabled "session-sweep@${1}.timer" 2>/dev/null || true)" != "enabled" ] || return 1
   ! systemctl is-active --quiet "${u}.service" 2>/dev/null
 }
 
@@ -2609,8 +2622,9 @@ take_back_non_people() {
     # The wake rail first, so nothing runs as the account while its home changes.
     if [ "$(systemctl is-enabled "bus-nudge@${acct}.service" 2>/dev/null || true)" = "enabled" ] \
        || [ "$(systemctl is-enabled "bus-nudge@${acct}.timer" 2>/dev/null || true)" = "enabled" ] \
+       || [ "$(systemctl is-enabled "session-sweep@${acct}.timer" 2>/dev/null || true)" = "enabled" ] \
        || systemctl is-active --quiet "bus-nudge@${acct}.service" 2>/dev/null; then
-      _tb_act "$acct" "the wake-rail unit bus-nudge@${acct}, stopped and disabled" _tb_wake_off "$acct"
+      _tb_act "$acct" "the wake-rail units bus-nudge@${acct} and session-sweep@${acct}, stopped and disabled" _tb_wake_off "$acct"
     fi
 
     # The grant on the claw's broker token. A process already running as the
@@ -3584,7 +3598,7 @@ phase_13_admin_door() {
   done
   if [ "${#CLAW_ADMINS[@]}" -gt 0 ] && [ "$roster_ok" -eq 1 ]; then
     ok "every claw-admin is in ${CLAW_ADMIN_GROUP} and none is in the sudo group"
-    warn "a group added while somebody is logged in does not reach that session; they log in again"
+    warn "a group added reaches only a process started after it, and a desktop app server outlives a login: ${CONVENTIONS} says what ends it, under Access"
   fi
 
   # ---- the installed provisioning plane ----
@@ -3706,6 +3720,11 @@ ADMINEOF
 # member name any file root can read and have it installed and then destroyed.
 # The agents door takes no argument beyond --dry-run: it writes ONE file for the
 # whole claw, so there is no name for a caller to aim it with.
+#
+# The seed door takes one row the token service already holds. It reads the
+# vault item that row names through the claw's own machine credential, and
+# nothing from the caller's session reaches that read. It records the account
+# sudo ran it for.
 #
 # THE AUTHORITY DOOR IS GRANTED HERE AND DECIDES NOTHING ON THAT BASIS. Being in
 # this alias only means a claw-admin may start it. What it does is decided by a

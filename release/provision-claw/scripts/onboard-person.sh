@@ -803,11 +803,11 @@ fi
 # the person's own group list, which is the thing access is made of.
 groups_text=" $(id -nG "$PERSON" 2>/dev/null || true) "
 case "$groups_text" in
-  *" ${MEMBERS_GROUP} "*) ok "${PERSON} is in ${MEMBERS_GROUP}, so ${CLAW_BRIEFING} is theirs to write at their next login" ;;
+  *" ${MEMBERS_GROUP} "*) ok "${PERSON} is in ${MEMBERS_GROUP}, so ${CLAW_BRIEFING} is theirs to write from any process they start after this" ;;
   *) bad "${PERSON} is not in ${MEMBERS_GROUP} -- they could read the claw's own briefing and never write it" ;;
 esac
 case "$groups_text" in
-  *" ${BUS_GROUP} "*) ok "${PERSON} is in ${BUS_GROUP}, so their sessions post on the claw's session bus from their next login" ;;
+  *" ${BUS_GROUP} "*) ok "${PERSON} is in ${BUS_GROUP}, so every session they start after this posts on the claw's session bus" ;;
   *) bad "${PERSON} is not in ${BUS_GROUP} -- their sessions would join no bus" ;;
 esac
 
@@ -942,8 +942,8 @@ fi
 
 say ""
 say "  Next: grant the workspaces this person needs (operations/lifecycle.md), and have"
-say "  them confirm the connection from their own machine. A group change takes effect on"
-say "  next login."
+say "  them confirm the connection from their own machine. A group change reaches only a"
+say "  process that starts after it: ${CONVENTIONS} says what ends the old ones, under Access."
 say ""
 say "  Their commits will read ${FULL_NAME} <${EMAIL}>. That address reaches no mailbox;"
 say "  it is how git tells one person's work from another's. They can change it themselves"

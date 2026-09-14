@@ -1,0 +1,26 @@
+# Installed VERBATIM, never rendered. The %i is systemd's own instance
+# expansion, and render-template.sh must not touch this file.
+#
+# One instance per account: session-sweep@jeremiah.service. It runs AS that
+# account for the wake rail's reason. The session records and the processes it
+# reads are that account's, and ending a process belonging to somebody else is
+# a different act with a different consent story.
+#
+# A BEAT, NOT A WATCHER. The sweep ends an old process only after the newer one
+# has run for the grace period, so nothing here is urgent. The timer beside this
+# file starts one pass every five minutes and the pass exits.
+#
+# BESIDE THE RAIL, NEVER INSIDE IT. The rail's unit delivers one sentence and
+# its law is proved by reading the rail alone. This unit ends processes, so it
+# is a separate program under a separate unit. What it ends, and when, is in
+# the header of /opt/commonclaw/bin/session-sweep.
+[Unit]
+Description=Session sweep for %i: end a session process a newer one replaced
+Documentation=file:/opt/commonclaw/doc/wake-rail.md
+
+[Service]
+Type=oneshot
+User=%i
+ExecStart=/opt/commonclaw/bin/session-sweep
+Nice=10
+IOSchedulingClass=idle

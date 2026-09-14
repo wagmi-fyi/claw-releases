@@ -457,6 +457,7 @@ fi
 
 say ""
 say "  Next: replace CLAUDE.md with the workspace's real context; each member opens"
-say "  the workspace once in each core. A group change takes effect on next login."
+say "  the workspace once in each core. A group change reaches only a process that starts"
+say "  after it: /etc/commonclaw/workspace-conventions.md says what ends the old ones, under Access."
 
 finish

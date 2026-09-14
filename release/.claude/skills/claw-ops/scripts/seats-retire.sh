@@ -65,9 +65,9 @@ if [ "$has_grant" = true ]; then
 fi
 
 if [ "$has_role" = true ]; then
-  note="The role is held but the grant is absent or does not cover this script. Repair it from the provisioning plane; do not reproduce the step by hand. A group added in this session takes effect at next login."
+  note="The role is held but the grant is absent or does not cover this script. Repair it from the provisioning plane; do not reproduce the step by hand. A group added now reaches only a process that starts after it. /etc/commonclaw/workspace-conventions.md says what ends the old ones, under Access."
 else
-  note="The caller does not hold the ${ROLE} role. The claw's own admin runs this operation, or grants the role first. A group added in this session takes effect at next login."
+  note="The caller does not hold the ${ROLE} role. The claw's own admin runs this operation, or grants the role first. A group added now reaches only a process that starts after it. /etc/commonclaw/workspace-conventions.md says what ends the old ones, under Access."
 fi
 
 jq -n \

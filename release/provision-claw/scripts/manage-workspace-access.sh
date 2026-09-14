@@ -36,10 +36,11 @@
 # guard for every repository on the claw, which is far more than membership of
 # one workspace means.
 #
-# A GROUP CHANGE REACHES THE PERSON AT THEIR NEXT LOGIN, and this door SAYS so
-# on every change rather than leaving it to be rediscovered. An existing session
-# keeps the groups it started with. This is the usual reason a fresh grant looks
-# like it did nothing, and the answer is to reconnect.
+# A GROUP CHANGE REACHES ONLY A PROCESS THAT STARTS AFTER IT, and this door SAYS
+# so on every change rather than leaving it to be rediscovered. The person's
+# desktop app server on the claw and their background-agent daemon outlive a
+# login. This is the usual reason a fresh grant looks like it did nothing, and
+# the conventions file says what ends them.
 #
 # REVOKING THE LAST MEMBER IS ALLOWED AND WARNED, NEVER REFUSED. An empty
 # workspace is a state, not an error: a firm between people on a domain of work
@@ -378,8 +379,9 @@ if [ -z "$MEMBERS_AFTER" ]; then
 fi
 
 say ""
-say "  A group change takes effect at ${PERSON}'s NEXT login. An existing session keeps"
-say "  the groups it started with, so tell them to reconnect. This is the usual reason a"
-say "  fresh grant looks like it did nothing."
+say "  A group change reaches only a process ${PERSON} starts after it. Their desktop app"
+say "  server on this claw and their background-agent daemon outlive a login, and this is"
+say "  the usual reason a fresh grant looks like it did nothing. A revoke holds once those"
+say "  have ended. /etc/commonclaw/workspace-conventions.md says what ends them, under Access."
 
 finish

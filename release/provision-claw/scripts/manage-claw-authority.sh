@@ -1230,7 +1230,7 @@ case "$OPERATION" in
       *" ${PERSON} "*) ok "${PERSON} is in ${CLAW_ADMIN_GROUP}, so the vendor doors open for them" ;;
       *) bad "${PERSON} is not in ${CLAW_ADMIN_GROUP} -- the tier is recorded and opens nothing" ;;
     esac
-    warn "a group added while ${PERSON} is logged in does not reach that session. They log in again."
+    warn "a group added now reaches only a process ${PERSON} starts after it, and their desktop app server on this claw outlives a login. /etc/commonclaw/workspace-conventions.md says what ends it, under Access."
     ;;
   remove-admin)
     if is_admin_principal "$PERSON"; then bad "${PERSON} is still in ${ADMINS_FILE} after a remove"
@@ -1239,7 +1239,7 @@ case "$OPERATION" in
       *" ${PERSON} "*) bad "${PERSON} is still in ${CLAW_ADMIN_GROUP}" ;;
       *) ok "${PERSON} is out of ${CLAW_ADMIN_GROUP}" ;;
     esac
-    warn "a session ${PERSON} already had keeps the groups it started with. Removing a tier shuts the door and leaves whoever is inside where they are: check for live sessions."
+    warn "a process ${PERSON} already had keeps the groups it started with, and their desktop app server on this claw outlives a login. Removing a tier shuts the door and leaves whoever is inside where they are: end their processes, as /etc/commonclaw/workspace-conventions.md says under Access."
     ;;
   transfer-owner)
     if [ "$(awk '!/^#/ && NF {print $1; exit}' "$OWNER_FILE")" = "$PERSON" ]; then

@@ -22,8 +22,8 @@ commonclaw_connection.mcp_storage for the MCP Python SDK. Both live under
 skill says more.
 
 WHO MAY DO WHAT. Every person may list, add, read status and check a row whose
-group they are in. Removing a row is a claw-admin's act. Seeding is root's,
-through the seed door.
+group they are in. Removing a row is a claw-admin's act. So is seeding one,
+through the seed door, which runs as root under sudo.
 
 EXIT CODES. 0 the service answered ok. 1 it refused. 2 usage. 4 it could not be
 reached.
@@ -90,7 +90,7 @@ def seed_steps(name, row, item, vault, host, fields):
         out += [
             "     Paste each value from the provider's own page. Nobody types a value into a",
             "     conversation or a shell.",
-            "  4. A person with root on this claw runs:",
+            "  4. A claw-admin runs this from their own login:",
             "       %s" % door,
             "  5. Then: token check %s" % name,
         ]
@@ -107,7 +107,7 @@ def seed_steps(name, row, item, vault, host, fields):
             "       uv run token-helper.py --metadata %s --vault %s --item %s%s"
             % (row.get("metadata"), vault, item, extra),
             "  4. Approve in the browser. The helper writes the seed into %s and prints no value." % item,
-            "  5. A person with root on this claw runs:",
+            "  5. A claw-admin runs this from their own login:",
             "       %s" % door,
             "  6. Then: token check %s" % name,
         ]
@@ -115,7 +115,7 @@ def seed_steps(name, row, item, vault, host, fields):
         out += [
             "  1. From your own computer, open a tunnel for one port:",
             "       ssh -L %d:127.0.0.1:%d %s" % (TUNNEL_PORT, TUNNEL_PORT, host),
-            "  2. In that shell, a person with root runs:",
+            "  2. In that shell, a claw-admin runs:",
             "       %s --authorize --port %d" % (door, TUNNEL_PORT),
             "  3. Open the link it prints, on your own computer, and approve. The door seeds",
             "     the row straight from the approval.",

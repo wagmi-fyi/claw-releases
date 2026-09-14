@@ -21,10 +21,11 @@ that say the same thing drift, and the drift is silent.
 `.workspace.yaml` is what makes a directory a workspace. Report a directory
 that has none. Do not make one by hand. Do not work in one.
 
-## A group change reaches a person at their next login
+## A group change reaches a process that starts after it
 
-An existing session keeps the groups it started with. Access that fails
-immediately after a grant is usually this, and not a fault.
+A running process keeps the groups it started with, and some outlive every
+session. Access that fails immediately after a grant is usually this, and not a
+fault. The conventions file below says which ones and what ends them.
 
 ## Everything else
 

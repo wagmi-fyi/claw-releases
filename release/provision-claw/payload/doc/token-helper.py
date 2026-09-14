@@ -293,7 +293,7 @@ def main():
         say("the seed went to the door through its pipe")
         return 0
     write_vault(args, seed)
-    say("Next, on the claw, a person with root runs the seed door for this row.")
+    say("Next, on the claw, a claw-admin runs the seed door for this row.")
     return 0
 
 

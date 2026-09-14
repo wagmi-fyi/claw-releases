@@ -388,7 +388,7 @@ if [ ! -e "\$__f" ] && [ -x "\$(dirname -- "\$__f")" ]; then
 fi
 if [ ! -r "\$__f" ]; then
     printf 'op-agents: you cannot read the agents token at %s\\n' "\$__f" >&2
-    printf 'op-agents: membership of ${CC_AGENTS_GROUP} is what makes it readable, and a group added while you were logged in reaches you at your next login\\n' >&2
+    printf 'op-agents: membership of ${CC_AGENTS_GROUP} is what makes it readable, and a group added reaches only a process that starts after it. /etc/commonclaw/workspace-conventions.md says what ends the old ones, under Access\\n' >&2
     exit 1
 fi
 

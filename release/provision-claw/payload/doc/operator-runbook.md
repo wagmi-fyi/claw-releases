@@ -386,6 +386,8 @@ instead, move your entry off the claw and update again.
 | `/usr/local/sbin/commonclaw-stall-check.sh` | the stall check |
 | `/opt/commonclaw/bin/bus` | the session bus program |
 | `/opt/commonclaw/bin/bus-nudge` | the wake rail |
+| `/opt/commonclaw/bin/session-guard` | whether a session's process is the live one or a newer one replaced it |
+| `/opt/commonclaw/bin/session-sweep` | ends a replaced session process, under `session-sweep@<account>.timer` |
 | `/opt/commonclaw/doc/wake-rail.md` | the wake rail's own contract |
 | `/opt/commonclaw/doc/operator-runbook.md` | this document |
 

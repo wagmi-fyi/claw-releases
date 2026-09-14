@@ -43,4 +43,4 @@ Neither is worked around. Report which one it is.
 
 Replace the instructions file with the workspace's real context: what the work is, what the databases hold, which skills matter. The scaffold gives a shape, not a briefing.
 
-Each member opens the workspace once in each core. A group change takes effect at the member's next login, and an existing session keeps its old groups, which is the usual reason a fresh grant looks like it did nothing.
+Each member opens the workspace once in each core. A group change reaches only a process that starts after it. A member whose desktop app was already connected keeps the old groups until its server on the claw ends, and that is the usual reason a fresh grant looks like it did nothing. `/etc/commonclaw/workspace-conventions.md` says what ends it, under Access.

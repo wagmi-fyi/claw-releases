@@ -94,7 +94,47 @@ waits for the next beat arrives at a process that has already gone. The timer
 beside the service exists only to start it again if systemd ever gives up on
 restarting it.
 
+## Generations, the guard and the sweeper
+
+The desktop app can reconnect a conversation under a new process and leave the
+old process running. Both carry one session id. The old one holds the
+transcript open and takes a turn whenever something wakes it. Each of those
+processes is a generation of the session.
+
+**The nudge goes to the newest generation.** Where the harness records its
+sessions, the rail sends a handle's nudge to the newest running process that
+carries the handle's session id. Newest comes from the kernel's start time for
+each process. The older ones get nothing, and the rail's log names each by pid
+and start time. Where no record names the session, the pid the handle
+registered with decides.
+
+**A session can ask whether it was replaced.** `session-guard` prints `live` or
+`superseded` and exits 0 or 1, with its reason on stderr. Superseded means a
+newer process carries the same session id. A session that reads superseded
+stops acting and says so once. The orchestrate skill runs the guard first on
+every resume and every beat, and tells each delegate it spawns to do the same.
+The rail and the sweeper load the same file, so all three agree on which
+process is newest.
+
+**The sweeper ends the old generation.** `session-sweep` runs every five
+minutes as the account, under its own timer, `session-sweep@<account>.timer`.
+It sends SIGTERM to an older process once a newer process of the same session
+has run for the grace period and holds its session socket open. A background
+agent is left running, because its harness starts a killed one again from the
+transcript; `claude stop <id>` retires one of those. The grace period is
+`SWEEP_GRACE_SECS` in the machine conf, 300 seconds as shipped.
+`session-sweep --dry-run` shows what a pass would end, and `--check` shows the
+grace period and where it came from.
+
+Disabling the timer switches the sweeper off, and a later install leaves it
+off. The rail's `ENABLED` setting does not reach it.
+
 ## What fails silently here
+
+- **A reconnect that changes the session id escapes all three.** The guard, the
+  rail and the sweeper link processes by session id. When a conversation comes
+  back under a new id, its old process reads as a session of its own. It stays
+  until somebody ends it.
 
 - **A stopped instance and a quiet bus look the same.** Nothing announces that
   the watcher is gone. `systemctl is-active` and `bus-nudge --check`, which

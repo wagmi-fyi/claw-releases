@@ -69,7 +69,26 @@ A workspace is mode 2770 with setgid, owned by group `ws-<name>`, with default A
 
 Files you create inherit the group. Every member can write what another member created.
 
-A group change takes effect on the person's next login. An existing session keeps its old groups.
+### A group change reaches a process that starts after it
+
+A running process keeps the groups it started with. Two of yours on a claw outlive every login, and both have to end before a change to your groups reaches you.
+
+**The desktop app's server.** The app runs `server --serve` on the claw, under your `~/.claude/remote/`, and every session you open from the app runs under it. Quitting the app and opening it again reconnects to that same server.
+
+**The background-agent daemon.** `claude daemon run` starts your background agents, with a `bg-pty-host` and a `bg-spare` process beside them. Every agent it starts inherits its groups.
+
+Whoever runs the claw ends both for you as root:
+
+```
+sudo pkill -u <person> -x server
+sudo pkill -u <person> -f 'claude (daemon run|bg-pty-host|bg-spare)'
+```
+
+From a terminal on the claw you can end your own without root: `pkill -x server`, then `claude daemon stop --any`. Ending the daemon ends every background agent you have running, so do it when none is in the middle of work.
+
+Then open the app again. An app left open starts a fresh server by itself within seconds. The daemon starts again with your next background agent. A session that still reads `Permission denied` on the bus or in a workspace started before the change.
+
+A removal waits the same way. A process that started while you were in a group keeps that group until it ends.
 
 ## Credentials
 

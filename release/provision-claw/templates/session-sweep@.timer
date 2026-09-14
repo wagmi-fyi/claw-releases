@@ -1,0 +1,16 @@
+# Installed VERBATIM, never rendered. See session-sweep@.service.
+#
+# Every five minutes, off the minute. With the shipped grace period of 300
+# seconds, an old process is ended between five and about eleven minutes after
+# the reconnect that replaced it.
+[Unit]
+Description=Session sweep for %i, every five minutes
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* *:0/5:00
+RandomizedDelaySec=30
+Unit=session-sweep@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -36,6 +36,12 @@
 # output, in a log line, or on disk: it moves from the manager's stdout into this
 # door's memory and onto the socket.
 #
+# WHO RUNS IT. A claw-admin, from their own login, with sudo. The door is on
+# the claw-admin grant, so the firm's admin seeds a row with no root login.
+# Nothing in the caller's session reaches the door: it reads the claw's own
+# machine credential, runs with root's home, and starts from the root
+# directory, so a file in the directory the caller stood in is never imported.
+#
 # EXIT CODES. 0 the row is seeded. 1 the service or the vault refused. 2 usage,
 # or a claw that is not ready.
 #
@@ -47,6 +53,9 @@ set -euo pipefail
 # The caller's environment decides nothing. A member could export a token of
 # their own, and a read that used it would read somebody else's vault.
 unset OP_SERVICE_ACCOUNT_TOKEN OP_CONNECT_HOST OP_CONNECT_TOKEN OP_ACCOUNT || true
+# The manager keeps its config under HOME. Root's own, so a read never lands in
+# the caller's home, whatever sudo's policy on this claw does with HOME.
+export HOME=/root
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 [ -z "${DOOR_PATH_FIRST:-}" ] || PATH="${DOOR_PATH_FIRST}:${PATH}"
 export PATH
@@ -75,7 +84,7 @@ usage() {
 }
 case "${1:-}" in ""|-h|--help) usage ;; esac
 
-[ "$(id -u)" -eq 0 ] || { printf 'run this as root: the token service takes a seed from root alone\n' >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || { printf 'run this as root, with sudo: the token service takes a seed from root alone\n' >&2; exit 2; }
 
 # THE ACCOUNT THE SEED IS RECORDED FOR, from what sudo recorded, never from the
 # environment a caller could set. Root by hand is recorded as root.
@@ -84,7 +93,13 @@ case "$BY" in [a-z_]*) : ;; *) BY="root" ;; esac
 case "$BY" in *[!a-z0-9_-]*) BY="root" ;; esac
 export SEED_DOOR_BY="$BY"
 
-exec python3 -B - "$@" <<'PY'
+# THE PROGRAM RUNS ISOLATED, FROM /. Python reading its program from stdin puts
+# the working directory first on its import path. Under sudo that directory is
+# the caller's, and it can be a workspace any member writes, so a file named
+# for a module it imports would run as root. -I leaves it off the path, and cd
+# leaves nothing of the caller's to find.
+cd /
+exec python3 -I -B - "$@" <<'PY'
 import argparse
 import json
 import os

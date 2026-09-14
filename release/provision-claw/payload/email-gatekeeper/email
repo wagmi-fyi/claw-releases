@@ -144,7 +144,9 @@ def main():
     i = sub.add_parser("inbox", help="the claw's own inbox, made once")
     isub = i.add_subparsers(dest="inbox_cmd")
     c = isub.add_parser("create")
-    c.add_argument("--username", default="")
+    # REQUIRED, because the provider picks a name when it is given none, and the
+    # service would record that name and listen on it.
+    c.add_argument("--username", required=True, help="the name before the @")
     c.add_argument("--domain", default="")
     c.add_argument("--display-name", dest="display_name", default="")
 
@@ -213,6 +215,11 @@ def main():
         return 2
     if a.cmd == "inbox":
         if a.inbox_cmd == "create":
+            if not a.username.strip():
+                # An empty value is a variable that expanded to nothing.
+                c.print_usage(sys.stderr)
+                sys.stderr.write("email inbox create: --username needs a name\n")
+                return 2
             return show(call({"verb": "inbox-create", "username": a.username,
                               "domain": a.domain, "display_name": a.display_name}))
         ap.parse_args(["inbox", "--help"])

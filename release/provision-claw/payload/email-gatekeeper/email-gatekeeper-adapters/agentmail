@@ -16,6 +16,11 @@ THE ADAPTER CONTRACT, WHICH EVERY ADAPTER HERE ANSWERS AND NONE MAY WIDEN:
   3 for a transport that changed underneath. A failure prints
   {"error": "..."} and exits 3, so the core never has to guess.
 
+  make-inbox with an empty username is usage. It prints {"error": "..."},
+  exits 2, and calls the provider for nothing, because a provider given no
+  name picks one. No error, reason or usage line an adapter prints carries a
+  backtick.
+
 THE KEY COMES FROM THE ENVIRONMENT AND GOES NOWHERE ELSE. `EMAIL_PROVIDER_KEY`
 is read once here. /proc/PID/cmdline is world-readable and this claw is
 deliberately multi-user, so the key is never an argument, never printed, and
@@ -37,6 +42,20 @@ WHAT WAS READ, AND WHEN. The endpoints, the event strings and the subscribe
 frame below were read from AgentMail's published documentation on 2026-09-04.
 An API that has moved since shows up as a 404 or an unexpected shape, and both
 exit 3 rather than being smoothed over.
+
+A REFUSAL CARRIES THE PROVIDER'S OWN WORDS. The same status can mean several
+things here: a create answered 403 for a name that already exists, and the
+status alone told a person nothing. So the reason takes the string fields the
+provider puts in a JSON error body, and only those named in SAID_FIELDS, each
+cut to SAID_LIMIT characters. Never the whole body and never a header. A field
+that holds the key is dropped whole.
+
+AN INBOX THAT ALREADY EXISTS IS ADOPTED. A create refused as already existing
+lists this organisation's inboxes and answers with the one at the address that
+was asked for. A second inbox is never made. When the organisation has none at
+that address, another organisation holds the name, and the refusal says so. The
+refusal's name and code, and the listing's shape, were measured against the
+provider on 2026-09-14; the documentation says nothing of either.
 """
 
 import base64
@@ -54,6 +73,13 @@ API = os.environ.get("AGENTMAIL_API", "https://api.agentmail.to")
 WS = os.environ.get("AGENTMAIL_WS", "wss://ws.agentmail.to/v0")
 KEY_ENV = "EMAIL_PROVIDER_KEY"
 UA = "commonclaw-email-gatekeeper"
+# The fields of an error body a reason may carry, in the order it carries them.
+SAID_FIELDS = ("error", "message", "detail", "name", "code")
+SAID_LIMIT = 200
+# The domain the provider gives an inbox made with none named.
+DEFAULT_DOMAIN = "agentmail.to"
+# A listing that pages further than this is not an organisation's inboxes.
+MAX_PAGES = 100
 
 
 def die(reason, code=3):
@@ -68,6 +94,58 @@ def key():
     return k
 
 
+def provider_said(exc):
+    """The provider's own words on an error status, as {field: text}.
+
+    Read from a JSON error body, and only the fields SAID_FIELDS names. Each is
+    one line cut to SAID_LIMIT characters. A body that is not a JSON object
+    gives nothing, and so does a field holding the key.
+    """
+    try:
+        body = json.loads(exc.read(65536).decode("utf-8", "replace"))
+    except Exception:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    k = os.environ.get(KEY_ENV, "").strip()
+    said = {}
+    for f in SAID_FIELDS:
+        v = body.get(f)
+        if not isinstance(v, str):
+            continue
+        v = " ".join(v.split())[:SAID_LIMIT]
+        if v and not (k and k in v):
+            # A backtick becomes a single quote. These words reach a reason a
+            # reader may quote into a shell string, where a backtick runs a
+            # command. Written as chr(96) so this file carries none in a string.
+            said[f] = v.replace(chr(96), "'")
+    return said
+
+
+def said_suffix(said):
+    """What a reason appends after the status: ': f=text; ...', or nothing."""
+    words = "; ".join("%s=%s" % (f, said[f]) for f in SAID_FIELDS if f in said)
+    return (": " + words) if words else ""
+
+
+class Refused(Exception):
+    """An error status from the provider: the call, the status, the words."""
+
+    def __init__(self, method, path, status, said):
+        Exception.__init__(self)
+        self.method, self.path, self.status, self.said = method, path, status, said
+
+    def already_exists(self):
+        return (self.said.get("code") == "already_exists"
+                or self.said.get("name") == "AlreadyExistsError")
+
+    def reason(self):
+        # The status and the endpoint, then the provider's words. Never the
+        # key, never a header, never the body of a message.
+        return "%s %s answered %s%s" % (self.method, self.path, self.status,
+                                        said_suffix(self.said))
+
+
 def api(method, path, body=None):
     url = API.rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -80,9 +158,7 @@ def api(method, path, body=None):
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        # The status and the endpoint, never the key and never the body of a
-        # message. A 401 here means the key is wrong, not that it should print.
-        die("%s %s answered %s" % (method, path, exc.code))
+        raise Refused(method, path, exc.code, provider_said(exc))
     except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
         die("%s %s could not be reached: %s" % (method, path, exc))
     if not raw.strip():
@@ -134,22 +210,53 @@ def v_probe(_req):
         return {"provider": "agentmail", "ready": True, "reason": "the account answered"}
     except urllib.error.HTTPError as exc:
         return {"provider": "agentmail", "ready": False,
-                "reason": "the account answered %s" % exc.code}
+                "reason": "the account answered %s%s"
+                          % (exc.code, said_suffix(provider_said(exc)))}
     except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
         return {"provider": "agentmail", "ready": False,
                 "reason": "the provider could not be reached: %s" % exc}
 
 
 def v_make_inbox(req):
-    body = {}
-    if req.get("username"):
-        body["username"] = req["username"]
+    username = (req.get("username") or "").strip()
+    if not username:
+        # The provider picks a name when it is given none. Refused before any
+        # call, so a caller that went round the command makes nothing.
+        die("make-inbox needs a username, so nothing was asked of the provider", 2)
+    body = {"username": username}
     if req.get("domain"):
         body["domain"] = req["domain"]
     if req.get("display_name"):
         body["display_name"] = req["display_name"]
-    out = api("POST", "/v0/inboxes", body)
+    try:
+        out = api("POST", "/v0/inboxes", body)
+    except Refused as exc:
+        if not exc.already_exists():
+            raise
+        address = "%s@%s" % (username, req.get("domain") or DEFAULT_DOMAIN)
+        out = find_inbox(address)
+        if not out:
+            die("%s, and this organisation has no inbox at %s, so another organisation "
+                "holds that name" % (exc.reason(), address))
     return {"inbox_id": out.get("inbox_id", ""), "address": out.get("email", "")}
+
+
+def find_inbox(address):
+    """This organisation's inbox at an address, or None. Reads every page."""
+    token, seen = "", set()
+    for _ in range(MAX_PAGES):
+        q = {"limit": 100}
+        if token:
+            q["page_token"] = token
+        page = api("GET", "/v0/inboxes?" + urllib.parse.urlencode(q))
+        for i in page.get("inboxes") or []:
+            if str(i.get("email", "")).lower() == address.lower():
+                return i
+        token = page.get("next_page_token") or ""
+        if not token or token in seen:
+            return None
+        seen.add(token)
+    return None
 
 
 def v_thread(req):
@@ -372,7 +479,10 @@ def main():
         req = json.loads(raw or "{}")
     except ValueError:
         die("stdin was not JSON", 2)
-    out = VERBS[verb](req)
+    try:
+        out = VERBS[verb](req)
+    except Refused as exc:
+        die(exc.reason())
     if out is not None:
         emit(out)
     return 0
