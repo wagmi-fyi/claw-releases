@@ -1,0 +1,17 @@
+[Unit]
+Description=Firm-VM mail check: tell a named person when mail is not being handled
+After=network-online.target email-gatekeeper.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The webhook reference resolves under the machine service account. systemd
+# decrypts the credential, so this unit never touches the encrypted file itself
+# and the notifier's second token path answers.
+LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/usr/local/sbin/commonclaw-mail-check.sh
+# No Restart=. A beat that could not deliver waits for the next beat, five
+# minutes later.
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

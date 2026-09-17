@@ -21,6 +21,7 @@
 #     ssh {claw} 'sudo /opt/commonclaw/provision-claw/scripts/install-agents-token.sh'
 #
 #   --dry-run   check the drop, the group and the claw; change nothing, read no token
+#   --survey    list the startup files that export a 1Password token, and do nothing else
 #
 # ONE FILE FOR THE WHOLE CLAW. The token rests at the path `agents-plane.sh`
 # names, root-owned, group-read by `agents-cred`, and nowhere else. It takes no
@@ -78,6 +79,12 @@
 # 5. WRITING THROUGH A SYMLINK OR A SECOND HARD LINK, at the claw path and in
 #    every home this door touches.
 #
+# A STARTUP FILE THAT EXPORTS A TOKEN IS REPORTED AND LEFT. A person's .bashrc
+# or another startup file can export the token from a file of their own, and
+# every shell they start then carries it after this door has run. The survey
+# names each such line as a note, by file, line number and variable name, and
+# removes nothing, because this door cannot know whose token it is.
+#
 # VERIFY BEFORE YOU BURN, at both ends. Gate 1 runs before this claw moves at
 # all, so a wrong token dies with the previous credential untouched and the
 # caller still holding their only copy. Gate 2 runs at the surface that
@@ -105,6 +112,7 @@
 set -euo pipefail
 
 DRY_RUN=0
+SURVEY=0
 
 # The caller's environment decides nothing here. A claw-admin running this door
 # has an agents token of their own exported into their session, and a gate that
@@ -134,6 +142,7 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
+    --survey) SURVEY=1; shift ;;
     -h|--help) usage ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
   esac
@@ -143,6 +152,7 @@ CHK_DESC=(); CHK_OK=(); NOTES=(); FAILED=0
 ACTION="none"; TOKEN=""; DROP=""; AGENTS_VAULT=""; MACHINE_VAULT=""
 PROBE_PERSON=""; PROBE_HOME=""; CONVERGED=0
 LEGACY_HOMES=(); LEGACY_PEOPLE=()
+STARTUP_PEOPLE=(); STARTUP_HITS=()
 
 # ---------------------------------------------------------------- the scrubber
 #
@@ -170,7 +180,7 @@ json_esc() {
 }
 
 emit_json() {
-  local i first
+  local i first u local_first
   printf '{\n'
   printf '  "script": "install-agents-token",\n'
   printf '  "ok": %s,\n' "$([ "$FAILED" -eq 0 ] && echo true || echo false)"
@@ -181,6 +191,25 @@ emit_json() {
   printf '  "drop_path": "%s",\n' "$(json_esc "$DROP")"
   printf '  "probed_member": "%s",\n' "$(json_esc "$PROBE_PERSON")"
   printf '  "converged": %s,\n' "$([ "$CONVERGED" -eq 1 ] && echo true || echo false)"
+  printf '  "startup_exports_count": %s,\n' "${#STARTUP_HITS[@]}"
+  if [ "${#STARTUP_HITS[@]}" -eq 0 ]; then
+    printf '  "startup_exports": "none",\n'
+  else
+    printf '  "startup_exports": {'
+    first=1
+    for u in $(printf '%s\n' "${STARTUP_PEOPLE[@]}" | sort -u); do
+      [ "$first" -eq 0 ] && printf ','
+      printf '\n    "%s": [' "$(json_esc "$u")"
+      local_first=1
+      for i in "${!STARTUP_HITS[@]}"; do
+        [ "${STARTUP_PEOPLE[$i]}" = "$u" ] || continue
+        [ "$local_first" -eq 0 ] && printf ', '
+        printf '"%s"' "$(json_esc "${STARTUP_HITS[$i]}")"; local_first=0
+      done
+      printf ']'; first=0
+    done
+    printf '\n  },\n'
+  fi
   printf '  "action": "%s",\n' "$(json_esc "$ACTION")"
   printf '  "checks": [\n'
   for i in "${!CHK_DESC[@]}"; do
@@ -207,7 +236,12 @@ emit_json() {
   printf ']\n}\n'
 }
 
-finish() { emit_json; [ "$FAILED" -eq 0 ] || exit 1; exit 0; }
+# The closing count goes to stderr with the rest of the progress, so a person
+# reading the run sees it last.
+finish() {
+  say "  startup files that export a 1Password token: ${#STARTUP_HITS[@]}"
+  emit_json; [ "$FAILED" -eq 0 ] || exit 1; exit 0
+}
 
 # Whatever happens, the token leaves this process's memory and the scratch tree
 # goes with it. The drop copy is NOT removed here: burning it is a decision the
@@ -310,11 +344,33 @@ while IFS=: read -r u _ _ _ _ home _; do
   if [ -f "$(cc_agents_legacy_token "$home")" ]; then
     LEGACY_HOMES+=("$home"); LEGACY_PEOPLE+=("$u")
   fi
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    STARTUP_PEOPLE+=("$u"); STARTUP_HITS+=("$hit")
+    hit_line="${hit%:*}"
+    warn "${u}: ${hit%%:*} line ${hit_line##*:} sets or exports ${hit##*:}. This startup file puts a 1Password token into every shell ${u} starts, and this door does not remove it."
+  done < <(cc_agents_startup_exports "$home")
   [ -n "$PROBE_PERSON" ] && continue
   cc_agents_reads "$u" || continue
   [ "$(cc_agents_plane_state "$home")" = "wired" ] || continue
   PROBE_PERSON="$u"; PROBE_HOME="$home"
 done < <(getent passwd)
+
+# The survey is a reading of the homes and nothing more. It needs no drop and
+# changes nothing.
+if [ "$SURVEY" -eq 1 ]; then
+  ACTION="survey"
+  say ""
+  say "=== startup files that export a 1Password token ==="
+  if [ "${#STARTUP_HITS[@]}" -eq 0 ]; then
+    say "  none"
+  else
+    for i in "${!STARTUP_HITS[@]}"; do
+      say "  ${STARTUP_PEOPLE[$i]}  ${STARTUP_HITS[$i]}"
+    done
+  fi
+  finish
+fi
 
 # ---- the drop ----
 

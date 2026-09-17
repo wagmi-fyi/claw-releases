@@ -1,7 +1,7 @@
 # Installed VERBATIM, never rendered. The %i is systemd's own instance
 # expansion, and render-template.sh must not touch this file.
 #
-# One instance per account: session-sweep@jeremiah.service. It runs AS that
+# One instance per account: session-sweep@<account>.service. It runs AS that
 # account for the wake rail's reason. The session records and the processes it
 # reads are that account's, and ending a process belonging to somebody else is
 # a different act with a different consent story.

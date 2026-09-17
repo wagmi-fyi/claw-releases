@@ -90,6 +90,59 @@ cc_agents_legacy_token() {
   printf '%s/.config/commonclaw/agents-token' "$1"
 }
 
+# The startup files a login or interactive shell reads, relative to a home.
+CC_AGENTS_STARTUP_FILES=(.bashrc .bash_profile .bash_login .profile .zshrc .zprofile .zshenv .config/fish/config.fish)
+
+# Which startup files in one home set or export a 1Password token. Prints one
+# path:line:NAME per hit and nothing else.
+#
+# A HAND-MADE EXPORT DEFEATS THE CONVERGENCE. The door removes the per-home copy
+# it knows the path of. A person's startup file can still export the same token
+# from a file somewhere else in the home, into every shell, and nothing else on
+# the claw reads that line.
+#
+# NAMES ONLY. awk prints the path, the line number and the variable's name, and
+# never a byte of the line. The value stays inside awk and this function keeps
+# no variable that holds one. A comment line does not count, and neither does a
+# comment after the code. A file that is absent or unreadable is skipped
+# without a word.
+#
+# A SYMLINKED STARTUP FILE IS READ ONLY WHEN THE HOME'S OWNER OWNS WHAT IT NAMES.
+# The door runs this as root, and a link would otherwise make root read a file
+# the person chose.
+cc_agents_startup_exports() {
+  local home="$1" rel f fish owner
+  owner="$(stat -c '%u' "$home" 2>/dev/null)" || return 0
+  for rel in "${CC_AGENTS_STARTUP_FILES[@]}"; do
+    f="${home}/${rel}"
+    if [ -L "$f" ]; then
+      [ "$(stat -L -c '%u' "$f" 2>/dev/null)" = "$owner" ] || continue
+    fi
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    fish=0
+    case "$rel" in *.fish) fish=1 ;; esac
+    awk -v path="$f" -v fish="$fish" '
+      BEGIN { n = split("OP_SERVICE_ACCOUNT_TOKEN OP_CONNECT_TOKEN", names, " ") }
+      {
+        code = $0
+        if (code ~ /^[ \t]*#/) next
+        sub(/[ \t]#.*$/, "", code)
+        for (i = 1; i <= n; i++) {
+          v = names[i]
+          hit = 0
+          if (code ~ ("(^|[;&|({ \t])" v "=")) hit = 1
+          else if (code ~ ("(^|[;&|({ \t])(export|declare|typeset|readonly)[ \t]([^;&|]*[ \t])?" v "([ \t;]|$)")) hit = 1
+          else if (fish && match(code, "(^|[;( \t])set[ \t]+([^;]*[ \t])?" v "([ \t;]|$)")) {
+            flags = substr(code, RSTART, RLENGTH)
+            if (flags !~ /[ \t]-[A-Za-z]*[eqn]/ && flags !~ /--(erase|query|names)/) hit = 1
+          }
+          if (hit) print path ":" FNR ":" v
+        }
+      }' "$f" 2>/dev/null || true
+  done
+  return 0
+}
+
 # The hook, as one exact line. Compared with grep -qxF, so a stray space makes
 # it a different line and the wiring doubles. Nobody edits this string on one
 # side alone.

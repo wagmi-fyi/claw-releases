@@ -10,7 +10,10 @@ THE ADAPTER CONTRACT, WHICH EVERY ADAPTER HERE ANSWERS AND NONE MAY WIDEN:
   send         {"inbox_id","to","cc","subject","text","in_reply_to","thread_id"}
                                                     -> {"message_id","thread_id"}
   listen       {"inbox_id"}                         -> one JSON line per inbound mail
-                                                       until killed
+                                                       until killed, and one per frame
+                                                       it did not act on
+  list-since   {"inbox_id","after"}                 -> {"messages":[...]}, each in the
+                                                       shape listen prints, oldest first
 
   JSON on stdin, one JSON object on stdout. Exit 0 for an answer, 2 for usage,
   3 for a transport that changed underneath. A failure prints
@@ -43,6 +46,18 @@ frame below were read from AgentMail's published documentation on 2026-09-04.
 An API that has moved since shows up as a 404 or an unexpected shape, and both
 exit 3 rather than being smoothed over.
 
+THE PUSH CHANNEL IS KEPT BUSY. The provider closes a connection that has
+carried nothing from our side for 10 minutes. On the hub, 712 connections
+between 2026-09-14 and 2026-09-17 each closed at exactly 600 seconds. So listen
+sends a ping frame every PING_SECS. The read timeout is the loop's beat, so a
+ping is at most READ_SECS late.
+
+MAIL THAT ARRIVED WHILE NOBODY LISTENED IS LISTED. The push channel delivers
+only what arrives after the subscribe frame and replays nothing. list-since
+reads the provider's list endpoint from a time the core saved, oldest first,
+every page, and only mail the provider labelled received. Each message comes
+back in the shape listen prints. It carries the preview and never the text.
+
 A REFUSAL CARRIES THE PROVIDER'S OWN WORDS. The same status can mean several
 things here: a create answered 403 for a name that already exists, and the
 status alone told a person nothing. So the reason takes the string fields the
@@ -59,12 +74,14 @@ provider on 2026-09-14; the documentation says nothing of either.
 """
 
 import base64
+import datetime
 import json
 import os
 import socket
 import ssl
 import struct
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -80,6 +97,16 @@ SAID_LIMIT = 200
 DEFAULT_DOMAIN = "agentmail.to"
 # A listing that pages further than this is not an organisation's inboxes.
 MAX_PAGES = 100
+# The push channel's keepalive and its read beat, in seconds. The provider's
+# idle close is at 600, so a ping due at 300 goes out by 370 at the latest. A
+# control shortens both. Nothing on a claw sets them.
+PING_SECS = float(os.environ.get("AGENTMAIL_PING_SECS", "300"))
+READ_SECS = float(os.environ.get("AGENTMAIL_READ_SECS", "70"))
+# One page of the list endpoint. A control shortens it to prove the paging.
+LIST_LIMIT = int(os.environ.get("AGENTMAIL_LIST_LIMIT", "100"))
+# A listed mail with one of these labels is not routed. The push channel leaves
+# these out unless a subscriber asks for them, and listen does not ask.
+UNROUTED_LABELS = ("spam", "blocked", "unauthenticated", "trash")
 
 
 def die(reason, code=3):
@@ -276,6 +303,80 @@ def v_message(req):
     return norm_message(api("GET", "/v0/inboxes/%s/messages/%s" % (inbox, mid)))
 
 
+def v_list_since(req):
+    """Received mail since a time, oldest first, in the shape listen prints.
+
+    AN EMPTY after IS USAGE. A list with no lower bound is the whole inbox, and
+    the core would route every mail ever received.
+    """
+    inbox = req.get("inbox_id", "")
+    after = (req.get("after") or "").strip()
+    if not inbox or not after:
+        die("list-since needs an inbox_id and an after time, so nothing was listed", 2)
+    when = provider_time(after)
+    if not when:
+        die("list-since was given an after time it cannot read: %s" % word_or_len(after), 2)
+    path = "/v0/inboxes/%s/messages" % urllib.parse.quote(inbox, safe="")
+    token, seen, out = "", set(), []
+    for _ in range(MAX_PAGES):
+        # NO labels FILTER IN THE QUERY. The provider refused this call with 400
+        # on the hub on 2026-09-17 and named no field, so the query carries only
+        # what the refusal cannot be about. The received filter is applied below.
+        q = {"after": when, "ascending": "true", "limit": LIST_LIMIT}
+        if token:
+            q["page_token"] = token
+        page = api("GET", path + "?" + urllib.parse.urlencode(q))
+        for m in page.get("messages") or []:
+            labels = m.get("labels") or []
+            if "received" not in labels or any(l in labels for l in UNROUTED_LABELS):
+                continue
+            out.append(as_event(inbox, m))
+        token = page.get("next_page_token") or ""
+        if not token:
+            return {"messages": out}
+        if token in seen:
+            die("the list endpoint gave the same page token twice")
+        seen.add(token)
+    die("the list endpoint paged past %d pages" % MAX_PAGES)
+
+
+def provider_time(text):
+    """A time in the form the provider's list endpoint takes, or "".
+
+    UTC, milliseconds, and a Z. The core saves its own times with +00:00, and
+    a strict datetime check refuses that offset.
+    """
+    try:
+        t = datetime.datetime.fromisoformat(str(text or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    t = t.astimezone(datetime.timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (t.microsecond // 1000)
+
+
+def word_or_len(text):
+    return "%d characters" % len(str(text))
+
+
+def as_event(inbox, m):
+    """One mail in the shape listen prints. The preview, never the text."""
+    return {
+        "event": "received",
+        "inbox_id": inbox,
+        "message_id": m.get("message_id", ""),
+        "thread_id": m.get("thread_id", ""),
+        "from": m.get("from", ""),
+        "to": m.get("to", []),
+        "subject": m.get("subject", ""),
+        "date": m.get("timestamp") or m.get("created_at", ""),
+        # The provider's own preview. The gatekeeper truncates it and
+        # composes nothing.
+        "preview": m.get("preview", ""),
+    }
+
+
 def v_send(req):
     inbox = urllib.parse.quote(req.get("inbox_id", ""), safe="")
     body = {
@@ -299,11 +400,12 @@ def v_send(req):
 
 # ------------------------------------------------------ the push channel
 #
-# A minimal RFC 6455 client. Text frames in, text frames out, ping answered with
-# pong, close honoured. Nothing else, because nothing else is needed to read an
-# event stream, and every line of transport here is a line that can be wrong.
+# A minimal RFC 6455 client. Messages in, whole, however many frames carried
+# them. Text frames out, ping answered with a pong that echoes it, close
+# honoured. Nothing else, because nothing else is needed to read an event
+# stream, and every line of transport here is a line that can be wrong.
 class WebSocket:
-    def __init__(self, url, timeout=70):
+    def __init__(self, url, timeout=READ_SECS):
         parts = urllib.parse.urlsplit(url)
         host = parts.hostname
         port = parts.port or (443 if parts.scheme == "wss" else 80)
@@ -335,18 +437,68 @@ class WebSocket:
             raise OSError("the push channel refused the upgrade: %s" % status)
         self.buf = head.split(b"\r\n\r\n", 1)[1]
 
-    def _read(self, n):
-        while len(self.buf) < n:
+        # A MESSAGE IN PROGRESS survives a read timeout. The opcode of its
+        # first frame and the payloads so far.
+        self.msg_op = None
+        self.msg_parts = []
+
+    @staticmethod
+    def _parse(buf):
+        """One whole frame from the front of buf, or None while it is partial.
+
+        Nothing is consumed until the whole frame is there. A read timeout
+        halfway through a frame used to lose its header, and every byte after
+        it was then read as a wrong frame.
+        """
+        if len(buf) < 2:
+            return None
+        b0, b1 = buf[0], buf[1]
+        n = b1 & 0x7F
+        at = 2
+        if n == 126:
+            if len(buf) < 4:
+                return None
+            n = struct.unpack(">H", buf[2:4])[0]
+            at = 4
+        elif n == 127:
+            if len(buf) < 10:
+                return None
+            n = struct.unpack(">Q", buf[2:10])[0]
+            at = 10
+        mask = b""
+        if b1 & 0x80:
+            if len(buf) < at + 4:
+                return None
+            mask = buf[at:at + 4]
+            at += 4
+        if len(buf) < at + n:
+            return None
+        data = buf[at:at + n]
+        if mask:
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        return bool(b0 & 0x80), b0 & 0x0F, data, at + n
+
+    def recv_frame(self):
+        """(fin, opcode, payload). A timeout leaves the buffer as it was."""
+        while True:
+            frame = self._parse(self.buf)
+            if frame:
+                fin, op, data, used = frame
+                self.buf = self.buf[used:]
+                return fin, op, data
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise OSError("the push channel closed")
             self.buf += chunk
-        out, self.buf = self.buf[:n], self.buf[n:]
-        return out
 
     def send_text(self, text):
-        payload = text.encode("utf-8")
-        header = bytearray([0x81])
+        self.send_frame(0x1, text.encode("utf-8"))
+
+    def send_ping(self):
+        self.send_frame(0x9, b"")
+
+    def send_frame(self, opcode, payload):
+        header = bytearray([0x80 | opcode])
         mask = os.urandom(4)
         n = len(payload)
         if n < 126:
@@ -361,34 +513,58 @@ class WebSocket:
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         self.sock.sendall(bytes(header) + masked)
 
-    def recv_text(self):
-        """One text message, or None for a control frame that needs no answer."""
-        b0, b1 = self._read(2)
-        opcode = b0 & 0x0F
-        n = b1 & 0x7F
-        if n == 126:
-            n = struct.unpack(">H", self._read(2))[0]
-        elif n == 127:
-            n = struct.unpack(">Q", self._read(8))[0]
-        if b1 & 0x80:
-            mask = self._read(4)
-            data = bytes(b ^ mask[i % 4] for i, b in enumerate(self._read(n)))
-        else:
-            data = self._read(n)
-        if opcode == 0x8:
-            raise OSError("the provider sent a close frame")
-        if opcode == 0x9:
-            self.sock.sendall(bytes([0x8A, 0x80]) + os.urandom(4))
-            return None
-        if opcode in (0x1, 0x2):
-            return data.decode("utf-8", "replace")
-        return None
+    def recv_message(self):
+        """One whole message as (opcode, payload), or None after a control frame.
+
+        A MESSAGE MAY COME IN PIECES. RFC 6455 lets a sender split one message
+        into a first frame and continuation frames, and the provider's gateway
+        splits a large one. A received-mail event carries the whole message and
+        its thread, which is the large kind. This client used to read the first
+        piece alone and drop the rest, so the mail never reached the service.
+        """
+        while True:
+            fin, op, data = self.recv_frame()
+            if op == 0x8:
+                raise OSError("the provider sent a close frame%s" % close_words(data))
+            if op == 0x9:
+                # A pong carries the ping's own payload back.
+                self.send_frame(0xA, data)
+                return None
+            if op == 0xA:
+                return None
+            if op == 0x0:
+                if self.msg_op is None:
+                    return (0x0, data)
+                self.msg_parts.append(data)
+            else:
+                self.msg_op, self.msg_parts = op, [data]
+            if fin:
+                whole = (self.msg_op, b"".join(self.msg_parts))
+                self.msg_op, self.msg_parts = None, []
+                return whole
 
     def close(self):
         try:
             self.sock.close()
         except OSError:
             pass
+
+
+def close_words(data):
+    """The code and the reason a close frame carries, or nothing.
+
+    The reason is the provider's own text, one line, cut to SAID_LIMIT, with a
+    backtick made a single quote. A reason that holds the key is dropped.
+    """
+    if len(data) < 2:
+        return ""
+    code = struct.unpack(">H", data[:2])[0]
+    why = " ".join(data[2:].decode("utf-8", "replace").split())[:SAID_LIMIT]
+    k = os.environ.get(KEY_ENV, "").strip()
+    if k and k in why:
+        why = ""
+    why = why.replace(chr(96), "'")
+    return " with code %d%s" % (code, (": " + why) if why else "")
 
 
 def v_listen(req):
@@ -413,45 +589,93 @@ def v_listen(req):
             "event_types": ["message.received"],
             "inbox_ids": [inbox],
         }))
+        last_ping = time.monotonic()
         while True:
+            # THE KEEPALIVE. Checked on every pass, so a busy channel and a
+            # quiet one both carry a frame from our side before the idle close.
+            if time.monotonic() - last_ping >= PING_SECS:
+                try:
+                    ws.send_ping()
+                except (OSError, ssl.SSLError) as exc:
+                    die("the push channel dropped: %s" % exc)
+                last_ping = time.monotonic()
             try:
-                raw = ws.recv_text()
+                got = ws.recv_message()
             except socket.timeout:
                 # A quiet channel is normal. A read timeout is not a drop, and
                 # treating it as one would reconnect this claw all day.
                 continue
             except (OSError, ssl.SSLError) as exc:
                 die("the push channel dropped: %s" % exc)
-            if raw is None:
+            if got is None:
+                continue
+            op, payload = got
+            if op != 0x1:
+                emit(unrecognised("binary" if op == 0x2 else "continuation", None, len(payload)))
                 continue
             try:
-                msg = json.loads(raw)
+                msg = json.loads(payload.decode("utf-8", "replace"))
             except ValueError:
+                emit(unrecognised("not-json", None, len(payload)))
+                continue
+            if not isinstance(msg, dict):
+                emit(unrecognised("not-an-object", None, len(payload)))
                 continue
             kind = msg.get("type")
             if kind == "subscribed":
-                emit({"event": "listening", "inbox_id": inbox})
+                named = msg.get("inbox_ids")
+                emit({"event": "listening", "inbox_id": inbox,
+                      "inbox_confirmed": (inbox in named) if isinstance(named, list) else None})
                 continue
             if kind == "error":
-                die("the push channel answered an error: %s" % msg.get("name", "unnamed"))
-            if kind != "event" or msg.get("event_type") != "message.received":
+                die("the push channel answered an error: %s" % (word(msg.get("name")) or "unnamed"))
+            m = msg.get("message")
+            if (kind == "event" and msg.get("event_type") == "message.received"
+                    and isinstance(m, dict)):
+                emit(as_event(inbox, m))
                 continue
-            m = msg.get("message") or msg.get("data") or {}
-            emit({
-                "event": "received",
-                "inbox_id": inbox,
-                "message_id": m.get("message_id", ""),
-                "thread_id": m.get("thread_id", ""),
-                "from": m.get("from", ""),
-                "to": m.get("to", []),
-                "subject": m.get("subject", ""),
-                "date": m.get("timestamp") or m.get("created_at", ""),
-                # The provider's own preview. The gatekeeper truncates it and
-                # composes nothing.
-                "preview": m.get("preview", ""),
-            })
+            emit(unrecognised(kind, msg, len(payload)))
     finally:
         ws.close()
+
+
+# A word a frame names about itself: letters, digits and . _ - only, and short.
+# Anything else is a value, and a value never leaves this adapter in a report.
+WORD_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+
+def word(v):
+    if not isinstance(v, str) or not v or len(v) > 40 or not set(v) <= WORD_CHARS:
+        return ""
+    return v
+
+
+def unrecognised(kind, msg, size):
+    """A frame this adapter did not act on, described without its content.
+
+    NOTHING IS DROPPED SILENTLY. On 2026-09-17 a mail reached the provider
+    while this adapter was connected, and nothing on the claw said a frame had
+    come and been passed over. The report names the frame's type word, its
+    event type word, its top-level key names and its size. A key name that is
+    not a plain word is counted and not named, because a provider that keyed a
+    frame by an address would otherwise put that address in the journal.
+    """
+    keys, odd = [], 0
+    if isinstance(msg, dict):
+        for k in msg:
+            if word(k):
+                keys.append(k)
+            else:
+                odd += 1
+    report = {"event": "unrecognised",
+              "frame_type": word(kind) if isinstance(msg, dict) else kind,
+              "keys": sorted(keys)[:30], "size": size}
+    if isinstance(msg, dict):
+        report["event_type"] = word(msg.get("event_type"))
+        report["message_is"] = type(msg.get("message")).__name__
+    if odd:
+        report["unnamed_keys"] = odd
+    return report
 
 
 def emit(obj):
@@ -466,6 +690,7 @@ VERBS = {
     "message": v_message,
     "send": v_send,
     "listen": v_listen,
+    "list-since": v_list_since,
 }
 
 

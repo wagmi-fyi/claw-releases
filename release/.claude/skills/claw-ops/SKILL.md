@@ -1,6 +1,6 @@
 ---
 name: claw-ops
-description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, or when a seat that has gone has to come off the roster."
+description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, when a seat that has gone has to come off the roster, when checking whether a person's shell startup file exports a 1Password token, or before a skill is installed for everybody on the claw outside a release."
 ---
 
 # Claw Ops
@@ -22,12 +22,14 @@ A **claw** is one firm's Linux machine. **CommonClaw** is the project. A claw is
 | Bootstrap a workspace | `operations/bootstrap-workspace.md` | `claw-admin` | A domain of work needs its own directory, group, manifest, and members |
 | Claw status | `operations/claw-status.md` | `member` | Somebody asks what exists on this claw, who reaches it, or whether the rail and the seats are healthy |
 | Seats | `operations/seats.md` | `member`, `claw-admin` to retire | Somebody asks which core seats this claw expects, or a seat this claw expects has gone and its row has to come off |
+| Startup tokens | `operations/startup-tokens.md` | `claw-admin` | Somebody asks whether a person's shell startup file exports a 1Password token into every shell |
 
 ## Reference
 
 | Reference | File | Precondition |
 |---|---|---|
 | Authority model | `reference/authority-model.md` | Before any operation. The roles, the door, and the limits of what each role can see |
+| Machine-wide skills | `reference/machine-wide-skills.md` | Before a skill is installed for everybody on the claw outside a release. What a release run keeps and what it removes |
 
 ## Scripts
 
@@ -39,6 +41,7 @@ Agent-invoked. Structured JSON to stdout, progress to stderr, `--help` on each. 
 | `scripts/claw-status.sh` | read this claw's state from what the caller can reach |
 | `scripts/seats.sh` | read the seat roster and the seat check's own recent verdicts |
 | `scripts/seats-retire.sh` | open the door, then run the claw's own seat retirement behind it |
+| `scripts/startup-tokens.sh` | open the door, then run the agents token door's startup-file survey behind it |
 
 ## What is proven
 

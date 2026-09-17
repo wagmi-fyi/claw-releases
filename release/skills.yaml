@@ -23,3 +23,5 @@
 skills:
   claw-ops:
     source: .claude/skills/claw-ops
+  email:
+    source: .claude/skills/email

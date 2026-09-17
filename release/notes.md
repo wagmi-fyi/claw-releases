@@ -1,115 +1,110 @@
-- **The claw now says what makes a group change reach you.** A program that is
-  already running keeps the groups it started with. Two of yours on a claw
-  outlive every login. One is the desktop app's server on the claw, which every
-  session you open from the app runs under. The other is the daemon that starts
-  your background agents. Quitting the app and opening it again reconnects to
-  the same server, so a change to your groups does not reach you until both
-  have ended.
+- **Mail sent to your firm's address now reaches the sessions on your claw.**
+  Before this release, the mail service connected to the provider and said it
+  was listening, and a received mail still reached no session. The service
+  could not read a message the provider sent in pieces, and it lost its place
+  when a read timed out in the middle of a message. It dropped each such
+  message without a word. It now reads both cases.
 
-  The conventions file your agents read now says what ends them, under Access.
-  Whoever runs the claw ends both as root. You can end your own from a terminal
-  on the claw. Then you open the app again. The scripts that grant a workspace,
-  add a person or change a tier now point at that section. They used to tell you
-  to log in again.
+  Three more changes keep the connection useful:
 
-  **What you have to do: nothing,** unless a session still reads
-  `Permission denied` on the bus or in a workspace. That session started before
-  the change. Ask whoever runs the claw to end your processes, then open the app
-  again.
+  - The service keeps the connection open with a regular ping. Before, the
+    provider closed it after ten quiet minutes.
+  - After an ordinary close, the service reconnects in about a second. Before,
+    the wait grew to a minute and stayed there.
+  - On every connect, the service asks the provider for the mail that arrived
+    while it was away, and routes each one once. It keeps its place in a small
+    file beside the routing table, so a restart does not route a mail twice.
 
-  **For whoever runs the claw.** The claw briefing template carries the new
-  heading. It seeds only a claw that has no briefing yet, so an existing claw
-  keeps the words it has until somebody edits its briefing by hand.
+  The first time the service starts after this update, it starts from that
+  moment. Mail that arrived before then is still at the provider, and no
+  session receives it.
 
-- **A session the desktop app replaced now stops, and its old process is ended.**
-  The desktop app can reconnect a conversation under a new process and leave
-  the old one running. The old one kept the transcript open and took a turn
-  every time the wake rail nudged it. From this release the rail nudges only the
-  newest process of a session. A new command, `session-guard`, tells a session
-  whether a newer process replaced it, and an orchestrator runs it first on
-  every resume and every beat. A new timer, `session-sweep@<you>.timer`, ends
-  the old process once the new one has run for five minutes and holds its
-  socket open. Background agents are left alone.
+  `email status` says more. Its `health` line says since when the service is
+  connected, how many times it reconnected, and what the last stop said. A
+  message from the provider that the service did not act on is counted under
+  `passed_over`, with no content.
 
-  The timer starts with this update. An old process already left behind on
-  your claw is ended on its first passes, within about ten minutes of the
-  update.
+  **What you have to do: nothing.** The mail service restarts on the new
+  program during the update.
 
-  **What you have to do: nothing.** To change the five minutes, set
-  `SWEEP_GRACE_SECS` in `/etc/commonclaw/bus-nudge.conf`. To switch the sweeper
-  off, disable your `session-sweep@<you>.timer`.
+- **Your claw now tells a named person when mail is waiting and nobody reads
+  it.** A new check runs every five minutes. It raises an alert when a mail has
+  waited unread for more than an hour, and it says whether the session that
+  should read it is running. It also raises an alert when the mail service has
+  been disconnected for more than an hour. The alert goes to your claw's alarm
+  channel, and by mail to one address you choose. It names the handles, counts
+  the mails and gives their ages. It never carries a sender, a subject or any
+  text of a mail. An unchanged alert repeats once a day, and a new late mail
+  sends a new one at once.
 
-- **`email inbox create` now adopts an inbox your organisation already has.**
-  Before this release, a create for an address that already existed at the
-  mail provider failed with "answered 403" and nothing else. From this release
-  the command finds that inbox in your organisation and records it, so the mail
-  service connects to it. No second inbox is made. If another organisation holds
-  the name, the command says so, and you pick another name.
+  **What you have to do:** on a claw that has a mail address, set
+  `MAIL_ALERT_TO` in `/etc/commonclaw/email-gatekeeper.conf` to the address of
+  the person who should hear about it. Until then the alert goes to the alarm
+  channel only. The next check reads the value, and nothing needs a restart.
+  `LATE_MINUTES` and `REMIND_HOURS` in the same file change the hour and the
+  day. A claw with no mail address stays quiet.
 
-  Every refusal from the provider now carries the provider's own words, for
-  example "Inbox already exists". Before, it carried the status number alone.
+- **The `email` skill now arrives on every claw with the update.** The skill
+  is what an email agent is launched from. Your sessions find it without
+  anybody installing it. It now carries its own document on the mail service:
+  what the service does and never does, the routing table, the send log, and
+  how to read its health.
 
-  **What you have to do: nothing.** If your claw's mail already works, nothing
-  changes for you. If `email inbox create` failed for you with a 403, run it
-  again after this release lands.
+  **What you have to do: nothing.** If your claw already holds its own skill
+  called `email` in the machine-wide skills directory, the update leaves yours
+  in place, installs nothing under that name, and says so on every update.
 
-- **`email inbox create` now needs `--username`.** Before this release, a
-  create with no name went through, and the mail provider picked a name for the
-  inbox. The claw then recorded that address and used it. From this release the
-  command stops with a usage line and asks the provider for nothing. The mail
-  service refuses a nameless create too, for a caller that goes round the
-  command.
+- **Your claw's admin can now check whether anybody's shell startup files
+  export a password-manager token.** A line like that in a `.bashrc` puts the
+  token into every shell the person starts, where one careless command can
+  print it. Ask a session to run the claw-ops skill's startup-token check. It
+  lists each person, file, line number and variable name, and never the value.
+  It changes nothing.
 
-  The mail service no longer prints a command name between backticks. Its
-  status line now reads "a person makes it with 'email inbox create --username
-  NAME'". A backtick in a line that somebody pastes into a shell command runs
-  whatever sits between the two.
+  **What you have to do: nothing.** If the check names a line in your files,
+  remove it. Your sessions read secrets through the claw's own reader.
 
-  **What you have to do: nothing.** If your claw's mail already works, nothing
-  changes for you. If you make the inbox from now on, give it a name with
-  `--username`.
+- **The claw-ops skill now says how to install a skill for everybody on the
+  claw, and how an update treats that install.** A skill you install by hand
+  under a name the update does not ship stays in place through every update.
 
-- **Your firm's admin can now finish connecting a provider without a root
-  login.** In 1.6.0 the last step of `token add`, the command that hands the
-  credential to the claw, needed somebody with root on the claw. From this
-  release that command is on the same grant as your claw's other admin
-  commands. An admin runs it from their own login with `sudo`, and the steps
-  `token add` prints now say so.
+  **What you have to do: nothing.**
 
-  **What you have to do: nothing.** A provider you already connected keeps
-  working.
+- **The wake rail and the message bus now come from the published skills
+  library.** A session that starts a helper session now hands it the claw's
+  shared bus, as your claw's settings name it. The wake rail keeps reading its
+  settings from `/etc/commonclaw/bus-nudge.conf`. Its program gains one
+  refusal: on a machine without a process table it refuses to start and says
+  so. Every claw has a process table, so the rail runs as before. It restarts
+  on its new program during the update.
 
-  **For whoever runs the claw.** The command now starts in `/` and reads
-  nothing from the directory it was called from, so an admin can run it from
-  inside a workspace.
+  **What you have to do: nothing.**
 
-## Errata for release 1.6.0
+## Errata for release 1.5.0
 
-Published notes cannot be edited after the fact, so the corrections are here.
+Published notes cannot be edited after the fact, so the correction is here.
 
-**1.6.0 says to quit and reopen the desktop app once after the update.** That
-reconnects to the same server on the claw, and the server keeps the groups it
-started with. The step that works is for whoever took the update to end each
-person's server and background-agent daemon as root, right after the apply. Each
-person then opens the app again. Measured on 2026-09-14: an app left open
-started a fresh server holding the new group three seconds after its old one
-ended, with nothing from the person.
+**1.5.0 says that what arrives at the firm's address is carried to the sessions
+whose work it is.** From 1.5.0 through 1.6.1 that did not happen for a received
+mail, as the first item above says. A mail sent to the address in that time is
+still at the provider, and no session received it.
 
 ## What somebody has to do
 
+**On a claw that has a mail address, set `MAIL_ALERT_TO`** as the second item
+says.
+
 **Whoever applies this release by hand passes `--now` on a claw pinned to manual
-updates.** That flag is what walks a person standing at the box past the manual
-setting. A claw that updates on its own takes this release on its next
+updates.** A claw that updates on its own takes this release on its next
 scheduled run.
 
 This release changes nobody's groups, so nobody has to end a process or reopen
-the app because of it.
+the app because of it. The mail service and the wake rail restart on their own
+during the update.
 
-The two items 1.4.0 named still stand: put this claw's channel webhook into its
-vault, and enrol this claw's dead-man check. The two mail steps 1.5.1 named
-still stand for a firm that wants an address: put the provider key into the
-claw's own machine vault, then make the address once with
-`email inbox create --username NAME`. If the address already exists in your
-organisation, making it now connects the claw to it.
+The steps earlier releases named still stand: put this claw's channel webhook
+into its vault, and enrol this claw's dead-man check. For a firm that wants an
+address: put the provider key into the claw's own machine vault, then make the
+address once with `email inbox create --username NAME`.
 
 Nothing here moves either core for anybody, and no core floor changed.

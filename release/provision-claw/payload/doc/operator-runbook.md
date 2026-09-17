@@ -261,6 +261,65 @@ After that, `email status` says whether the service is connected, and `email
 route list` shows who mail reaches. A claw with neither step done is not broken:
 the service runs, reports that it reaches no provider, and waits.
 
+**The mail alarm.** `commonclaw-mail-check.sh` runs as root every five minutes
+and tells one named person when mail on this claw is not being handled. It
+watches three things:
+
+- a mail that has waited unread past the threshold. A mail is read once the
+  session behind the handle it went to has read its inbox past it. Mail sent to
+  a name no session ever registered counts as unread from the moment it arrives.
+- whether that handle still has a live session. When nobody registered the
+  name, or the session that did has ended, the alert says so.
+- a mail service that has stayed disconnected past the threshold.
+
+It sends one alert per set of late mail. A new late mail sends a new alert at
+once, and an unchanged set repeats after the reminder interval. The alert goes to
+the alarm channel as `mail-late`, and by mail to the named person through the
+mail service. When the service does not answer, the channel is the only path.
+
+The alert carries the claw's address, handle names, counts and ages. It never
+carries a sender, a subject or any text of a mail. The named person receives a
+mail like this:
+
+```
+Subject: Mail on {claw} is waiting and nobody is handling it
+
+1 mail to {address} has waited more than 60 minutes and nobody has read it.
+
+1 went to email-orchestrator. The oldest has waited 2h 10m. No session has
+registered that name, so nobody is reading it.
+
+What to do: on {claw}, start the session each name above belongs to, usually
+the email orchestrator, so it reads its inbox. The mail is safe at the
+provider. Nothing is lost.
+
+This alert repeats every 24 hours while the mail stays unread, and a new late
+mail sends a new one.
+The mail check on {claw} sent it. It carries no sender, subject or text of any
+mail.
+```
+
+Three keys in `/etc/commonclaw/email-gatekeeper.conf` set it. The installer adds
+a key that is missing and leaves one that is there as it is.
+
+| Key | Holds | Default |
+|---|---|---|
+| `MAIL_ALERT_TO` | the named person's address | empty, which means the alarm channel only |
+| `LATE_MINUTES` | how long a mail may wait, or the service may stay disconnected | `60` |
+| `REMIND_HOURS` | how often an unchanged alert repeats | `24` |
+
+Set `MAIL_ALERT_TO` once after an update. The next beat reads it, and nothing
+needs a restart. The installer's output says in words
+where an alert goes, and says so when it goes nowhere.
+
+To test it without sending anything, run it with `--dry-run`. It prints the
+channel message and the mail it would send, and writes no state. `--state`
+prints only the finding. To prove the whole path, stop the email orchestrator's
+session, send the firm's address a test mail from an address the routing table
+does not name, and wait past `LATE_MINUTES`. The alert arrives by mail and in
+the channel. Start the session again, let it read its inbox, and the next beat
+is quiet.
+
 **The wake rail.** A session bus is files, and a message written into one
 announces itself to nobody. This rail tells a live session that it has unread
 mail, in one fixed sentence carrying no instruction. An account with no session
@@ -362,6 +421,7 @@ instead, move your entry off the claw and update again.
 | `/etc/commonclaw/notify.conf`, `notify.env` | the alarm channel's switch, and its manager reference |
 | `/etc/commonclaw/memory.env` | the dead-man ping's manager reference |
 | `/etc/commonclaw/stall-check.conf` | the stall check's threshold |
+| `/etc/commonclaw/email-gatekeeper.conf` | the mail service's settings, and who the mail alarm tells |
 | `/etc/commonclaw/session-bus.md` | what the bus is, for a member |
 | `/etc/commonclaw/claw-authority.md` | who may approve an operation on this claw, and how |
 | `/etc/commonclaw/workspace-conventions.md` | how work is filed here, for a member |
@@ -384,6 +444,7 @@ instead, move your entry off the claw and update again.
 | `/usr/local/sbin/commonclaw-notify.sh` | the poster every check calls |
 | `/usr/local/sbin/commonclaw-memory-check.sh` | the memory alarm and the ping |
 | `/usr/local/sbin/commonclaw-stall-check.sh` | the stall check |
+| `/usr/local/sbin/commonclaw-mail-check.sh` | the mail alarm. `--dry-run` and `--state` |
 | `/opt/commonclaw/bin/bus` | the session bus program |
 | `/opt/commonclaw/bin/bus-nudge` | the wake rail |
 | `/opt/commonclaw/bin/session-guard` | whether a session's process is the live one or a newer one replaced it |

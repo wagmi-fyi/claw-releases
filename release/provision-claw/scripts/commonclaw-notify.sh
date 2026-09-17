@@ -129,6 +129,7 @@ class_title() {
     update-health) printf 'release rail' ;;
     memory-pressure) printf 'memory pressure' ;;
     claw-note)     printf 'note' ;;
+    mail-late)     printf 'mail not handled' ;;
     *) return 1 ;;
   esac
 }
@@ -140,6 +141,7 @@ class_default_level() {
     update-health) printf 'info' ;;
     memory-pressure) printf 'warn' ;;
     claw-note)     printf 'info' ;;
+    mail-late)     printf 'warn' ;;
     *) return 1 ;;
   esac
 }

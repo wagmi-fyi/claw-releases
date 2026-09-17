@@ -45,6 +45,12 @@
 # failed a whole tenant apply on exactly that shape and the lesson is in its
 # code.
 #
+# THE MAIL CHECK RIDES WITH THE SERVICE. commonclaw-mail-check.sh and its timer
+# are installed here, because the check reads this service's conf and asks this
+# service's socket, and a claw without the service has nothing for it to watch.
+# The timer is enabled unless somebody disabled it. The install output says in
+# words where an alert goes, and says so loudly when it goes nowhere.
+#
 # EXIT CODES. 0 the gatekeeper is installed and enabled. 1 something this script
 # owns did not take. 2 usage.
 set -uo pipefail
@@ -54,6 +60,9 @@ CONF="/etc/commonclaw/email-gatekeeper.conf"
 ENVF="/etc/commonclaw/email-gatekeeper.env"
 UNIT_DIR="/etc/systemd/system"
 UNIT="email-gatekeeper.service"
+CHECK_BIN="/usr/local/sbin/commonclaw-mail-check.sh"
+CHECK_UNIT="commonclaw-mail-check.service"
+CHECK_TIMER="commonclaw-mail-check.timer"
 SVC_USER="email-gate"
 SVC_HOME="/srv/connections/email-gatekeeper"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,8 +91,10 @@ check(){ local what="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$what"; else 
 # ------------------------------------------------------------------ uninstall
 if [ "$MODE" = uninstall ]; then
   systemctl disable --now "$UNIT" >/dev/null 2>&1
+  systemctl disable --now "$CHECK_TIMER" >/dev/null 2>&1
   systemctl daemon-reload
   ok "${UNIT} stopped and disabled"
+  ok "${CHECK_TIMER} stopped and disabled, so no alert is sent about a service that is off"
   printf '{"mode":"uninstall","note":"the program, the conf, the routing table and the send log were left in place: the table is a ruling and the log is an audit trail, and removing either is its own decision"}\n'
   exit 0
 fi
@@ -96,9 +107,11 @@ for f in email-gatekeeper email; do
 done
 [ -d "${PAYLOAD_DIR}/email-gatekeeper-adapters" ] \
   || bad "no ${PAYLOAD_DIR}/email-gatekeeper-adapters. The service reaches no provider without one"
-for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json; do
+for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json \
+         commonclaw-mail-check.service commonclaw-mail-check.timer; do
   [ -r "${TEMPLATE_DIR}/${t}" ] || bad "no ${TEMPLATE_DIR}/${t}. This script owns the claw's copy of it"
 done
+[ -r "${HERE}/commonclaw-mail-check.sh" ] || bad "no ${HERE}/commonclaw-mail-check.sh. Run this from an assembled stage"
 [ -r "${HERE}/unit-groups.sh" ] || bad "no ${HERE}/unit-groups.sh. It reads which groups the running service holds. Run this from an assembled stage"
 [ "$FAILED" = 0 ] || { printf '{"ok":false,"stage":"payload"}\n'; exit 1; }
 # unit_holds_group, shared with install-bus-nudge.sh.
@@ -363,6 +376,50 @@ else
   RESTARTS="$(systemctl show -p NRestarts --value "$UNIT" 2>/dev/null || true)"
 fi
 
+# -------------------------------------------------------------- the mail check
+#
+# THE TIMER IS LEFT OFF WHEN SOMEBODY TURNED IT OFF, by the rule the service's
+# own unit follows above: a timer file that was here before this run and reads
+# disabled is a choice.
+CHECK_TIMER_EXISTED=0; [ -e "${UNIT_DIR}/${CHECK_TIMER}" ] && CHECK_TIMER_EXISTED=1
+if [ "$MODE" = dry-run ]; then
+  ok "${DRY}install ${CHECK_BIN}, ${UNIT_DIR}/${CHECK_UNIT} and ${UNIT_DIR}/${CHECK_TIMER}, and enable the timer"
+else
+  install -m 0755 -o root -g root "${HERE}/commonclaw-mail-check.sh" "$CHECK_BIN"
+  for u in "$CHECK_UNIT" "$CHECK_TIMER"; do
+    if [ -e "${UNIT_DIR}/${u}" ] && ! cmp -s "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"; then
+      warn "${UNIT_DIR}/${u} differed from this release and was converged"
+    fi
+    install -m 0644 -o root -g root "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"
+  done
+  systemctl daemon-reload
+  check "${CHECK_BIN} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '${CHECK_BIN}')\" = '755 root:root' ]"
+  CHECK_WORD="$(systemctl is-enabled "$CHECK_TIMER" 2>/dev/null || true)"
+  if [ "$CHECK_TIMER_EXISTED" = 1 ] && [ "$CHECK_WORD" = disabled ]; then
+    warn "${CHECK_TIMER} is deliberately disabled and was left off, so nobody is told when mail waits"
+  else
+    systemctl enable --now "$CHECK_TIMER" >/dev/null 2>&1
+    check "${CHECK_TIMER} is enabled" \
+      bash -c "systemctl is-enabled '$CHECK_TIMER' 2>/dev/null | grep -qx enabled"
+  fi
+fi
+
+# WHERE AN ALERT GOES, said in words. The last MAIL_ALERT_TO line wins, as it
+# does for the check. An empty value is a claw that has not named a person yet.
+ALERT_TO=""
+if [ -r "$CONF" ]; then
+  ALERT_TO="$(grep -E '^[[:space:]]*MAIL_ALERT_TO[[:space:]]*=' "$CONF" | tail -1 | cut -d= -f2- | tr -d "\"' \t")"
+fi
+NOTIFY_WIRED=0; [ -e /etc/commonclaw/notify.conf ] && NOTIFY_WIRED=1
+if [ -n "$ALERT_TO" ]; then
+  ok "the mail check tells ${ALERT_TO} by mail when mail waits past its threshold, and the claw's notifier as well"
+elif [ "$NOTIFY_WIRED" = 1 ]; then
+  warn "MAIL_ALERT_TO in ${CONF} is empty, so the mail check tells the claw's notifier only and no person by mail. Set it to one person's address to have them told"
+else
+  warn "MAIL_ALERT_TO in ${CONF} is empty and this claw has no notifier, so nobody is told when mail waits. Set MAIL_ALERT_TO to one person's address"
+fi
+
 # --------------------------------------------------------------- the health line
 #
 # WHAT THIS READS IS INSTALLED AND ENABLED. Connected is reported beside it as a
@@ -394,7 +451,8 @@ if [ "$MODE" != dry-run ] && [ -x "${BIN_DIR}/email-gatekeeper" ]; then
   esac
 fi
 
-printf '{"ok":%s,"mode":"%s","unit":"%s","state":"%s","connected":"%s","inbox_id":"%s","program":"%s","conf":"%s","routes":"%s"}\n' \
+printf '{"ok":%s,"mode":"%s","unit":"%s","state":"%s","connected":"%s","inbox_id":"%s","program":"%s","conf":"%s","routes":"%s","mail_check":"%s","alert_to_set":%s}\n' \
   "$([ "$FAILED" = 0 ] && echo true || echo false)" "$MODE" "$UNIT" "$STATE" \
-  "$CONNECTED" "$INBOX" "${BIN_DIR}/email-gatekeeper" "$CONF" "$ROUTES"
+  "$CONNECTED" "$INBOX" "${BIN_DIR}/email-gatekeeper" "$CONF" "$ROUTES" \
+  "$CHECK_TIMER" "$([ -n "$ALERT_TO" ] && echo true || echo false)"
 exit "$FAILED"

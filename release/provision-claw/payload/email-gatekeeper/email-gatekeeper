@@ -18,11 +18,11 @@ THE LAW THIS SERVICE RUNS UNDER.
      held in memory and passed to an adapter in that adapter's environment. It
      is never written, never logged, and never put on a command line.
   4. NO CORRESPONDENCE HERE. Mail rests at the provider. This service keeps a
-     routing table, a thread map and a send log. Message text is fetched on
-     demand and is not stored.
+     routing table, a thread map, a send log and the position a catch-up
+     starts from. Message text is fetched on demand and is not stored.
   5. IT NEVER REFUSES A CALLER. Anybody who can open the socket can send. The
      runbook is the rule and the log is the audit. What that costs is written in
-     reference/email-gatekeeper.md rather than hidden here.
+     the email skill's reference/mail-service.md rather than hidden here.
 
 WHAT IS CORE AND WHAT IS AN ADAPTER. This file knows about mail, handles, a
 routing table and a socket. It knows nothing about how mail is fetched or sent.
@@ -45,6 +45,7 @@ not be resolved. Both are walls and both are loud.
 """
 
 import argparse
+import datetime
 import errno
 import json
 import os
@@ -265,6 +266,9 @@ def resolve_key():
 # killed mid-write must not lose the map that routes a reply back to the desk
 # that started the conversation. Last line for a thread id wins, and the file is
 # compacted at start.
+#
+# position.json is this service's memory too, and it is written below, beside
+# the class that reads it.
 
 # THE KEY ORDER routes.json IS WRITTEN IN, which is the order the shipped
 # template carries. A write goes through one function that imposes it, so a
@@ -484,6 +488,150 @@ class State:
         return [], "none"
 
 
+# ---------------------------------------------------------------- the position
+#
+# position.json is where the catch-up starts. It holds the inbox it belongs to,
+# the provider's time of the newest mail routed, and the ids of the last
+# ROUTED_KEEP mails routed. No subject, no sender, no preview and no text: an
+# id and a time are all a catch-up needs, and mail rests at the provider.
+#
+# A MAIL IS ROUTED ONCE. The push channel and the catch-up can both hand the
+# service the same mail, and a catch-up runs on every connect. The id list is
+# what refuses the second copy, across reconnects and across restarts.
+#
+# THE FIRST START ROUTES NOTHING OLD. With no position for this inbox, the
+# position is the moment the listener first starts, so mail that arrived before
+# this service ever ran reaches no session. A position that cannot be read is
+# treated the same way, because the alternative is routing the whole inbox.
+ROUTED_KEEP = 500
+
+
+def parse_time(text):
+    """A provider time or one of ours, as an aware datetime, or None."""
+    try:
+        t = datetime.datetime.fromisoformat(str(text or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
+
+
+class Position:
+    def __init__(self, state_dir):
+        self.path = os.path.join(state_dir, "position.json")
+        self.inbox_id = ""
+        self.after = ""
+        self.message_id = ""
+        self.routed = []
+        self.load()
+
+    def load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except OSError:
+            return
+        except ValueError:
+            log("warn", "%s cannot be read, so the catch-up starts from now" % self.path)
+            return
+        if not isinstance(rec, dict) or parse_time(rec.get("after")) is None:
+            log("warn", "%s holds no time, so the catch-up starts from now" % self.path)
+            return
+        self.inbox_id = str(rec.get("inbox_id") or "")
+        self.after = str(rec.get("after") or "")
+        self.message_id = str(rec.get("message_id") or "")
+        self.routed = [str(i) for i in (rec.get("routed") or []) if i][-ROUTED_KEEP:]
+
+    def save(self):
+        """Written whole, through a temp file beside it, at STATE_FILE_MODE."""
+        tmp = self.path + ".new"
+        try:
+            with open_new_private(tmp) as fh:
+                json.dump({"inbox_id": self.inbox_id, "after": self.after,
+                           "message_id": self.message_id, "routed": self.routed},
+                          fh, indent=2)
+                fh.write("\n")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log("err", "could not write %s, so a restart may route a mail twice: %s"
+                % (self.path, exc))
+
+    def start(self, inbox):
+        """The position for this inbox, made from now when there is none."""
+        if self.inbox_id == inbox and self.after:
+            return False
+        self.inbox_id = inbox
+        self.after = iso_now()
+        self.message_id = ""
+        self.routed = []
+        self.save()
+        return True
+
+    def seen(self, message_id):
+        return bool(message_id) and message_id in self.routed
+
+    def record(self, message_id, when):
+        """One routed mail. The time moves only forward."""
+        if message_id:
+            self.routed.append(message_id)
+            del self.routed[:-ROUTED_KEEP]
+        t = parse_time(when)
+        if t is not None and (parse_time(self.after) is None or t > parse_time(self.after)):
+            self.after = str(when)
+            self.message_id = message_id or ""
+        self.save()
+
+
+def clean(text, limit=300):
+    """A reason as one printable line: no backtick, cut to length.
+
+    An adapter's words and an exception's words reach status and the journal,
+    and a reader quotes either into a shell string.
+    """
+    return " ".join(str(text or "").split()).replace(chr(96), "'")[:limit]
+
+
+# How many passed-over frames reach the journal in one hour.
+PASSED_OVER_PER_HOUR = 10
+
+# A word a report names: letters, digits and . _ - only, and short. The same
+# rule the adapters apply, applied again here.
+WORD_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+
+def word(v):
+    if not isinstance(v, str) or not v or len(v) > 40 or not set(v) <= WORD_CHARS:
+        return ""
+    return v
+
+
+# What a reason starts with when it is an adapter's own words. The journal and
+# `reason` keep it. `health` and `last_stop` do not.
+ADAPTER_SAID = "the adapter said: "
+
+
+def sentences(text, capital):
+    """A reason as sentences for `health`.
+
+    A reason joins its clauses with a colon, as in "the push channel dropped:
+    the provider sent a close frame". Each colon followed by "the " starts a new
+    sentence. Every sentence but the first starts with a capital, and the first
+    does when capital is true. A first word that is not plain lowercase letters,
+    such as a file name, keeps its case.
+    """
+    parts = clean(text).rstrip(".").split(": the ")
+    out = []
+    for i, p in enumerate([parts[0]] + ["the " + q for q in parts[1:]]):
+        first = p.split(" ", 1)[0]
+        if (i or capital) and first.isalpha() and first.islower():
+            p = p[0].upper() + p[1:]
+        out.append(p.rstrip(".") + ".")
+    return " ".join(out)
+
+
+def times(n):
+    return "1 time" if n == 1 else "%d times" % n
+
+
 def iso_now():
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
@@ -576,11 +724,28 @@ class Gatekeeper:
         self.state = State(settings.state_dir)
         self.log_path = os.path.join(settings.log_dir, "sends.jsonl")
         self.started = time.time()
+        self.started_at = iso_now()
         self.reconnects = 0
         self.connected = False
+        self.connected_at = ""
         self.last_event = ""
         self.last_reason = ""
+        # THE LAST STOP IS KEPT WHILE CONNECTED. `reason` is empty once the
+        # listener is back, and a count with no cause beside it tells a person
+        # nothing about why it grew.
+        self.last_stop = ""
+        self.last_stop_at = ""
+        self.adapter_said = ""
+        self.heard_listening = False
         self.probe_passed = False
+        self.position = Position(settings.state_dir)
+        self.route_lock = threading.Lock()
+        self.passed = 0
+        self.last_passed = ""
+        self.last_passed_at = ""
+        self.passed_window = -3600.0
+        self.passed_logged = 0
+        self.passed_quiet = 0
         self.stop = threading.Event()
 
     # -- inbound ------------------------------------------------------------
@@ -635,15 +800,35 @@ class Gatekeeper:
                 self.last_reason = NO_INBOX_REASON
                 self.stop.wait(10)
                 continue
+            if self.position.start(inbox):
+                log("info", "no saved position for inbox %s, so mail is routed from %s on"
+                    % (inbox, self.position.after))
+            began = time.monotonic()
+            self.heard_listening = False
+            self.adapter_said = ""
             try:
                 self.pump(inbox)
-                self.last_reason = "the listener exited"
+                # THE ADAPTER'S OWN WORDS. A failing adapter prints its cause
+                # under `error` before it exits, and that is the reason.
+                # The journal and `reason` say whose words follow. `last_stop`
+                # holds the words alone.
+                stop = self.adapter_said or "the listener exited and the adapter gave no reason"
+                self.last_reason = ((ADAPTER_SAID + stop) if self.adapter_said else stop)
             except Exception as exc:
-                self.last_reason = str(exc)[:300]
+                stop = self.last_reason = clean(exc)
             self.connected = False
             if self.stop.is_set():
                 return
             self.reconnects += 1
+            self.last_stop = stop
+            self.last_stop_at = iso_now()
+            # A GOOD CONNECTION RESETS THE WAIT. The provider closes a live
+            # connection in the ordinary course, and a wait that only grew
+            # reached its cap after six such closes and stayed there, which left
+            # the inbox unheard for a minute in every eleven. Backoff grows only
+            # across connections that failed.
+            if self.heard_listening or time.monotonic() - began > 60:
+                wait = lo
             log("warn", "listener stopped (%s); reconnecting in about %ds" % (self.last_reason, wait))
             self.stop.wait(wait + random.uniform(0, wait * 0.25))
             wait = min(hi, wait * 2)
@@ -685,15 +870,35 @@ class Gatekeeper:
                 try:
                     evt = json.loads(line)
                 except ValueError:
+                    evt = None
+                if not isinstance(evt, dict):
+                    self.passed_over({"frame_type": "adapter-not-json", "size": len(line)})
                     continue
                 if evt.get("event") == "listening":
                     self.connected = True
+                    self.connected_at = iso_now()
+                    self.heard_listening = True
                     log("info", "listening on inbox %s through the %s adapter"
                         % (inbox, self.settings.adapter))
+                    if evt.get("inbox_confirmed") is False:
+                        log("warn", "the provider confirmed a subscription that does not "
+                                    "name inbox %s, so its mail may not arrive" % inbox)
+                    # THE CATCH-UP RUNS HERE, ON THIS THREAD. Mail the push
+                    # channel delivers meanwhile waits in the pipe, and the id
+                    # list refuses whichever copy comes second.
+                    self.catch_up(inbox)
                     continue
                 if evt.get("event") == "received":
                     self.connected = True
                     self.fan_out(evt)
+                    continue
+                if evt.get("event") == "unrecognised":
+                    self.passed_over(evt)
+                    continue
+                if evt.get("error"):
+                    self.adapter_said = clean(evt["error"])
+                    continue
+                self.passed_over({"frame_type": "adapter-line", "keys": list(evt)})
         finally:
             self.connected = False
             try:
@@ -702,8 +907,77 @@ class Gatekeeper:
             except Exception:
                 pass
 
+    def passed_over(self, evt):
+        """A line or a frame nothing here acts on, logged and counted.
+
+        THE DESCRIPTION CARRIES WORDS ONLY. The adapter already names no value,
+        and this reads its report through word() again, so an adapter that
+        slipped cannot put a sender or a subject in the journal. At most
+        PASSED_OVER_PER_HOUR lines an hour reach the journal, so a chatty
+        provider cannot fill it, and the count of the rest is logged when the
+        hour turns.
+        """
+        keys = evt.get("keys") if isinstance(evt.get("keys"), list) else []
+        named = sorted(k for k in keys if word(k))
+        desc = "type %s, event type %s, keys %s, %s bytes" % (
+            word(evt.get("frame_type")) or "unnamed",
+            word(evt.get("event_type")) or "none",
+            ",".join(named[:30]) or "none",
+            evt.get("size") if isinstance(evt.get("size"), int) else "unknown")
+        if len(named) < len(keys) or evt.get("unnamed_keys"):
+            desc += ", and some keys that are not plain words"
+        now = time.monotonic()
+        with self.route_lock:
+            self.passed += 1
+            self.last_passed = desc
+            self.last_passed_at = iso_now()
+            if now - self.passed_window >= 3600:
+                if self.passed_quiet:
+                    log("warn", "%d more frames were passed over in the last hour and not logged"
+                        % self.passed_quiet)
+                self.passed_window, self.passed_logged, self.passed_quiet = now, 0, 0
+            if self.passed_logged >= PASSED_OVER_PER_HOUR:
+                self.passed_quiet += 1
+                return
+            self.passed_logged += 1
+        log("warn", "the adapter passed over a frame it does not act on: %s. "
+                    "%d passed over since the service started" % (desc, self.passed))
+
+    def catch_up(self, inbox):
+        """Every mail since the saved position, through the same fan-out.
+
+        A failed listing is logged and asked again on the next connect. The
+        connection it rode on stays up, because the push channel still works.
+        """
+        after = self.position.after
+        try:
+            out = run_adapter(self.settings, self.key, "list-since",
+                              {"inbox_id": inbox, "after": after}, timeout=300)
+        except Exception as exc:
+            log("warn", "could not list the mail since %s, so the next connect asks again: %s"
+                % (after, clean(exc)))
+            return
+        n = 0
+        for evt in out.get("messages") or []:
+            if isinstance(evt, dict) and self.fan_out(evt):
+                n += 1
+        if n:
+            log("info", "routed %d mail that arrived while nobody listened, since %s" % (n, after))
+
     def fan_out(self, evt):
-        """One inbound mail becomes one bus message per target handle."""
+        """One inbound mail becomes one bus message per target handle.
+
+        Returns False for a mail already routed, which is not routed again.
+        """
+        mid = evt.get("message_id", "")
+        with self.route_lock:
+            if self.position.seen(mid):
+                return False
+            self.route_one(evt)
+            self.position.record(mid, evt.get("date", ""))
+        return True
+
+    def route_one(self, evt):
         self.last_event = iso_now()
         # A route added a moment ago reaches this mail. Same reading as the
         # command's, taken here because an inbound arrives on its own thread.
@@ -785,8 +1059,16 @@ class Gatekeeper:
                 "connected": self.connected,
                 "uptime_secs": int(time.time() - self.started),
                 "reconnects": self.reconnects,
+                "reconnects_since": self.started_at,
                 "last_event": self.last_event,
                 "reason": "" if self.connected else self.last_reason,
+                "last_stop": self.last_stop,
+                "last_stop_at": self.last_stop_at,
+                "caught_up_from": self.position.after,
+                "passed_over": self.passed,
+                "last_passed_over": self.last_passed,
+                "last_passed_over_at": self.last_passed_at,
+                "health": self.health_words(),
                 "threads_known": len(self.state.threads),
             }
         if verb == "send":
@@ -812,6 +1094,33 @@ class Gatekeeper:
         if verb == "self-clear-runbook":
             return self.self_clear_runbook(req)
         return {"ok": False, "reason": "no such verb: %s" % verb}
+
+    def health_words(self):
+        """The connection, the reconnect count and the last stop, in words.
+
+        A person reads this line. A growing count is ordinary, because the
+        provider closes a live connection now and then, so the line says what
+        the last stop was and leaves the judgement to the reader.
+        """
+        if self.connected:
+            head = "Connected since %s." % self.connected_at
+        else:
+            why = self.last_reason
+            if why.startswith(ADAPTER_SAID):
+                why = why[len(ADAPTER_SAID):]
+            head = "Not connected. %s" % sentences(why or "the listener has not started", True)
+        if not self.reconnects:
+            tail = "No reconnect since the service started at %s." % self.started_at
+        else:
+            tail = "Reconnected %s since %s. The last stop was at %s: %s" % (
+                times(self.reconnects), self.started_at, self.last_stop_at,
+                sentences(self.last_stop, False))
+        words = "%s %s" % (head, tail)
+        if self.passed:
+            words += " %s passed over, the last at %s: %s." % (
+                "1 frame was" if self.passed == 1 else "%d frames were" % self.passed,
+                self.last_passed_at, self.last_passed)
+        return clean(words, 1000)
 
     def route_add(self, req):
         key = (req.get("key") or "").strip().lower()

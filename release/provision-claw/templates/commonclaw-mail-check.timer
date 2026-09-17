@@ -1,0 +1,12 @@
+[Unit]
+Description=Firm-VM mail check, every five minutes
+
+[Timer]
+# Three past and every five minutes after, so no beat lands on the hour, the
+# half hour, or the stall check's seven past.
+OnCalendar=*-*-* *:03/5:00
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

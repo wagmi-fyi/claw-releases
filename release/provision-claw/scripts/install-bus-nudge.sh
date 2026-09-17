@@ -9,10 +9,11 @@
 #   sudo ./install-bus-nudge.sh --dry-run <account>
 #   sudo ./install-bus-nudge.sh --uninstall <account> [...]
 #
-# WHERE THE PROGRAM COMES FROM. The rail's source is the orchestrate skill, and
-# the assembler vendors it into the payload when a release is cut. So a stage
-# carries it and a bare checkout of the source repository does not. This script
-# installs from the stage and refuses anything else by name.
+# WHERE THE PROGRAM COMES FROM. The rail's source is the orchestrate skill in
+# the public skills repository. The assembler takes it from there at the commit
+# _fleet/skills-source.yaml pins, so a stage carries it and a bare checkout of
+# the CommonClaw source does not. This script installs from the stage and
+# refuses anything else by name.
 #
 # WHAT THE RAIL IS. The session bus is files. A delegate writes its report into
 # an inbox and announces it to nobody, so the reader learns about it when it
@@ -120,7 +121,7 @@ pair=""; src=""; dst=""
 
 # ------------------------------------------------------ the program + adapters
 for f in bus-nudge session-guard session-sweep; do
-  [ -r "${PAYLOAD_DIR}/${f}" ] || { bad "no ${PAYLOAD_DIR}/${f}. The assembler vendors it from the orchestrate skill, so run this from an assembled stage"; }
+  [ -r "${PAYLOAD_DIR}/${f}" ] || { bad "no ${PAYLOAD_DIR}/${f}. The assembler takes it from the public skills repository at the pin, so run this from an assembled stage"; }
 done
 [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] || bad "no ${PAYLOAD_DIR}/bus-nudge-adapters — the core refuses to deliver without one, and the assembler vendors it beside the program"
 [ -r "${TEMPLATE_DIR}/wake-rail.md" ] || bad "no ${TEMPLATE_DIR}/wake-rail.md — this script owns the claw's copy of it"
@@ -159,6 +160,16 @@ if [ "$MODE" != dry-run ]; then
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-sweep" "${BIN_DIR}/session-sweep"
   for f in "${PAYLOAD_DIR}"/bus-nudge-adapters/*; do
     install -m 0755 -o root -g root "$f" "${BIN_DIR}/bus-nudge-adapters/$(basename "$f")"
+  done
+  # THE CONF DEFAULT IS REWRITTEN IN THE COPY THIS INSTALLS. The two programs
+  # come from the public skills repository, which ships /etc/bus-nudge.conf as
+  # their default. This claw keeps its conf at $CONF, and the program's default
+  # and the installed conf have to name one file, or a hand run reads a
+  # different file from the service. The payload copy stays as published.
+  for p in bus-nudge session-sweep; do
+    sed -i "s|^CONF = os.environ.get(\"BUS_NUDGE_CONF\", \"[^\"]*\")\$|CONF = os.environ.get(\"BUS_NUDGE_CONF\", \"${CONF}\")|" "${BIN_DIR}/${p}"
+    check "${BIN_DIR}/${p} reads ${CONF} by default" \
+      bash -c "[ \"\$(grep -c '^CONF = os.environ.get(\"BUS_NUDGE_CONF\", \"${CONF}\")\$' '${BIN_DIR}/${p}')\" = 1 ]"
   done
   RAIL_AFTER="$(rail_digest)"
   check "${BIN_DIR}/bus-nudge is 0755 root:root" \

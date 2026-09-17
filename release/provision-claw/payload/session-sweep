@@ -52,7 +52,7 @@ import signal
 import sys
 import time
 
-CONF = os.environ.get("BUS_NUDGE_CONF", "/etc/commonclaw/bus-nudge.conf")
+CONF = os.environ.get("BUS_NUDGE_CONF", "/etc/bus-nudge.conf")
 DEFAULT_GRACE = 300
 GUARD_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "session-guard")
 SWEEPABLE_KIND = "interactive"

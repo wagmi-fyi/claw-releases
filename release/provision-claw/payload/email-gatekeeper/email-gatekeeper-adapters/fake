@@ -15,20 +15,33 @@ WHERE ITS WORLD LIVES. `EMAIL_FAKE_DIR`, and nothing outside it.
   inbox.json        the one inbox this fake has, once make-inbox has been called
                     with a username. Its absence is how a control reads that a
                     refused create reached no provider.
-  events.jsonl      inbound mail. A control appends a line and the service sees
-                    a mail arrive. `listen` tails it.
+  events.jsonl      inbound mail, which is the fake's whole mailbox. A control
+                    appends a line and the service sees a mail arrive. `listen`
+                    tails it from the moment it connects, so a line appended
+                    while nothing listens is missed the way the provider's push
+                    channel misses it. `list-since` reads the whole file.
   messages/<id>.json  and threads/<id>.json   what thread and message read back
   outbox.jsonl      what send wrote
 
 HOW A CONTROL DRIVES A DROPPED CONNECTION. Touch `EMAIL_FAKE_DIR/drop`. The
 listener exits 3 the way a real dropped socket does, the service reconnects on
-its ladder, and removing the file lets the next attempt succeed.
+its ladder, and removing the file lets the next attempt succeed. The file's
+text, when it has any, is the reason the listener prints, the way a provider's
+close frame carries its own words.
+
+HOW A CONTROL DRIVES A CONNECTION THAT NEVER OPENS. Touch `EMAIL_FAKE_DIR/refuse`.
+The listener exits 3 before it reports listening, which is a failed connect
+rather than a closed one.
+
+HOW A CONTROL READS THE CATCH-UP. Every `list-since` call appends its `after`
+to `listed.jsonl`.
 
 IT REFUSES TO RUN WITHOUT `EMAIL_FAKE_DIR`. A fake that silently invented a
 directory could be mistaken for a working provider in a run nobody meant to
 fake.
 """
 
+import datetime
 import json
 import os
 import sys
@@ -135,6 +148,8 @@ def v_listen(req):
     inbox = req.get("inbox_id", "")
     if not inbox:
         die("listen was given no inbox_id")
+    if os.path.exists(path("refuse")):
+        die("the fake was told to refuse the connection")
     p = path("events.jsonl")
     os.makedirs(ROOT, exist_ok=True)
     open(p, "a").close()
@@ -145,7 +160,12 @@ def v_listen(req):
     emit({"event": "listening", "inbox_id": inbox})
     while True:
         if os.path.exists(path("drop")):
-            die("the fake was told to drop the connection")
+            try:
+                with open(path("drop"), "r", encoding="utf-8") as dh:
+                    words = " ".join(dh.read().split())
+            except OSError:
+                words = ""
+            die(words or "the fake was told to drop the connection")
         line = fh.readline()
         if not line:
             time.sleep(0.2)
@@ -162,6 +182,49 @@ def v_listen(req):
         emit(evt)
 
 
+def v_list_since(req):
+    """Every mail in events.jsonl dated after `after`, oldest first.
+
+    The same refusal as the real adapter: no lower bound lists nothing.
+    """
+    after = (req.get("after") or "").strip()
+    if not req.get("inbox_id") or not after:
+        die("list-since needs an inbox_id and an after time, so nothing was listed", 2)
+    os.makedirs(ROOT, exist_ok=True)
+    with open(path("listed.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"after": after}) + "\n")
+    floor = parse_time(after)
+    if floor is None:
+        die("list-since was given an after time it cannot read: %s" % after, 2)
+    out = []
+    try:
+        with open(path("events.jsonl"), "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        when = parse_time(evt.get("date", ""))
+        if when is None or when <= floor:
+            continue
+        evt.setdefault("event", "received")
+        evt.setdefault("inbox_id", req["inbox_id"])
+        out.append(evt)
+    out.sort(key=lambda e: parse_time(e["date"]))
+    return {"messages": out}
+
+
+def parse_time(text):
+    try:
+        t = datetime.datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
+
+
 VERBS = {
     "probe": v_probe,
     "make-inbox": v_make_inbox,
@@ -169,6 +232,7 @@ VERBS = {
     "message": v_message,
     "send": v_send,
     "listen": v_listen,
+    "list-since": v_list_since,
 }
 
 

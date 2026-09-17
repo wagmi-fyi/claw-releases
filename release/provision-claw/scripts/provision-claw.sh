@@ -1560,7 +1560,7 @@ phase_1_preflight() {
   # skip. `install-email-provider-key.sh` is named here because nothing else on
   # the claw checks it: phase 25's warn line names it as the door a person runs,
   # and an operator who followed that line would find nothing there.
-  for s in install-email-gatekeeper.sh install-email-provider-key.sh; do
+  for s in install-email-gatekeeper.sh install-email-provider-key.sh commonclaw-mail-check.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
   [ -d "${PAYLOAD_DIR}/email-gatekeeper" ] \
@@ -1575,7 +1575,8 @@ phase_1_preflight() {
     [ -r "${PAYLOAD_DIR}/email-gatekeeper/email-gatekeeper-adapters/${s}" ] \
       || missing_payload="$missing_payload ../payload/email-gatekeeper/email-gatekeeper-adapters/${s}"
   done
-  for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json; do
+  for t in email-gatekeeper.service email-gatekeeper.conf email-gatekeeper-routes.json \
+           commonclaw-mail-check.service commonclaw-mail-check.timer; do
     [ -r "${TEMPLATE_DIR}/${t}" ] || missing_payload="$missing_payload ../templates/${t}"
   done
   # The connection scaffold's own siblings. `install-connection.sh` is called
@@ -4785,8 +4786,8 @@ phase_16_session_bus() {
 
   # ---- the bus home ----
   #
-  # SETGID IS NOT DECORATION HERE. Without it a file abigail creates lands in
-  # her own primary group and jeremiah cannot append to it, so the first
+  # SETGID IS NOT DECORATION HERE. Without it a file a member creates lands in
+  # their own primary group and another member cannot append to it, so the first
   # cross-member message fails and every one after it. The setgid bit is what
   # makes every file on this bus reachable by every member regardless of who
   # wrote it.
@@ -4824,10 +4825,8 @@ phase_16_session_bus() {
     return 0
   fi
   # `payload/bus` IS the bus program. A fleet program every claw runs belongs to
-  # the release rather than to one person's skill tree, which would drift the
-  # first time that tree is reorganized for its own reasons. The orchestrate
-  # skill reaches this same file through a symlink, so the tree carries one copy
-  # and this phase installs the original.
+  # the release. The assembler takes it from the public skills repository at the
+  # commit _fleet/skills-source.yaml pins, and this phase installs that copy.
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus" "$BUS_CLI"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-bus-join" "$BUS_JOIN_HOOK"
   check "${BUS_CLI} is 0755 root:root" \
@@ -6022,7 +6021,7 @@ NOTIFYENVEOF
   # own dedupe stamps, and --dry-run reaches no channel.
   local ctl; ctl="$(mktemp -d)"
   local p prev="" out differed=1
-  for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note; do
+  for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late; do
     out="$(NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>&1)" || true
     [ -n "$prev" ] && [ "$out" = "$prev" ] && differed=0
@@ -6058,7 +6057,7 @@ NOTIFYENVEOF
   # which is the failure it was written after, and it is kept for that.
   #
   # The claim that each row is read for its TITLE needs its own control, and this
-  # is it: six classes, six distinct titles, pulled out of the rendered text.
+  # is it: seven classes, seven distinct titles, pulled out of the rendered text.
   # `|| true` ON THE ASSIGNMENT, and it is the whole reason this phase can run
   # on a claw nobody has wired yet. The notifier exits 3 when no webhook
   # resolves, which this phase treats as a supported state eleven lines below.
@@ -6074,7 +6073,7 @@ NOTIFYENVEOF
   # before it exits 3, so the titles are captured either way and this control
   # still measures the table on a claw with no webhook.
   local titles distinct
-  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note; do
+  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late; do
     NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>/dev/null \
       | sed -n 's/^  "text": "[^·]*· \(.*\) · .*/\1/p'
@@ -6082,15 +6081,15 @@ NOTIFYENVEOF
   # grep -c PRINTS 0 and EXITS 1 on no match, so the fallback is an assignment
   # rather than an appended second line.
   distinct="$(printf '%s\n' "$titles" | sort -u | grep -c . )" || distinct=0
-  if [ "$distinct" -eq 6 ]; then
-    ok "the six classes render six distinct titles, so the class table is read row by row"
+  if [ "$distinct" -eq 7 ]; then
+    ok "the seven classes render seven distinct titles, so the class table is read row by row"
   elif [ "$distinct" -eq 0 ]; then
     # Zero is a different finding from two-sharing-a-heading, and naming it as
     # the sharing case sends a reader to the class table when the notifier
     # printed nothing at all.
-    bad "the six classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
+    bad "the seven classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
   else
-    bad "the classes render ${distinct} distinct title(s), not six: two of them share a heading and a finding lands under the wrong topic"
+    bad "the classes render ${distinct} distinct title(s), not seven: two of them share a heading and a finding lands under the wrong topic"
   fi
 
   # A class nobody put in the table is a usage error, not a generic heading.
@@ -6239,7 +6238,9 @@ phase_24_wake_rail() {
   # The bus path and the substrate are FACTS about this machine. Phase 16 lays
   # the shared bus and this file is where a session reads its path, so the run
   # asserts them: a claw whose bus moved and whose conf did not is a claw whose
-  # delegates register on a bus their orchestrator is not reading.
+  # delegates register on a bus their orchestrator is not reading. The bus path
+  # is written twice, as the shared bus and as the bus a delegate is handed,
+  # because the published skill ships both blank.
   #
   # The model and the permissions flag are DECISIONS. They are seeded once and
   # whatever the claw carries afterwards is kept, so a release ride cannot flip a
@@ -6265,10 +6266,11 @@ phase_24_wake_rail() {
 # ruling written there is either refused or overwritten. This is the layer a
 # machine's ruling survives in.
 #
-# The first two lines are facts about this claw and provisioning asserts them on
-# every run. The last two are decisions: they are seeded once and whatever this
-# claw carries afterwards is kept.
+# The first three lines are facts about this claw and provisioning asserts them
+# on every run. The last two are decisions: they are seeded once and whatever
+# this claw carries afterwards is kept.
 ORCHESTRATE_SHARED_BUS="${BUS_HOME}"
+ORCHESTRATE_BUS_DIR="${BUS_HOME}"
 ORCHESTRATE_SUBSTRATE="claude"
 ORCHESTRATE_DELEGATE_MODEL="${cur_model}"
 ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
@@ -6280,6 +6282,8 @@ ORCHEOF
     bash -c "[ \"\$(stat -c '%a %U:%G' '$ORCHESTRATE_CONF_FILE')\" = '644 root:root' ]"
   check "the orchestration config names the bus this claw actually carries" \
     bash -c "[ \"\$(sed -n 's/^ORCHESTRATE_SHARED_BUS=\"\\(.*\\)\"$/\\1/p' '$ORCHESTRATE_CONF_FILE')\" = '$BUS_HOME' ]"
+  check "the orchestration config hands a delegate the bus this claw carries" \
+    bash -c "[ \"\$(sed -n 's/^ORCHESTRATE_BUS_DIR=\"\\(.*\\)\"$/\\1/p' '$ORCHESTRATE_CONF_FILE')\" = '$BUS_HOME' ]"
   check "the shared bus the config names exists on this claw" test -d "$BUS_HOME"
 
   # A file every session reads has to be readable by every session.
