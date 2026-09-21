@@ -1,7 +1,7 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "tenants",
-  "version": "1.7.0",
-  "tag": "v1.7.0",
-  "tree_digest": "75fb77bb7b5fdb341d40b303a17bd26ac3f478ac8a9a5508dfe49e667d77d929"
+  "version": "1.7.1",
+  "tag": "v1.7.1",
+  "tree_digest": "6c1281bb9e5b3fdd3ee69528e069747415a0d8a5f76bea810e822ea9dfc62971"
 }
