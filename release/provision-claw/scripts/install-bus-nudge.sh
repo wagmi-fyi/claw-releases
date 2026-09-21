@@ -17,7 +17,7 @@
 #
 # WHAT THE RAIL IS. The session bus is files. A delegate writes its report into
 # an inbox and announces it to nobody, so the reader learns about it when it
-# next happens to look. `bus-nudge` watches the buses on this machine and tells
+# next happens to look. 'bus-nudge' watches the buses on this machine and tells
 # a live session, in one fixed sentence and nothing else, that it has unread
 # mail. The session then reads the bus. The nudge carries no instruction, so a
 # wrong or stale one wastes a turn and can never inject work.
@@ -32,7 +32,7 @@
 # THE OPT-IN THIS INSTALLS, AND WHAT IT COSTS. A session holds a message from a
 # sender that cannot attest its permission mode, and waits for a human to
 # approve it. A headless rail cannot answer that prompt. So this installer sets
-# `crossSessionInbound` to `accept` in the machine's managed settings, which is
+# 'crossSessionInbound' to 'accept' in the machine's managed settings, which is
 # the ruled shape: every session on the claw opts in. What that permits is a
 # local process holding a session's own 0600 auth key writing a user turn into
 # that session. It does not open the claw to anything off it, and it does not
@@ -45,16 +45,20 @@
 # one. A unit file this claw owns is converged and the change is reported.
 # Nothing here overwrites a decision a person made.
 #
-# THE SWEEPER RIDES WITH THE RAIL. `session-sweep` ends a session process that
+# THE SWEEPER RIDES WITH THE RAIL. 'session-sweep' ends a session process that
 # a newer process of the same session replaced, after a grace period. It is a
 # separate program under a separate unit, session-sweep@<account>.timer, and it
-# reads `session-guard`, which the rail loads too. One installer lays all three,
+# reads 'session-guard', which the rail loads too. One installer lays all three,
 # because the guard is the one answer the rail and the sweeper both take about
 # which process is newest. A person switches the sweeper off by disabling its
 # timer, and a re-run leaves it off, the way it leaves a disabled watcher off.
 #
 # EXIT CODES. 0 the rail is standing. 1 something this script owns did not
 # take. 2 usage.
+#
+# THIS HEADER IS THE USAGE TEXT. A bare call and -h print it. A backtick in a
+# line somebody pastes into a shell command runs whatever sits between the two,
+# so a command named here is named in single quotes.
 set -uo pipefail
 
 BIN_DIR="/opt/commonclaw/bin"
@@ -327,6 +331,12 @@ fi
 # SEEDED INTO AN ABSENCE, NEVER REWRITTEN, which is the law the updater mode and
 # the seat roster follow. Once the file exists it is somebody's ruling about this
 # machine.
+#
+# A LINE HERE SPEAKS FOR THIS SCRIPT AND FOR NOTHING ELSE. provision-claw.sh
+# phase 24 calls this installer and then rewrites the same file, so a claim here
+# that the file is untouched is false whenever that writer changes a byte.
+# Measured 2026-09-17, w257 and w258: both rides printed that the file was left
+# exactly as it is, and both moved its digest.
 SHARED_BUS=""
 if command -v jq >/dev/null 2>&1 && [ -s "$MANAGED_SETTINGS" ]; then
   SHARED_BUS="$(jq -r '.env.SESSION_BUS_DIR // empty' "$MANAGED_SETTINGS" 2>/dev/null || true)"
@@ -337,9 +347,9 @@ elif [ "$MODE" = dry-run ]; then
   ok "${DRY}record ${SHARED_BUS} at ${ORCHESTRATE_CONF}"
 elif [ -e "$ORCHESTRATE_CONF" ]; then
   if grep -qE '^[[:space:]]*ORCHESTRATE_SHARED_BUS[[:space:]]*=' "$ORCHESTRATE_CONF"; then
-    ok "${ORCHESTRATE_CONF} already names the shared bus and was left exactly as it is"
+    ok "${ORCHESTRATE_CONF} already names the shared bus, so this installer wrote nothing to it"
   else
-    warn "${ORCHESTRATE_CONF} exists and does not name the shared bus. It was left alone. Add ORCHESTRATE_SHARED_BUS=\"${SHARED_BUS}\" by hand, or the rail watches each account's own bus alone"
+    warn "${ORCHESTRATE_CONF} exists and does not name the shared bus, and this installer left it alone. A provisioning run writes that key a moment later, in the same phase that called this door. On a run of this door alone, add ORCHESTRATE_SHARED_BUS=\"${SHARED_BUS}\" by hand, or the rail watches each account's own bus alone"
   fi
 else
   {

@@ -12,19 +12,19 @@
 #
 # WHAT A SEED IS. What the token service cannot make for itself: a client
 # registration and the first refresh token, or a static key. Getting one is a
-# person's act. `token add` wrote the row and printed where the seed goes: an
-# item in this claw's machine vault, which the person fills through their own
-# password-manager app, by paste or with the laptop helper.
+# person's act. The 'token add' command wrote the row and printed where the seed
+# goes: an item in this claw's machine vault, which the person fills through their
+# own password-manager app, by paste or with the laptop helper.
 #
 # WHAT THIS DOOR DOES. It asks the service which item and which fields the row
 # names. It reads each field once through this claw's machine credential, the
 # way the mail provider-key door reads it, and hands the seed to the service
-# with `seed`. The service takes that verb from root alone. On success the last
+# with 'seed'. The service takes that verb from root alone. On success the last
 # line of progress is the one word "seeded", and the JSON carries the expiry and
 # the fingerprint. No value is printed.
 #
 # --authorize IS THE TUNNEL PATH, for a provider whose redirect has to reach the
-# claw. The person opens `ssh -L PORT:127.0.0.1:PORT` to this claw and runs the
+# claw. The person opens 'ssh -L PORT:127.0.0.1:PORT' to this claw and runs the
 # door there. The door runs the laptop helper's own code on this claw: it
 # registers a client, prints the approval link, catches the redirect through the
 # tunnel and exchanges the code here. The seed goes straight to the service

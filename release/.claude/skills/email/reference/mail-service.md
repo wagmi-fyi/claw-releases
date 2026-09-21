@@ -115,4 +115,6 @@ When the connection is down, `reason` says why. A claw with a key and no inbox y
 
 **A frame the adapter does not act on is reported.** The adapter prints one line for it with the frame's type word, its event type word, its top-level key names and its size, and never a value. The service logs it at warn, with an hourly cap, and counts every one in `passed_over`. A mail that reached the provider and never reached a session shows here.
 
+**Everything the service says goes to the journal, one line per event, and nothing it says goes to a bus.** The line carries its level the way the journal records a level, so a reading filtered to warnings finds them. A rail that recorded its own trouble into an inbox would raise unread mail, which would raise a nudge, which would raise more mail.
+
 Provisioning reads that line and reports it as a note. **A claw with no key and no inbox is not a failure**, and the phase says so: that is the ordinary state of a fresh claw, and a rail that failed the apply for it would stop a release above the sentence that says how to wire one.

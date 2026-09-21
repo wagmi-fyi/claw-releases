@@ -60,8 +60,12 @@
 #
 # THE OVERRIDES BELOW EXIST FOR CONTROLS. MAIL_CHECK_CONF, MAIL_CHECK_STATE_DIR,
 # MAIL_CHECK_NOW_EPOCH, MAIL_CHECK_EMAIL_CLI, MAIL_CHECK_SESSIONS_ROOT,
-# MAIL_CHECK_SENDER and NOTIFIER point this script at fixtures. The timer sets
-# none of them.
+# MAIL_CHECK_SENDER, MAIL_CHECK_LOG_TAG and NOTIFIER point this script at
+# fixtures. The timer sets none of them.
+#
+# MAIL_CHECK_LOG_TAG IS WHAT A SUITE MUST SET. A fixture run under the live tag
+# writes lines into the claw's journal that read like real alerts, and a person
+# looking there later cannot tell them from the ones that happened.
 #
 set -uo pipefail
 
@@ -98,7 +102,33 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log() { logger -t commonclaw-mail-check -p "user.$1" -- "$2" 2>/dev/null || true; printf '[%s] %s\n' "$1" "$2" >&2; }
+LOG_TAG="${MAIL_CHECK_LOG_TAG:-commonclaw-mail-check}"
+
+# IS THIS RUN'S STANDARD ERROR THE JOURNAL SYSTEMD GAVE IT? systemd writes the
+# device and the inode of that stream into JOURNAL_STREAM. The variable is
+# inherited by anything a unit starts, so the reading is on the stream. A run
+# whose standard error went to a file answers no, and a control reading that
+# file still gets the line.
+#
+# THE STREAM IS READ ON FD 3. A 2>/dev/null on the reading command sends that
+# command's own fd 2 to /dev/null before it runs, so it would measure /dev/null
+# and answer no every time. fd 3 is a copy of this script's standard error,
+# taken before the stat's own is sent away.
+stderr_is_journal() {
+  [ -n "${JOURNAL_STREAM:-}" ] || return 1
+  local here
+  here="$( { stat -Lc '%d:%i' /proc/self/fd/3 2>/dev/null; } 3>&2 )"
+  [ -n "$here" ] && [ "$JOURNAL_STREAM" = "$here" ]
+}
+
+# ONE LINE PER EVENT. Under the timer's unit the logger line is already in the
+# journal, and the copy on standard error is the same line a second time, shown
+# by journalctl -u. The logger line is the one to keep: it carries the level as
+# the journal's own priority, and it carries the tag above.
+log() {
+  logger -t "$LOG_TAG" -p "user.$1" -- "$2" 2>/dev/null || true
+  stderr_is_journal || printf '[%s] %s\n' "$1" "$2" >&2
+}
 
 # ------------------------------------------------------------------ the conf
 #
@@ -143,6 +173,16 @@ if [ -n "$MAIL_ALERT_TO" ]; then
     *) log err "MAIL_ALERT_TO in ${MAIL_CONF} is not one address, so no alert goes by mail" ;;
   esac
 fi
+
+# THE RECIPIENT, SAID IN ONE LINE, whether or not anything is late. It sits
+# above the quiet exit and above both mode blocks, so one command proves the
+# address on a claw where nothing is waiting. The line never carries the value
+# of a MAIL_ALERT_TO that failed the check above, for the reason that check's
+# own message does not.
+SAY_TO="none"
+[ -n "$ALERT_TO" ] && SAY_TO="$ALERT_TO"
+[ -z "$ALERT_TO" ] && [ -n "$MAIL_ALERT_TO" ] && SAY_TO="none, because MAIL_ALERT_TO is not one address"
+[ "$MODE" = beat ] || printf 'alert recipient: %s\n' "$SAY_TO"
 
 command -v jq >/dev/null 2>&1 || { log err "jq is not installed, so no bus can be read"; exit 0; }
 

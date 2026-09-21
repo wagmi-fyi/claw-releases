@@ -6,7 +6,7 @@
 # The JSON is the check: `ok` is true only when every verification passed.
 #
 # USAGE
-#   sudo ./provision-claw.sh --project wagmi --hostname wagmi-claw \
+#   sudo ./provision-claw.sh --project wagmi --hostname <hostname> \
 #        --timezone America/Chicago --keys ./staff-keys.txt --bucket <bucket>
 #
 #   --project <slug>       the firm this claw belongs to, recorded in the claw
@@ -295,7 +295,7 @@ DELEGATE_SKIP_PERMISSIONS="true"
 # claw already above it keeps what it has.
 #
 # RAISING ONE is an edit here, a commit, and a ride through the promotion tiers
-# -- staging, then wagmi-claw, then tenants. There is deliberately no per-claw
+# -- staging, then wagmi, then tenants. There is deliberately no per-claw
 # override and no flag: a floor that a run could lower is not a floor, and a
 # per-claw value would let a box sit below the fleet's minimum with nothing
 # saying so. The two lines below are the one place either version is stated.
@@ -965,12 +965,20 @@ emit_json() {
   done
   printf '],\n'
 
+  # A NAME THIS RUN DID NOT INSTALL CARRIES NO DIGEST FIELD, the way the ledger
+  # gives a shadowed name no digest line. The field held "sha256:" and nothing
+  # after it, which reads as a digest that failed.
   printf '  "skills": ['
   first=1
   for i in "${!SKILL_NAMES[@]}"; do
     [ "$first" -eq 0 ] && printf ', '
-    printf '{"name": "%s", "digest": "sha256:%s"}' \
-      "$(json_esc "${SKILL_NAMES[$i]}")" "$(json_esc "${SKILL_DIGESTS[$i]}")"; first=0
+    if [ -n "${SKILL_DIGESTS[$i]}" ]; then
+      printf '{"name": "%s", "digest": "sha256:%s"}' \
+        "$(json_esc "${SKILL_NAMES[$i]}")" "$(json_esc "${SKILL_DIGESTS[$i]}")"
+    else
+      printf '{"name": "%s"}' "$(json_esc "${SKILL_NAMES[$i]}")"
+    fi
+    first=0
   done
   printf '],\n'
 
@@ -5959,7 +5967,7 @@ phase_22_notification_rail() {
   # reference is safe; a reference is not a value.
   #
   # WRITTEN THROUGH install_adopting rather than with a plain `cat >`, so a claw
-  # carrying a hand-placed copy learns which of the two it got. wagmi-claw has
+  # carrying a hand-placed copy learns which of the two it got. The hub has
   # carried both of these files since August and its copies differ from this
   # release; a silent rewrite would drop whatever somebody had added to them with
   # nothing in the run's output saying so.
@@ -6247,8 +6255,16 @@ phase_24_wake_rail() {
   # firm back to the fleet default with nothing saying so. This is the seat
   # roster's law applied line by line rather than file by file, because the same
   # file holds both kinds.
+  #
+  # WHAT THIS WRITER DID IS SAID BY THIS WRITER. The file is re-rendered whole on
+  # every run, so the installer above cannot speak for its final state. Measured
+  # 2026-09-17, w257 and w258: both rides printed that the file was left exactly
+  # as it is, and both moved its digest. On one of them the run added
+  # ORCHESTRATE_BUS_DIR and said nothing.
   local cur_model="$DELEGATE_MODEL" cur_skip="$DELEGATE_SKIP_PERMISSIONS" kept=""
+  local before="" added=""
   if [ -r "$ORCHESTRATE_CONF_FILE" ]; then
+    before="$(cat "$ORCHESTRATE_CONF_FILE")"
     local v
     v="$(sed -n 's/^ORCHESTRATE_DELEGATE_MODEL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ORCHESTRATE_CONF_FILE" | tail -1)"
     [ -n "$v" ] && { cur_model="$v"; kept="the model"; }
@@ -6277,6 +6293,15 @@ ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
 ORCHEOF
   chmod 0644 "$ORCHESTRATE_CONF_FILE"; chown root:root "$ORCHESTRATE_CONF_FILE"
   [ -n "$kept" ] && say "  kept ${kept} this claw already recorded in ${ORCHESTRATE_CONF_FILE}"
+  local k
+  for k in ORCHESTRATE_SHARED_BUS ORCHESTRATE_BUS_DIR ORCHESTRATE_SUBSTRATE; do
+    printf '%s\n' "$before" | grep -q "^${k}=" || added="${added:+${added}, }${k}"
+  done
+  if [ "$before" = "$(cat "$ORCHESTRATE_CONF_FILE")" ]; then
+    say "  ${ORCHESTRATE_CONF_FILE} already read exactly this, so nothing in it moved"
+  else
+    say "  wrote ${ORCHESTRATE_CONF_FILE}${added:+, adding ${added}}"
+  fi
 
   check "the orchestration config is 0644 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$ORCHESTRATE_CONF_FILE')\" = '644 root:root' ]"

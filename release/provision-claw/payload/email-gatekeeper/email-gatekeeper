@@ -70,6 +70,13 @@ ENVFILE = os.environ.get("EMAIL_GATEKEEPER_ENV", "/etc/commonclaw/email-gatekeep
 CRED_FILE = "/etc/commonclaw/credentials/op-service-account.cred"
 CRED_NAME = "op-service-account"
 
+# THE NAME THIS SERVICE'S JOURNAL LINES CARRY. It is read here and never from
+# the conf, for the same reason the two paths above are: a firm has no ruling to
+# make about it, and a control needs it before any conf is parsed. A suite sets
+# it so its fixture lines land under a name of its own, where nobody reading a
+# claw for real trouble meets them.
+LOG_TAG = os.environ.get("EMAIL_GATEKEEPER_LOG_TAG", "email-gatekeeper")
+
 DEFAULTS = {
     "ENABLED": "yes",
     "ADAPTER": "agentmail",
@@ -100,11 +107,35 @@ NO_INBOX_REASON = ("routes.json names no inbox yet: a person makes it with "
                    "'email inbox create --username NAME'")
 
 
+def stderr_is_journal():
+    """Is this process's stderr the journal systemd gave it?
+
+    systemd writes the device and the inode of that stream into JOURNAL_STREAM.
+    A process that inherited the variable and then had its stderr sent to a file
+    reads false here, which is the answer a control wants.
+    """
+    want = os.environ.get("JOURNAL_STREAM", "")
+    if not want:
+        return False
+    try:
+        st = os.fstat(2)
+    except Exception:
+        return False
+    return want == "%d:%d" % (st.st_dev, st.st_ino)
+
+
 def log(level, msg):
     """Everything this service says goes to the journal. Never to a bus.
 
     A rail that recorded its own trouble into an inbox would raise unread mail,
     which would raise a nudge, which would raise more mail.
+
+    ONE LINE PER EVENT. Under systemd the journal already holds what this
+    process writes to stderr, and the syslog call puts the same words there a
+    second time. The syslog line is the one to keep: it carries the level as the
+    journal's own priority. The stderr copy is written when stderr is something
+    else, which is how a person running the service by hand and a control
+    reading its log file both see it.
     """
     try:
         syslog.syslog(
@@ -113,6 +144,8 @@ def log(level, msg):
         )
     except Exception:
         pass
+    if stderr_is_journal():
+        return
     sys.stderr.write("%s %s\n" % (level, msg))
     sys.stderr.flush()
 
@@ -1392,7 +1425,7 @@ def main():
     g.add_argument("--serve", action="store_true", help="run the service")
     a = ap.parse_args()
     try:
-        syslog.openlog("email-gatekeeper", syslog.LOG_PID, syslog.LOG_DAEMON)
+        syslog.openlog(LOG_TAG, syslog.LOG_PID, syslog.LOG_DAEMON)
     except Exception:
         pass
     settings = Settings()
