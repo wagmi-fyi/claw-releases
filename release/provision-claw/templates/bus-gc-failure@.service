@@ -1,0 +1,14 @@
+# Installed VERBATIM, never rendered. See bus-gc@.service.
+#
+# Started by systemd when bus-gc@<account>.service fails. It sends one line to
+# the `human` handle on the shared bus, the way a scheduled job's failure unit
+# tells its owner. The error stays in the journal. It runs as the account, so
+# the line is that account's own send.
+[Unit]
+Description=Tell the human handle that the bus gc for %i failed
+
+[Service]
+Type=oneshot
+User=%i
+Environment=SESSION_BUS_DIR=/var/lib/commonclaw/bus
+ExecStart=/opt/commonclaw/bin/bus send commonclaw-bus-gc human "bus gc failed for %i" "The daily bus gc for account %i failed on %H. The error is in the journal: journalctl -u bus-gc@%i.service -n 50"

@@ -1,0 +1,33 @@
+# Installed VERBATIM, never rendered. The %i is systemd's own instance
+# expansion, and render-template.sh must not touch this file.
+#
+# One instance per account: bus-gc@<account>.service. It runs AS that account,
+# because on a shared bus `bus gc` retires the caller's own handles and nobody
+# else's. A root run would own every handle and retire none of them.
+#
+# WHAT IT RETIRES. A handle whose inbox is fully read and whose last message or
+# registration is older than the program's own threshold, 14 days. A handle
+# with unread mail, a lease, or a recent registration is kept. The inbox lines
+# move to processed/ and every message stays in log.jsonl, so a retire can be
+# undone by hand.
+#
+# NO --days AND NO --if-stale. The threshold is the program's. The daily timer
+# beside this file is the throttle: --if-stale reads one stamp for the whole
+# bus, so the first account to run each day would silence every other one. The
+# installer refuses this file if its ExecStart line says anything else.
+#
+# A FAILURE SENDS ONE BUS LINE, the way a scheduled job's does, through
+# bus-gc-failure@.service.
+[Unit]
+Description=Bus gc for %i: retire this account's fully read, idle handles on the shared bus
+Documentation=file:/opt/commonclaw/doc/wake-rail.md
+OnFailure=bus-gc-failure@%i.service
+
+[Service]
+Type=oneshot
+User=%i
+Environment=SESSION_BUS_DIR=/var/lib/commonclaw/bus
+ExecStart=/opt/commonclaw/bin/bus gc --commit
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

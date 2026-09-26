@@ -55,9 +55,10 @@
 #
 # ONE RUN AT A TIME. A run takes a lock on /run/commonclaw-update.lock before it
 # reads what the claw carries, and holds it to its exit. A second run that finds
-# the lock held exits 1 at once and has read and written nothing but its own
-# run-log record. A timer tick and a ride never apply side by side. `--check`
-# takes no lock.
+# the lock held stops at once and has read and written nothing but its own
+# run-log record. A scheduled tick that stops there exits 0, the way a deferral
+# does. A run a person is standing at exits 1. A timer tick and a ride never
+# apply side by side. `--check` takes no lock.
 #
 # WHAT THIS IS FOR. Updates move to a PULL rail. This claw reaches out for its own
 # releases, so no machine holds a key to this one. `reference/release-rail.md` is
@@ -309,9 +310,18 @@ STEP="take the apply lock"
 # tick loses nothing: the next tick reads the pointer again. A refused ride
 # tells the person standing at it which run holds the lock, and they decide.
 # A run that waited would sit silent behind an apply it cannot see, and a tick
-# queued behind a hung apply would hide the hang. It exits 1, because it is a
-# refusal. A tick refused behind a hung apply then shows red every hour, and
-# that is a page somebody can act on.
+# queued behind a hung apply would hide the hang.
+#
+# A SCHEDULED TICK THAT MEETS THE LOCK EXITS 0, AND AN ATTENDED RUN EXITS 1.
+# The tick exited 1 too. Measured on a tenant claw on 2026-09-26: the hourly
+# tick fired during an attended ride, met its lock, and the update unit read
+# failed for an hour. The ride's own health line printed it as a fault of the
+# ride. A tick behind a held lock is a deferral: the holder is applying, and the
+# next tick reads the pointer again. So it logs one line and exits 0, the way a
+# quiet-window deferral does. Attendance is the measurement the deferral below
+# takes. A person standing at a run still gets 1, and the line names the holder.
+# The cost: a tick behind a hung apply no longer turns the unit red. The hung
+# run's own unit is where that shows.
 #
 # --check TAKES NO LOCK. It writes nothing, and a lock file is a write.
 #
@@ -324,6 +334,11 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
     || die "lock unavailable" "could not open ${APPLY_LOCK}. This claw is unchanged and nothing was fetched"
   if ! flock -n 9; then
     lock_holder="$(head -n 1 "$APPLY_LOCK" 2>/dev/null | cut -c1-120)"
+    if [ -n "${INVOCATION_ID:-}" ] || [ ! -t 0 ]; then
+      VERDICT="deferred behind another run"
+      log info "another run of this script holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}), so this scheduled run read nothing, changed nothing and exits 0. The next tick reads the pointer again"
+      exit 0
+    fi
     die "another run holds the apply" "another run of this script holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}). This run read nothing and changed nothing. Run it again when that run has ended"
   fi
   printf 'pid %s since %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APPLY_LOCK"

@@ -200,3 +200,20 @@ until `--clear-hold <handle>` clears it. A line goes to `human`.
   hold.
 - **Nothing watches this rail.** The same hole the notifier names about itself.
   Silence means healthy, and it also means the instance is off.
+
+## The resume hook's limit
+
+The hook loads the orchestrate skill's front page when it is 9,500 characters or
+fewer. A longer page, or none, is not loaded. The session gets one line in its
+place that names the page and says to run the resume operation by hand. The same
+line goes to the journal: `journalctl -t claw-resume-hook`.
+
+## The bus gc
+
+Handles pile up on the shared bus as sessions come and go. Once a day,
+`bus-gc@<account>.timer` runs `bus gc --commit` as the account. It retires that
+account's handles whose inbox is fully read and which have been idle 14 days. A
+handle with unread mail, a lease or a recent registration stays. Another
+account's handles are never touched. The inbox lines move to `processed/` and
+every message stays in `log.jsonl`. A failed run sends one line to `human`.
+Disabling the timer switches it off, and a later install leaves it off.

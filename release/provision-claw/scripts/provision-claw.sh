@@ -144,7 +144,8 @@
 #                    identity is written into an absence, so a chosen address
 #                    survives every re-run. An account in the members group
 #                    that is not a person moves to the bus group once; a second
-#                    run finds none.
+#                    run finds none. The filing-rules link is laid only where
+#                    nothing is, so a second run finds every one in place.
 #   9  codex         skipped when the installed version is AT OR ABOVE the floor.
 #                    When it does install it replaces the binaries; a running
 #                    session keeps its handle, a new exec takes the new binary.
@@ -648,6 +649,11 @@ CLAW_BRIEFING_LINK="${WORKSPACE_ROOT}/AGENTS.md"
 # can edit it. Q180, ruled 2026-09-26: a hand-made copy of this file with that
 # group stopped the hub's 1.8.0 apply, because the release did not declare it.
 CLAW_CONVENTIONS="${WORKSPACE_ROOT}/project-conventions.md"
+
+# Where the orchestrate skill's launch looks for a person's filing rules, under
+# their home. Phase 8 links it to the file above where nothing is there. Q189,
+# ruled 2026-09-26.
+MEMBER_CONVENTIONS=".config/project-conventions.md"
 
 # The fleet skill plane. One canonical copy per skill, symlinked into both
 # cores' machine-wide directories.
@@ -1631,6 +1637,9 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/commonclaw-signin-check@.service"
   [ -r "${TEMPLATE_DIR}/commonclaw-signin-check@.timer" ] \
     || missing_payload="$missing_payload ../templates/commonclaw-signin-check@.timer"
+  for s in bus-gc@.service bus-gc@.timer bus-gc-failure@.service; do
+    [ -r "${TEMPLATE_DIR}/${s}" ] || missing_payload="$missing_payload ../templates/${s}"
+  done
   [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
     || missing_payload="$missing_payload ../templates/wake-rail.md"
   # The operator's runbook, which the same installer lays beside the member's
@@ -2954,6 +2963,7 @@ phase_8_users() {
   # the bus group. Above the dry-run return, so a dry run names both.
   take_back_non_people
   move_non_people_to_bus
+  link_member_conventions
   [ "$DRY_RUN" -eq 1 ] && return 0
 
   local all_ok=1
@@ -3192,6 +3202,58 @@ phase_8_users() {
   reconcile_service_managers
 
   human "each person completes their own core logins in their own home"
+}
+
+# THE FILING RULES, REACHED FROM EACH HOME. The orchestrate skill's launch reads
+# a person's rules at ~/.config/project-conventions.md, and it reads no path on
+# the claw. Without this link a person's first launch finds no rules, while the
+# claw's own file sits beside the briefing. Q189, ruled 2026-09-26.
+#
+# LAID INTO AN ABSENCE AND NEVER TOUCHED AGAIN. Whatever is at that path is the
+# person's choice of rules. That includes a link whose target is gone. It stays,
+# and the apply log names it, since launch then finds nothing for them.
+#
+# BY THE PERSON, for the reason the git identity is written by the person: the
+# link and a ~/.config it needs are theirs, and this run never chowns anything
+# in a home. A ~/.config that is there keeps its mode.
+#
+# NO LINK TO NOTHING. The claw's file is phase 7's. Where it is absent, or is a
+# symlink phase 7 refused, no person gets a link.
+#
+# XDG_CONFIG_HOME IS NOT READ. Launch reads it, and no member on a claw sets
+# it. A person who sets it has told launch to look elsewhere.
+link_member_conventions() {
+  local user home link laid=0 kept=0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would link each person's ~/${MEMBER_CONVENTIONS} to ${CLAW_CONVENTIONS} where nothing is there"
+    return 0
+  fi
+  if [ ! -f "$CLAW_CONVENTIONS" ] || [ -L "$CLAW_CONVENTIONS" ]; then
+    warn "no claw filing rules at ${CLAW_CONVENTIONS}, so no person's ~/${MEMBER_CONVENTIONS} was linked to them"
+    return 0
+  fi
+  for user in "${PEOPLE[@]}"; do
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [ -n "$home" ] && [ -d "$home" ] || { warn "$user: no home directory, so no filing-rules link was laid"; continue; }
+    link="${home}/${MEMBER_CONVENTIONS}"
+    if [ -L "$link" ] && [ ! -e "$link" ]; then
+      warn "$user: ${link} is a link to $(readlink "$link"), which is not there. It is theirs and was left, so launch finds no filing rules for them"
+      kept=$((kept+1)); continue
+    fi
+    if [ -e "$link" ] || [ -L "$link" ]; then kept=$((kept+1)); continue; fi
+    if sudo -u "$user" -H bash -c '
+         set -e; cd /
+         link="$1"; target="$2"; dir="$(dirname "$link")"
+         [ -d "$dir" ] || mkdir -m 0700 -- "$dir"
+         ln -s -- "$target" "$link"
+       ' _ "$link" "$CLAW_CONVENTIONS" 2>/dev/null; then
+      say "  ${user}: linked ${link} to ${CLAW_CONVENTIONS}"
+      laid=$((laid+1))
+    else
+      warn "$user: could not link ${link} to ${CLAW_CONVENTIONS}, so launch finds no filing rules for them"
+    fi
+  done
+  say "  filing-rules links: ${laid} laid, ${kept} left as they stand"
 }
 
 # A PERSON'S SERVICE MANAGER KEEPS THE GROUPS IT STARTED WITH. With linger on it
@@ -6516,6 +6578,9 @@ phase_24_wake_rail() {
   check "the boot sentence it delivers carries no interpolation at all" \
     "${CLAW_BIN}/session-continuity" --law
   check "the sign-in check is installed" test -x "${CLAW_BIN}/commonclaw-signin-check"
+  # The installer refuses a bus gc unit whose command is not its own, and lays
+  # nothing then. So a laid unit is one whose command it read.
+  check "the daily bus gc unit is laid" test -r /etc/systemd/system/bus-gc@.service
 
   # ---- the orchestration settings ----
   #

@@ -68,6 +68,17 @@
 # signed-out harness is what makes the continuity rail hold, and the rail takes
 # the same reading for its hold. Its timer is its switch.
 #
+# AND THE BUS GC. 'bus gc --commit' runs once a day as each account under
+# bus-gc@<account>.timer, and retires that account's fully read, idle handles on
+# the shared bus. Without it the rows pile up: a tenant claw read 66 of 71
+# handles gone on 2026-09-26. The program is the bus this installer's phase
+# already lays at /opt/commonclaw/bin/bus. The unit passes no --days, so the
+# threshold is the program's own, and no --if-stale, because that stamp is one
+# per bus and the first account each day would silence the rest. This installer
+# refuses a unit file whose command says anything else. A failed run sends one
+# line to the human handle through bus-gc-failure@.service. Its timer is its
+# switch.
+#
 # EXIT CODES. 0 the rail is standing. 1 something this script owns did not
 # take. 2 usage.
 #
@@ -94,6 +105,10 @@ SWEEP_RECORD="/var/lib/commonclaw/session-sweep-enabled"
 CONTINUITY_RECORD="/var/lib/commonclaw/session-continuity-enabled"
 # And for the sign-in check's timer.
 SIGNIN_RECORD="/var/lib/commonclaw/signin-check-enabled"
+# And for the bus gc's timer.
+GC_RECORD="/var/lib/commonclaw/bus-gc-enabled"
+# The one command the bus gc unit may run. See "the bus gc's command" below.
+GC_EXEC="ExecStart=/opt/commonclaw/bin/bus gc --commit"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAYLOAD_DIR="${HERE}/../payload"
 TEMPLATE_DIR="${HERE}/../templates"
@@ -136,6 +151,8 @@ if [ "$MODE" = uninstall ]; then
     ok "session-continuity@${a}.timer stopped and disabled"
     systemctl disable --now "commonclaw-signin-check@${a}.timer" >/dev/null 2>&1
     ok "commonclaw-signin-check@${a}.timer stopped and disabled"
+    systemctl disable --now "bus-gc@${a}.timer" >/dev/null 2>&1
+    ok "bus-gc@${a}.timer stopped and disabled"
   done
   systemctl daemon-reload
   printf '{"mode":"uninstall","accounts":["%s"],"note":"the program, the conf and the managed-settings opt-in were left in place: each is shared and removing one is its own decision"}\n' \
@@ -399,13 +416,41 @@ if [ "$MODE" != dry-run ] && command -v jq >/dev/null 2>&1; then
     bash -c "[ -n \"\$('${BIN_DIR}/bus-nudge' --check 2>/dev/null | jq -r '.shared_bus // empty')\" ]"
 fi
 
-# ------------------------------------------------------------- the eight units
+# ------------------------------------------------------- the bus gc's command
+#
+# THE UNIT RUNS ONE COMMAND AND THIS READS IT BEFORE IT IS LAID. A --days in it
+# would move the threshold for every account on the claw, and --days 0 retires
+# every fully read handle at once, a session that is only quiet among them. An
+# --if-stale would let the first account each day silence the rest. So the
+# service file carries exactly one ExecStart line and it is GC_EXEC, byte for
+# byte, or the three gc units are not laid and the run fails.
+GC_OK=1
+if [ -r "${TEMPLATE_DIR}/bus-gc@.service" ]; then
+  gc_lines="$(grep -c '^[[:space:]]*ExecStart[[:space:]]*=' "${TEMPLATE_DIR}/bus-gc@.service" || true)"
+  if [ "$gc_lines" != 1 ] || ! grep -qxF "$GC_EXEC" "${TEMPLATE_DIR}/bus-gc@.service"; then
+    GC_OK=0
+    bad "${TEMPLATE_DIR}/bus-gc@.service does not run exactly '${GC_EXEC#ExecStart=}', so no bus gc unit was laid. It reads: $(grep '^[[:space:]]*ExecStart[[:space:]]*=' "${TEMPLATE_DIR}/bus-gc@.service" | tr '\n' ' ')"
+  fi
+fi
+
+# ------------------------------------------------------------ the eleven units
+#
+# WRITTEN ONLY WHEN THE BYTES DIFFER. A unit file whose bytes already match is
+# left as it is, inode and time included, so a second apply moves nothing. Its
+# mode and owner are still converged.
 for u in bus-nudge@.service bus-nudge@.timer session-sweep@.service session-sweep@.timer \
          session-continuity@.service session-continuity@.timer \
-         commonclaw-signin-check@.service commonclaw-signin-check@.timer; do
+         commonclaw-signin-check@.service commonclaw-signin-check@.timer \
+         bus-gc@.service bus-gc@.timer bus-gc-failure@.service; do
   [ -r "${TEMPLATE_DIR}/${u}" ] || { bad "no ${TEMPLATE_DIR}/${u}"; continue; }
+  case "$u" in bus-gc*) [ "$GC_OK" = 1 ] || continue ;; esac
   if [ "$MODE" = dry-run ]; then ok "${DRY}install ${UNIT_DIR}/${u}"; continue; fi
-  if [ -e "${UNIT_DIR}/${u}" ] && ! cmp -s "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"; then
+  if [ -e "${UNIT_DIR}/${u}" ] && cmp -s "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"; then
+    [ "$(stat -c '%a %U:%G' "${UNIT_DIR}/${u}")" = '644 root:root' ] \
+      || { chmod 0644 "${UNIT_DIR}/${u}"; chown root:root "${UNIT_DIR}/${u}"; }
+    continue
+  fi
+  if [ -e "${UNIT_DIR}/${u}" ]; then
     warn "${UNIT_DIR}/${u} differed from this release and was converged"
   fi
   install -m 0644 -o root -g root "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"
@@ -414,14 +459,34 @@ done
 
 # ------------------------------------------------------- one instance per head
 STARTED=()
-state=""; restarts=""; was_active=""; sw_word=""; ct_word=""; si_word=""
+state=""; restarts=""; was_active=""; sw_word=""; ct_word=""; si_word=""; gc_word=""
 for a in "${ACCOUNTS[@]}"; do
   if [ "$MODE" = dry-run ]; then
     ok "${DRY}enable and start bus-nudge@${a}"
     ok "${DRY}enable session-sweep@${a}.timer"
     ok "${DRY}enable session-continuity@${a}.timer"
     ok "${DRY}enable commonclaw-signin-check@${a}.timer"
+    [ "$GC_OK" = 1 ] && ok "${DRY}enable bus-gc@${a}.timer"
     continue
+  fi
+
+  # THE BUS GC'S TIMER, on the same law as the three timers below it.
+  if [ "$GC_OK" = 1 ]; then
+    gc_word="$(systemctl is-enabled "bus-gc@${a}.timer" 2>/dev/null || true)"
+    if [ "$gc_word" = masked ]; then
+      warn "bus-gc@${a}.timer is masked and was left off"
+    elif [ "$gc_word" = disabled ] && [ -e "${GC_RECORD}/${a}" ]; then
+      warn "bus-gc@${a}.timer is deliberately disabled and was left off"
+    else
+      systemctl enable --now "bus-gc@${a}.timer" >/dev/null 2>&1
+      check "bus-gc@${a}.timer is enabled" \
+        bash -c "systemctl is-enabled 'bus-gc@${a}.timer' 2>/dev/null | grep -qx enabled"
+      if [ "$(systemctl is-enabled "bus-gc@${a}.timer" 2>/dev/null || true)" = enabled ]; then
+        install -d -m 0755 -o root -g root "$GC_RECORD" \
+          && : > "${GC_RECORD}/${a}" \
+          || bad "could not record that bus-gc@${a}.timer was enabled, so a later disable of it may be undone"
+      fi
+    fi
   fi
 
   # THE SIGN-IN CHECK'S TIMER, on the same law as the two timers below it.
