@@ -1,0 +1,28 @@
+# Installed VERBATIM, never rendered. The %i is systemd's own instance
+# expansion, and render-template.sh must not touch this file.
+#
+# One instance per account: commonclaw-signin-check@<account>.service. The
+# reading runs AS that account, because the harness login it asks about lives
+# under that account's home. The delivery runs as root through the `+` prefix,
+# because the alarm channel's webhook resolves only under the machine's service
+# account. The root half reads a stamp from the account's alarm file and sends
+# fixed words naming %i and the claw. The header of
+# /opt/commonclaw/bin/commonclaw-signin-check says what is read and why.
+#
+# NO LoadCredentialEncrypted HERE, on purpose. Under User= systemd hands the
+# decrypted credential to the account's process, and this account is not the
+# machine. The root half decrypts it itself, the way the notifier does under
+# cron.
+[Unit]
+Description=Sign-in check for %i: say when the harness has signed this account out
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+ExecStart=/opt/commonclaw/bin/commonclaw-signin-check --once
+ExecStart=+/opt/commonclaw/bin/commonclaw-signin-check --deliver %i
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

@@ -134,34 +134,42 @@ off. The rail's `ENABLED` setting does not reach it.
 The rail above reaches only sessions still running. An orchestrator is a
 registration and a workpaper, and its process is not part of it, so the session
 mail waits for has often gone. `session-continuity` starts it again, every two
-minutes as the account, under `session-continuity@<account>.timer`.
+minutes as the account, under `session-continuity@<account>.timer`. It also keeps
+a live orchestrator writing down what it holds, and re-grounds a compacted one.
 
 A pass resumes each orchestrator handle this account owns that has unread mail,
-from its recorded session id and directory, with one fixed sentence: the rail
-resumed you, read your inbox. `--law` proves the sentence carries no
-interpolation, and the program refuses to run when that fails.
+from its recorded session id and directory, with one fixed turn:
+`/orchestrate full resume operation please`. A turn a resumed session starts with
+expands into the skill. Written into a live session they arrive as words, so a
+hook there loads the skill. `--law` proves each fixed sentence interpolates
+nothing, and refuses to run otherwise.
 
-**Two resume forms, and the harness's listing says which.** A session the
-harness has run in the background carries saved options, and flags passed to a
-resume of one start a copy under a new session id. A session with a background
-row is resumed bare; one with no row takes the flags, which set its name, model
-and permission flag. An unreadable listing is refused.
+**Two resume forms, and the listing says which.** Flags passed to a resume of an
+already-backgrounded session start a copy under a new id. One with a background
+row is resumed bare; one with no row takes the flags.
 
 **The twin check comes before every resume.** Nothing is resumed while a live
-process carries the handle's session id, or while a live session carries the
-handle's name. Either one means the session is here, and it gets the wake rail's
-nudge instead.
+process carries the handle's session id, or a live session its name. Either means
+the session is here, and it is nudged instead.
+
+**The forced write.** A live orchestrator is told to write its postures and its
+skills in use to the workpaper after two hours of its own activity, or once its
+last turn passes half the automatic compaction window. Activity is the transcript
+growing, so a quiet session owes nothing. The rail then reads whether that file
+moved; unmoved after thirty minutes is a line in the human's queue.
+`--set-workpaper` names it where the search cannot.
+
+**After a compaction, the same turn.** A hook records each compaction. A live
+session gets the turn through the wake rail's adapter, and the resume hook loads
+the skill for that exact phrase. A gone session is resumed with it. An unmoved
+workpaper thirty minutes later is a queue line.
 
 **The rail ends what it started.** A resumed session does not exit by itself, so
-a pass stops one this rail resumed once the listing reads it idle and its
-transcript has not grown for fifteen minutes. `claude stop` keeps the
-conversation, and the next message resumes it from the same transcript.
+a pass stops one once the listing reads it idle and its transcript has been quiet
+fifteen minutes. `claude stop` keeps the conversation.
 
-**A resume that fails writes a hold.** No handle of that account is resumed
-until `--clear-hold <handle>` clears it, and one line goes to the `human` bus
-handle naming the handle and the reason. A signed-out harness refuses every
-resume, and a rail that kept asking would tell nobody. The hold is a file under
-the account's own state directory.
+**A resume that fails writes a hold**, and nothing of that account is resumed
+until `--clear-hold <handle>` clears it. A line goes to `human`.
 
 ## What fails silently here
 

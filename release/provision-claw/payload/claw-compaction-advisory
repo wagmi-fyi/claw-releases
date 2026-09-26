@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""claw-compaction-advisory -- tell an orchestrator that it was just compacted.
+
+Installed machine-wide and run by the harness's session-start hook with the
+matcher `compact`, beside claw-bus-join, which runs on that event too and has no
+matcher. Two hooks, kept apart on purpose: one registers every session on the bus
+and the other speaks one line to one class of session, and a single program doing
+both would decide two unrelated questions in one place.
+
+WHAT IT PRINTS, AND WHAT THAT IS WORTH. One fixed line, ADVISORY below, for a
+session the bus records as an orchestrator. Nothing at all for anybody else.
+Measured 2026-09-26: what this event prints does land in the model's context, and
+the turn's own prompt wins over it. Two readings, both of a session that had the
+line and ignored it. So this is an advisory and not the mechanism: the continuity
+rail sends the turn that loads the orchestrate skill, and this line only says
+so, so a session working in the gap
+does not treat its own summary as settled state.
+
+THIS PROGRAM NEVER FAILS A SESSION. A bus it cannot read, a handle it cannot
+find, a role it cannot tell: each prints nothing and exits 0. The line is worth
+less than the session it would otherwise break.
+
+HOW IT KNOWS THE SESSION IS AN ORCHESTRATOR. The board on the shared bus carries
+one record per handle with the role the session registered under. claw-bus-join
+registers every session as a member under `<user>-<first 8 of the session id>`,
+and an orchestrator registers its own handle with the orchestrator role and its
+own session id. So the reading is: any handle on the board whose session id is
+this one and whose role is orchestrator. A member session matches none.
+"""
+import json
+import os
+import pwd
+import sys
+
+ROLE = "orchestrator"
+
+# NO INTERPOLATION. The rail beside this program proves that of its own two
+# sentences with a command, and this line answers to the same ruling: what a
+# session is told carries no value a bug could put in it.
+ADVISORY = (
+    "A compaction happened. The continuity rail will resume you with the "
+    "orchestrate skill; until then, read nothing as settled."
+)
+
+
+def whoami():
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        return os.environ.get("USER", "")
+
+
+def is_orchestrator(bus_dir, session, me):
+    try:
+        with open(os.path.join(bus_dir, "handles.json"), "r", encoding="utf-8") as fh:
+            handles = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(handles, dict):
+        return False
+    for rec in handles.values():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("role") != ROLE:
+            continue
+        if rec.get("session") != session:
+            continue
+        # OWNERSHIP IS READ TOO. The bus is shared by every member of the claw,
+        # and a session id is this account's own, so the two together are what
+        # says the handle is this session's rather than a namesake's.
+        if rec.get("owner") and rec.get("owner") != me:
+            continue
+        return True
+    return False
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    # THE MATCHER IS THE HARNESS'S JOB AND THIS IS THE SECOND READING OF IT. The
+    # settings register this program under the `compact` matcher. A claw whose
+    # settings somebody widened would otherwise print the line at every startup,
+    # where it is false.
+    if str(payload.get("source") or "") != "compact":
+        return 0
+    session = str(payload.get("session_id") or "")
+    bus_dir = os.environ.get("SESSION_BUS_DIR", "")
+    if not session or not bus_dir or not os.path.isdir(bus_dir):
+        return 0
+    if is_orchestrator(bus_dir, session, whoami()):
+        print(ADVISORY)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

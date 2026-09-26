@@ -325,6 +325,13 @@ does not name, and wait past `LATE_MINUTES`. The alert arrives by mail and in
 the channel. Start the session again, let it read its inbox, and the next beat
 is quiet.
 
+**The sign-in check.** Once an hour, `commonclaw-signin-check` asks the harness
+whether each account is signed in. The question costs no model turn. When an
+account is signed out, one line goes to the alarm channel and to the mail
+alarm's address, naming the account and the claw. It repeats daily until
+somebody runs `/login` as that account. An account that never signed in on this
+claw stays quiet.
+
 **The wake rail.** A session bus is files, and a message written into one
 announces itself to nobody. This rail tells a live session that it has unread
 mail, in one fixed sentence carrying no instruction. An account with no session

@@ -130,6 +130,7 @@ class_title() {
     memory-pressure) printf 'memory pressure' ;;
     claw-note)     printf 'note' ;;
     mail-late)     printf 'mail not handled' ;;
+    harness-signin) printf 'harness sign-in' ;;
     *) return 1 ;;
   esac
 }
@@ -142,6 +143,7 @@ class_default_level() {
     memory-pressure) printf 'warn' ;;
     claw-note)     printf 'info' ;;
     mail-late)     printf 'warn' ;;
+    harness-signin) printf 'err' ;;
     *) return 1 ;;
   esac
 }

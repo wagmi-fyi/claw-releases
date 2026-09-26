@@ -1,0 +1,279 @@
+#!/bin/bash
+#
+# commonclaw-signin-check: say when the harness has signed an account out.
+#
+# PAYLOAD PROGRAM. install-bus-nudge.sh lays it in /opt/commonclaw/bin beside the
+# other per-account rails, and commonclaw-signin-check@<account>.timer runs it
+# once an hour. Its consumers are the notifier, the mail alarm's address, the
+# journal, and session-continuity, which takes the same reading for its holds.
+#
+#   commonclaw-signin-check --read              print one word, change nothing
+#   commonclaw-signin-check --once              the account's hourly reading
+#   commonclaw-signin-check --deliver <account> the root half: send what is due
+#
+# WHAT THIS IS FOR. On 2026-09-26 staging's only member had been signed out long
+# enough for the OAuth session to expire. Every model turn there answered "Login
+# expired", the continuity rail held, and nothing told anybody. The hold is the
+# symptom. This program says the cause, in one line, to the people who can fix
+# it.
+#
+# THE READING IS THE HARNESS'S OWN ANSWER. Two commands, neither a model turn:
+#
+#   claude doctor        makes the harness try its own token refresh when the
+#                        access token has lapsed. A refresh the server refuses
+#                        is written down by the harness in its own files.
+#   claude auth status   then says loggedIn true or false, as JSON.
+#
+# Measured 2026-09-26 on 2.1.283, on scratch configs holding fake tokens:
+#
+#   auth status alone reads the file. A token expired thirty days ago read
+#   loggedIn true, so alone it is the file's presence under another name.
+#   doctor on that same expired token tried the refresh, the harness blanked the
+#   credential, and auth status then read false. mcp list does the same; agents,
+#   auto-mode and plugin list do not.
+#   doctor with the network cut left the credential intact, and auth status read
+#   true. An outage is therefore never a sign-out.
+#   a fake token not yet expired reads signed in to both. The server is not
+#   asked until the access token lapses, so a revoked token is seen within one
+#   access-token lifetime, which is hours.
+#
+# THE CREDENTIALS FILE IS READ FOR EXISTENCE AND NEVER FOR CONTENT, and its
+# existence is not the reading. It answers one other question. An account whose
+# harness says signed out and which holds no credentials file has never signed
+# in on this claw, or somebody logged it out on purpose. That reads `never`, and
+# it is quiet: a person who has not started yet is not an alarm.
+#
+# FOUR WORDS. signed-in, signed-out, never, unreadable. Unreadable is a harness
+# that is absent or answered something that is not its JSON. It is not signed
+# out, and it sends nothing.
+#
+# TWO HALVES, BECAUSE TWO ACCOUNTS HOLD WHAT THEY NEED.
+#
+#   --once runs AS THE ACCOUNT. The harness login lives under that account's
+#   home, mode 0600, and a root process reading it would be a different act. It
+#   keeps its state under the account's own state directory and writes an alarm
+#   file there when a line is due.
+#   --deliver runs AS ROOT, from the same unit, through systemd's `+` prefix. The
+#   alarm channel's webhook resolves only under the machine's service account,
+#   whose credential nobody else can read. It reads the account's alarm file
+#   for a stamp and nothing else, and it sends fixed words.
+#
+# WHAT IS DUE. A change into signed-out writes the alarm. While the account stays
+# signed out, the alarm is written again once REMIND_HOURS have passed. A reading
+# of signed-in removes the alarm, so a line nobody delivered yet is never sent
+# about a sign-out that is over. The root half records the stamp it delivered
+# under its own directory, so a second run with nothing new sends nothing, and a
+# run whose both legs failed tries again at the next beat.
+#
+# FIXED WORDS ONLY. The line names the account and the claw. The account name is
+# the unit's instance name, which systemd sets, and never text the account wrote.
+# No token, no address, no harness output reaches a line. The sentence is
+#
+#   <account> on <claw> is signed out of the harness; sessions and resumes fail
+#   until somebody runs /login as that account.
+#
+# WHERE IT GOES. The notifier, class harness-signin, and one mail to
+# MAIL_ALERT_TO in /etc/commonclaw/email-gatekeeper.conf through the mail
+# service's socket: the address the mail alarm uses. An empty address means the
+# channel alone. A claw with neither wired writes the line to the journal and
+# nothing else.
+#
+# EXIT CODES. 0 whether or not it found something and whether or not delivery
+# worked, because a Slack outage must not turn into a failed unit. 2 usage.
+#
+# THE OVERRIDES BELOW EXIST FOR CONTROLS. SIGNIN_STATE_DIR, SIGNIN_DELIVERED_DIR,
+# SIGNIN_HARNESS, SIGNIN_MAIL_CONF, SIGNIN_EMAIL_CLI, SIGNIN_LOG_TAG,
+# SIGNIN_NOW_EPOCH, NOTIFIER and PROVISION_CONF point this program at fixtures.
+# The units set none of them. SIGNIN_LOG_TAG is what a suite must set: a fixture
+# run under the live tag writes journal lines that read like real alarms.
+#
+set -uo pipefail
+
+LOG_TAG="${SIGNIN_LOG_TAG:-commonclaw-signin-check}"
+NOTIFIER="${NOTIFIER:-/usr/local/sbin/commonclaw-notify.sh}"
+MAIL_CONF="${SIGNIN_MAIL_CONF:-/etc/commonclaw/email-gatekeeper.conf}"
+EMAIL_CLI="${SIGNIN_EMAIL_CLI:-/opt/commonclaw/bin/email}"
+PROVISION_CONF="${PROVISION_CONF:-/etc/commonclaw/provision.conf}"
+DELIVERED_DIR="${SIGNIN_DELIVERED_DIR:-/var/lib/commonclaw/signin-check}"
+NOW="${SIGNIN_NOW_EPOCH:-$(date +%s)}"
+REMIND_HOURS=24
+READ_TIMEOUT=60
+SEND_TIMEOUT=120
+
+usage() {
+  awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2
+  exit 2
+}
+
+stderr_is_journal() {
+  [ -n "${JOURNAL_STREAM:-}" ] || return 1
+  local here
+  here="$( { stat -Lc '%d:%i' /proc/self/fd/3 2>/dev/null; } 3>&2 )"
+  [ -n "$here" ] && [ "$JOURNAL_STREAM" = "$here" ]
+}
+
+# One line per event. The memory check says why the stderr copy is dropped
+# under a unit.
+log() {
+  logger -t "$LOG_TAG" -p "user.$1" -- "$2" 2>/dev/null || true
+  stderr_is_journal || printf '[%s] %s\n' "$1" "$2" >&2
+}
+
+clean() { printf '%s' "$1" | tr -c 'A-Za-z0-9._@+-' '?'; }
+
+# The account's own state directory. Fixed under the home, because the root half
+# has to find it from the account name alone and cannot see the account's
+# environment.
+state_dir_for() {
+  if [ -n "${SIGNIN_STATE_DIR:-}" ]; then printf '%s' "$SIGNIN_STATE_DIR"; return 0; fi
+  local home
+  home="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+  [ -n "$home" ] || return 1
+  printf '%s/.local/state/commonclaw/signin-check' "$home"
+}
+
+# ------------------------------------------------------------------ the reading
+harness() {
+  if [ -n "${SIGNIN_HARNESS:-}" ]; then printf '%s' "$SIGNIN_HARNESS"; return 0; fi
+  command -v claude 2>/dev/null && return 0
+  [ -x "${HOME}/.local/bin/claude" ] && { printf '%s' "${HOME}/.local/bin/claude"; return 0; }
+  return 1
+}
+
+# Prints one of the four words. Run as the account.
+reading() {
+  local cmd out logged cfg
+  cmd="$(harness)" || { printf 'unreadable'; return 0; }
+  # From an empty directory: doctor reads settings files in its working
+  # directory, and this program has no project for it to read.
+  cd "$(mktemp -d)" 2>/dev/null || cd / || true
+  timeout "$READ_TIMEOUT" "$cmd" doctor </dev/null >/dev/null 2>&1 || true
+  out="$(timeout "$READ_TIMEOUT" "$cmd" auth status </dev/null 2>/dev/null)" || true
+  rmdir "$PWD" 2>/dev/null; cd / || true
+  logged="$(printf '%s' "$out" | jq -r 'if type == "object" and has("loggedIn") then (.loggedIn | tostring) else "" end' 2>/dev/null)"
+  case "$logged" in
+    true)  printf 'signed-in' ;;
+    false)
+      cfg="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+      if [ -e "${cfg}/.credentials.json" ]; then printf 'signed-out'; else printf 'never'; fi ;;
+    *)     printf 'unreadable' ;;
+  esac
+}
+
+# ------------------------------------------------------------------ --read
+cmd_read() {
+  command -v jq >/dev/null 2>&1 || { printf 'unreadable\n'; return 0; }
+  printf '%s\n' "$(reading)"
+}
+
+# ------------------------------------------------------------------ --once
+cmd_once() {
+  command -v jq >/dev/null 2>&1 || { log err "jq is not installed, so the harness's answer cannot be read"; return 0; }
+  local me dir word last alarm_at
+  me="$(id -un)"
+  dir="$(state_dir_for "$me")" || { log err "no home for ${me}, so no state can be kept"; return 0; }
+  install -d -m 0700 "$dir" 2>/dev/null || { log err "could not create ${dir}"; return 0; }
+
+  word="$(reading)"
+  last="$(cat "${dir}/reading" 2>/dev/null | head -1)"
+
+  if [ "$word" = unreadable ]; then
+    log notice "whether ${me} is signed in could not be read: the harness is absent or did not answer. Unreadable is not signed out"
+    return 0
+  fi
+
+  [ "$word" = "$last" ] || {
+    printf '%s\n' "$word" > "${dir}/reading.tmp" && mv -f "${dir}/reading.tmp" "${dir}/reading"
+    log info "${me} reads ${word} (was ${last:-unrecorded})"
+  }
+
+  case "$word" in
+    signed-in|never)
+      rm -f "${dir}/alarm" 2>/dev/null
+      return 0 ;;
+  esac
+
+  # signed-out. Due on the change, or when the last alarm is REMIND_HOURS old.
+  alarm_at="$(sed -n 's/^\([0-9]\{1,\}\) signed-out$/\1/p' "${dir}/alarm" 2>/dev/null | head -1)"
+  if [ "$last" = signed-out ] && [ -n "$alarm_at" ] && [ $(( NOW - alarm_at )) -lt $(( REMIND_HOURS * 3600 )) ]; then
+    return 0
+  fi
+  printf '%s signed-out\n' "$NOW" > "${dir}/alarm.tmp" && mv -f "${dir}/alarm.tmp" "${dir}/alarm"
+  log warning "${me} is signed out of the harness; the alarm is due"
+}
+
+# ------------------------------------------------------------------ --deliver
+cmd_deliver() {
+  local acct="$1" uid dir f stamp delivered claw line subject nrc mrc sent=0 to=""
+  [ "$(id -u)" = 0 ] || [ -n "${SIGNIN_DELIVERED_DIR:-}" ] || { log err "--deliver runs as root, because the alarm channel resolves only there"; return 0; }
+  uid="$(getent passwd "$acct" 2>/dev/null | cut -d: -f3)"
+  [ -n "$uid" ] || { log err "no account named $(clean "$acct")"; return 0; }
+  dir="$(state_dir_for "$acct")" || return 0
+  f="${dir}/alarm"
+
+  # The account wrote this file, so it is read for a stamp and nothing else: a
+  # regular file, not a link, owned by that account, one line of one shape.
+  [ -e "$f" ] || return 0
+  if [ -L "$f" ] || [ ! -f "$f" ] || [ "$(stat -c '%u' "$f" 2>/dev/null)" != "$uid" ]; then
+    log err "the alarm file for $(clean "$acct") is not a regular file that account owns, so nothing was sent"
+    return 0
+  fi
+  stamp="$(head -c 64 "$f" 2>/dev/null | sed -n '1s/^\([0-9]\{1,12\}\) signed-out$/\1/p')"
+  [ -n "$stamp" ] || { log err "the alarm file for $(clean "$acct") is not in its shape, so nothing was sent"; return 0; }
+
+  delivered="$(cat "${DELIVERED_DIR}/$(clean "$acct")" 2>/dev/null | head -1)"
+  [ "$stamp" != "$delivered" ] || return 0
+
+  if [ -r "$PROVISION_CONF" ]; then
+    claw="$(sed -n 's/^COMMONCLAW_CLAW="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$PROVISION_CONF" 2>/dev/null | tail -1)"
+    [ -n "$claw" ] || claw="$(sed -n 's/^BOX_HOSTNAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$PROVISION_CONF" 2>/dev/null | tail -1)"
+  fi
+  claw="$(clean "${claw:-$(hostname 2>/dev/null || printf 'this-claw')}")"
+  acct="$(clean "$acct")"
+  line="${acct} on ${claw} is signed out of the harness; sessions and resumes fail until somebody runs /login as that account."
+  subject="${acct} on ${claw} is signed out of the harness"
+
+  if [ -x "$NOTIFIER" ]; then
+    nrc=0
+    "$NOTIFIER" --class harness-signin --summary "$line" >/dev/null 2>&1 || nrc=$?
+    if [ "$nrc" -eq 0 ]; then sent=1; else log notice "the notifier exited ${nrc}, so the channel did not take the line"; fi
+  else
+    log notice "no notifier at ${NOTIFIER}, so the line did not reach the channel"
+  fi
+
+  # The address the mail alarm uses, read with the mail alarm's rule and never
+  # sourced. One address or none.
+  if [ -r "$MAIL_CONF" ]; then
+    to="$(sed -n 's/^[[:space:]]*MAIL_ALERT_TO[[:space:]]*=[[:space:]]*["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}[[:space:]]*$/\1/p' "$MAIL_CONF" | tail -1)"
+    case "$to" in
+      *[[:space:]]*|*,*|*\;*|@*|*@|*@*@*) log err "MAIL_ALERT_TO in ${MAIL_CONF} is not one address, so no mail went"; to="" ;;
+      *@*) : ;;
+      *) to="" ;;
+    esac
+  fi
+  if [ -n "$to" ] && [ -x "$EMAIL_CLI" ]; then
+    mrc=0
+    EMAIL_GATEKEEPER_CONF="$MAIL_CONF" timeout "$SEND_TIMEOUT" "$EMAIL_CLI" send \
+      --to "$to" --subject "$subject" --body "$line" --handle signin-check >/dev/null 2>&1 || mrc=$?
+    if [ "$mrc" -eq 0 ]; then sent=1; else log err "the sign-out line could not be mailed (email send exited ${mrc})"; fi
+  elif [ -z "$to" ]; then
+    log notice "MAIL_ALERT_TO is empty in ${MAIL_CONF}, so the line went to the channel only"
+  fi
+
+  if [ "$sent" -eq 1 ]; then
+    install -d -m 0755 "$DELIVERED_DIR" 2>/dev/null
+    printf '%s\n' "$stamp" > "${DELIVERED_DIR}/${acct}" \
+      || log warning "the line went out, but ${DELIVERED_DIR}/${acct} did not write, so it will repeat"
+    log warning "$line"
+  else
+    log err "the sign-out line reached nobody and is tried again at the next beat: ${line}"
+  fi
+}
+
+case "${1:-}" in
+  --read)    [ $# -eq 1 ] || usage; cmd_read ;;
+  --once)    [ $# -eq 1 ] || usage; cmd_once ;;
+  --deliver) [ $# -eq 2 ] || usage; cmd_deliver "$2" ;;
+  *)         usage ;;
+esac
+exit 0

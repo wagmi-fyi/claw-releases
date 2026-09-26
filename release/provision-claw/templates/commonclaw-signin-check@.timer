@@ -1,0 +1,17 @@
+# Installed VERBATIM, never rendered. See commonclaw-signin-check@.service.
+#
+# Hourly, off the hour. A sign-out is not repaired faster than a person can
+# reach /login, so an hour is the wait before anybody hears. Twenty-three past
+# keeps it clear of the jobs that start on the hour.
+[Unit]
+Description=Sign-in check for %i, every hour
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* *:23:00
+RandomizedDelaySec=5min
+Persistent=true
+Unit=commonclaw-signin-check@%i.service
+
+[Install]
+WantedBy=timers.target

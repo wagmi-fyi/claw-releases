@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""session-continuity -- bring an orchestrator's session back when mail waits for it.
+"""session-continuity -- keep an orchestrator's session running, written down and re-grounded.
 
 THE DEFECT THIS CLOSES. An orchestrator is a registration on the bus and a
 workpaper on disk. Its process is not part of it. A background session ends, the
@@ -9,12 +9,32 @@ rail beside this program tells a live session it has mail and refuses a gone one
 by its own law. This program is the other half: it starts the recorded session
 again, under its owner, from its own transcript, and ends it when it goes quiet.
 
-WHAT IT DELIVERS. One fixed sentence, BOOT_SENTENCE below, carrying no
-interpolation at all. It says the rail resumed you and that your inbox is what to
-read. Everything the session then does comes from the bus and from its own
-workpaper. `--law` re-derives the field set from the string at runtime and the
-program refuses to run when it carries a field, so the claim is a command anybody
-can run rather than a grep of the author's honesty.
+A SESSION THAT IS HERE LOSES STATE TOO, WHICH IS THE SECOND DEFECT. What a
+session holds and never wrote down goes when the harness compacts it. Measured
+2026-09-26 over twelve scratch sessions: a compaction loses no rule text at all,
+and our own four clean checkpoints each added about ten posture clauses the
+workpaper did not hold. So the loss is the write that never happened, not the
+summary. This program forces that write from outside on a cadence and at a token
+threshold, and after a compaction it sends the turn that re-invokes the skill the
+run is governed by.
+
+WHAT IT DELIVERS. Two fixed sentences, RESUME_TURN and FORCED_WRITE_TURN below,
+each carrying no interpolation at all. One re-invokes the orchestrate skill's
+resume operation. The other orders the postures write. Everything the session
+then does comes from the bus, from the skill and from its own workpaper. `--law`
+re-derives the field set from each string at runtime and the program refuses to
+run when either carries a field, so the claim is a command anybody can run rather
+than a grep of the author's honesty.
+
+WHY A TURN AND NOT A HOOK LINE. Measured 2026-09-26: a hook's printed sentence
+reaches the model's context and the turn's own prompt wins over it. A delivered
+slash command expands into the skill when a stopped session is resumed with the
+turn as its prompt. The same text written into a live session's socket arrives
+as words, and the model then decides whether to invoke anything. One trial of
+four answered such an order from memory with no invocation at all, which is the
+failure this rail exists to stop. So a live session takes the turn with a hook on
+its own side: claw-resume-hook matches RESUME_TURN exactly and puts the
+orchestrate front page in front of the model before its first token. Q184.
 
 A RESUME IS NOT A FORK, AND ONE RESUME FORM MAKES IT ONE. `--resume` continues
 one session id and one transcript. A session the harness has already run in the
@@ -63,15 +83,71 @@ not alive thirty seconds later, writes a hold carrying the exit code and the las
 line of stderr, and sends one line to the `human` handle. No handle of this
 account is resumed again until `--clear-hold` clears it. A harness signed out
 refuses every resume, and a rail that kept trying would start a login attempt
-every two minutes and say nothing anybody reads. The hold is a file, so the
-sign-out alarm can read the same answer later.
+every two minutes and say nothing anybody reads.
+
+A HOLD SAYS WHETHER IT IS A SIGN-OUT. When a resume fails, the pass asks
+`commonclaw-signin-check --read` beside this program, which is the harness's
+own answer and the reading the hourly sign-in alarm takes. The hold records the
+word it got, and `kind` reads `sign-out` when the word is `signed-out`. A
+reading of a credentials file would not do: a file can be present for a login
+the server refused long ago.
 
 Nudging and stopping go on under a hold. Neither is the act that was failing.
+
+THE FORCED WRITE, ON A CADENCE AND AT A TOKEN THRESHOLD. A live orchestrator gets
+FORCED_WRITE_TURN through the wake rail's adapter when either arm reads due.
+
+  the cadence arm  two hours of the handle's own activity since the last forced
+                   write. Activity is the transcript growing, not the clock: a
+                   session nobody is using accrues none, and a rail that was off
+                   for a day credits none of it. Each pass adds the gap since the
+                   last reading, and no more than ACTIVITY_CREDIT_CAP_SECS of it,
+                   which is why an off rail cannot bank hours.
+  the token arm    the transcript's last turn reads past half the automatic
+                   compaction window: the one a person set, or else the
+                   harness's default for the session's model, and off for a
+                   model with no known default. It fires once per crossing: the arm re-arms
+                   only after a reading below the threshold, which is what a
+                   compaction produces. Without that, every pass past the
+                   threshold would fire.
+
+THE STAMP IS THE WORKPAPER'S MODIFICATION TIME, AND IT IS A WEAK READING. The
+write is a model act and this program cannot do it, so the only thing it can read
+is whether the file moved. A workpaper that has not moved thirty minutes after
+the turn went out is one line to the `human` handle, once per nudge. A workpaper
+that moved for some other reason, a journal line say, reads as a write that
+happened. That is the honest limit of reading a file's clock, and the arm still
+catches the case it was built for: nothing at all happened.
+
+FINDING THE WORKPAPER. The handle's record carries the directory the session
+started in, and nothing on the bus carries the workpaper's path. So the rail
+resolves it in three steps: a path recorded in the handle's own state file; then
+`workpaper.md` in the recorded directory; then the one `workpaper.md` at most
+three levels under it, skipping dot-directories and `zz-archive`. Zero or several
+means unresolved, and unresolved sends the turn anyway, because the session knows
+its own workpaper and the write is what matters. The stamp check is then skipped
+and one line names the handle and the candidates.
+
+AFTER A COMPACTION, TWO ROADS. A hook beside this program records one line per
+compaction under this account's state directory. A pass that finds a record for
+an orchestrator handle picks the road by whether the session is here:
+
+  live  RESUME_TURN goes into the session through the wake rail's adapter, and
+        the resume hook on the receiving side loads the skill. Nothing is
+        stopped, so a desktop session with no job id is reached like any other.
+  gone  the session is resumed with RESUME_TURN as its prompt, bare or flagged by
+        the same rule as the mail road. A resume aimed at a live session forks,
+        which is why this road is only for a session that is gone.
+
+The record is consumed by the act. Thirty minutes later the stamp check reads the
+workpaper, because the resume operation records itself there, and a workpaper
+that did not move is one line to the `human` handle.
 
 AN ACTING PASS PRUNES ITS OWN STATE DIRECTORY. A handle's file that nothing has
 written to in thirty days is removed, unless it carries a hold or names a session
 this rail resumed and has not stopped. Both of those say something is outstanding,
-and outstanding does not expire.
+and outstanding does not expire. A compaction record older than
+RECORD_TTL_HOURS goes the same way.
 
   session-continuity --check           print what a pass would do; do nothing
   session-continuity --once            one pass; this is what the timer runs
@@ -81,18 +157,30 @@ and outstanding does not expire.
                                        the action it would have taken. It is
                                        what brings one orchestrator back without
                                        waking every one an account holds
-  session-continuity --law             print the boot sentence and prove it
-                                       carries no interpolation
+  session-continuity --law             print both fixed sentences and prove
+                                       neither carries interpolation
   session-continuity --clear-hold <h>  clear that handle's hold
 
   --idle-stop-minutes <n>              how long a session this rail resumed may
                                        sit quiet before a pass ends it. It is
                                        there to drive a proof; the units pass
                                        none and take the default
+  --activity-hours <n>                 the cadence arm's threshold, in hours of
+                                       activity. Same reason: the units pass none
+  --set-workpaper <handle> <path>      record which workpaper a handle's stamp is
+                                       read from, where the search cannot say
+  --allow-source-tree                  let a copy that is not the installed one
+                                       act. Without it, such a copy's --once
+                                       prints what it would do and acts on
+                                       nothing, because it would reach the
+                                       claw's real bus through the installed
+                                       wake rail
 
-EXIT CODES. 0 the pass ran. 1 the sentence law is broken. 2 usage. 3 a wall: the
+EXIT CODES. 0 the pass ran. 1 a sentence law is broken. 2 usage. 3 a wall: the
 bus is not the declared one, session-guard is missing, the wake rail this program
-hands a twin to is missing, or the harness command line is absent.
+hands a twin to is missing, or the harness command line is absent. 5 this copy
+is not the installed one and --allow-source-tree was not passed, so the pass
+acted on nothing.
 """
 
 import datetime
@@ -108,19 +196,37 @@ import subprocess
 import sys
 import time
 
-# ------------------------------------------------------------- THE SENTENCE
+# ------------------------------------------------------------ THE SENTENCES
 #
 # NO format field, and no other way to build delivered text. The wake rail
 # beside this program allows itself one field, the bus directory, because its
-# sentence names the bus to read. This one names nothing: the session it reaches
-# finds its own bus the way it found it before.
-BOOT_SENTENCE = (
-    "The continuity rail resumed you because mail waits for you. "
-    "Run the orchestrate skill's resume operation, then read your inbox."
+# sentence names the bus to read. Neither of these names anything: the session
+# each reaches finds its own bus the way it found it before.
+#
+# RESUME_TURN IS A SLASH COMMAND ON PURPOSE. Measured 2026-09-26: a turn a
+# stopped session is resumed with expands into the skill, with the body in front
+# of the model before its first token. A sentence in prose, on that same road, was
+# answered with "What would you like me to do?". So the words are the invocation
+# and nothing else. The claw's resume hook matches these exact bytes on a live
+# session, and the controls prove the two are the same.
+RESUME_TURN = "/orchestrate full resume operation please"
+
+# FORCED_WRITE_TURN NAMES BOTH HALVES OF THE WRITE. The postures are what a
+# compaction drops; the skills in use are what a resume has to re-invoke. A turn
+# that asked only for postures would leave the resume guessing which skill it is
+# running under, which is the failure the ruling of 2026-09-26 names.
+FORCED_WRITE_TURN = (
+    "checkpoint now: write your standing postures and your skills in use to the "
+    "workpaper, then continue."
 )
 
+# Every fixed sentence this program can deliver. `--law` proves each one, so a
+# sentence added later without a law reading is a sentence this tuple refuses to
+# leave out.
+SENTENCES = (("RESUME_TURN", RESUME_TURN), ("FORCED_WRITE_TURN", FORCED_WRITE_TURN))
+
 # %-style and str.format are the two ways a Python string interpolates. The law
-# check below proves the sentence carries neither.
+# check below proves neither sentence carries either.
 PERCENT_FIELD = re.compile(r"%[^%]")
 
 # What a model id looks like, which is anything the harness accepts after
@@ -136,6 +242,8 @@ LISTING_REF = re.compile(r"\s*\[[0-9a-f]{4,}\]$")
 
 CONF = os.environ.get("ORCHESTRATE_CONF", "/etc/orchestrate.conf")
 BIN_DIR = "/opt/commonclaw/bin"
+# The one path this program acts from. See installed_copy().
+INSTALLED = os.path.join(BIN_DIR, "session-continuity")
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROLE = "orchestrator"
 # How long the resumed process gets to appear in the harness's session records.
@@ -148,14 +256,68 @@ SPAWN_TIMEOUT_SECS = 120
 # How long a session this rail resumed may sit quiet before the rail ends it.
 # `--idle-stop-minutes` moves it for a proof; the units pass none.
 IDLE_STOP_MINUTES = 15
+# The cadence arm: hours of the handle's own activity between forced writes.
+# `--activity-hours` moves it for a proof; the units pass none.
+ACTIVITY_HOURS = 2
+# The most activity one pass may credit. The timer ticks every two minutes, so a
+# gap wider than this is the rail having been off, not the session having worked.
+ACTIVITY_CREDIT_CAP_SECS = 600
+# How long the workpaper has to move after a forced write before the miss is one
+# line in the human's queue.
+STAMP_GRACE_MINUTES = 30
+# How deep under the handle's recorded directory the workpaper search looks.
+WORKPAPER_SEARCH_DEPTH = 3
+# Directory names the workpaper search never enters. A retired repository holds
+# workpapers that are records, and a dot-directory holds worktrees whose copies
+# would each answer the search.
+WORKPAPER_SKIP = ("zz-archive", "node_modules")
+# A compaction record older than this is dropped. It is long enough that a rail
+# stopped overnight still acts on the morning's compaction, and short enough that
+# a record nothing can act on stops being asked about.
+RECORD_TTL_HOURS = 24
+# The file the compaction hook appends to, under this account's state directory.
+COMPACTION_RECORDS = "compactions.jsonl"
+# Where the machine's policy tier sits. The rail reads the automatic compaction
+# window from it where a firm set one there; provisioning writes none.
+MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json"
+# The name the harness reads the window from, and the settings key beside it.
+WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+WINDOW_KEY = "autoCompactWindow"
+# THE HARNESS'S OWN DEFAULT, PER MODEL, WHEN NOTHING DECLARES A WINDOW. The
+# documented context window of each model family, matched on the start of the
+# model id the transcript records. Ruled 2026-09-26: 200K for Haiku 4.5 and the
+# older models, 1M for Fable and Sonnet 5. A model this table does not name gets
+# no token arm at all, because a guessed window fires the arm at the wrong place
+# and a missing one only leaves the cadence arm to do the work.
+MODEL_WINDOWS = (
+    ("claude-fable-5", 1000000),
+    ("claude-sonnet-5", 1000000),
+    ("claude-haiku-4-5", 200000),
+    ("claude-opus-4", 200000),
+    ("claude-sonnet-4", 200000),
+    ("claude-haiku-4", 200000),
+    ("claude-3", 200000),
+)
 
 
-def law_fields():
-    return {f for _, f, _, _ in string.Formatter().parse(BOOT_SENTENCE) if f is not None}
+def law_fields(text):
+    return {f for _, f, _, _ in string.Formatter().parse(text) if f is not None}
+
+
+def sentence_law():
+    """Every fixed sentence, with the fields it carries. Empty sets mean lawful."""
+    out = []
+    for name, text in SENTENCES:
+        fields = sorted(law_fields(text))
+        percent = PERCENT_FIELD.search(text)
+        out.append({"name": name, "sentence": text, "format_fields": fields,
+                    "percent_fields": percent.group(0) if percent else None,
+                    "lawful": not fields and not percent})
+    return out
 
 
 def lawful():
-    return not law_fields() and not PERCENT_FIELD.search(BOOT_SENTENCE)
+    return all(s["lawful"] for s in sentence_law())
 
 
 def log(msg):
@@ -201,6 +363,11 @@ def beside(name):
     if os.path.exists(local):
         return local
     return os.path.join(BIN_DIR, name)
+
+
+def installed_copy():
+    """Whether this process runs the installed program, by its resolved path."""
+    return os.path.realpath(__file__) == os.path.realpath(INSTALLED)
 
 
 def state_dir():
@@ -358,6 +525,238 @@ def transcript_model(session):
     return model, path
 
 
+def transcript_tokens(path):
+    """The window the transcript's last assistant turn was sent with, or None.
+
+    The two cache fields are the window as sent: what was read out of the cache
+    plus what this turn wrote into it. A turn carrying neither says nothing, and
+    the newest turn that carries them answers. No session can read its own
+    fullness, so this file is the only place the number exists.
+    """
+    if not path:
+        return None
+    total = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                msg = rec.get("message") if isinstance(rec, dict) else None
+                if not (isinstance(msg, dict) and msg.get("role") == "assistant"):
+                    continue
+                usage = msg.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                read = usage.get("cache_read_input_tokens")
+                made = usage.get("cache_creation_input_tokens")
+                if not isinstance(read, int) and not isinstance(made, int):
+                    continue
+                total = (read if isinstance(read, int) else 0) + (made if isinstance(made, int) else 0)
+    except OSError:
+        return None
+    return total
+
+
+def parse_window(raw):
+    """A window value as a number of tokens, or None.
+
+    The harness takes `auto` and a token count, and writes counts like `500k` by
+    hand. `auto` means the model's own limit, which is not a number this program
+    can know, so it reads as no threshold rather than as a guess.
+    """
+    text = str(raw or "").strip().lower()
+    if not text or text == "auto":
+        return None
+    mult = 1
+    if text.endswith("k"):
+        mult, text = 1000, text[:-1]
+    elif text.endswith("m"):
+        mult, text = 1000000, text[:-1]
+    try:
+        value = int(float(text) * mult)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def compaction_window():
+    """The automatic compaction window in force here, and where it came from.
+
+    THE ACCOUNT'S OWN SETTINGS FILE IS WHERE THE ANSWER LIVES, because that is
+    the scope the harness reads this key in and the scope a person sets it in.
+    Provisioning writes none, by the ruling of 2026-09-26.
+    Measured 2026-09-26 over three matched background sessions, each filled to
+    about 175,000 tokens over fifteen turns with the window asked for at 100,000:
+    the key in a user settings file compacted twice, the `--autocompact` flag
+    compacted twice, and CLAUDE_CODE_AUTO_COMPACT_WINDOW compacted not at all.
+
+    THE ENVIRONMENT IS READ FIRST ANYWAY, AND NOT BECAUSE IT WORKS. A later
+    harness may honour the documented override, and a claw that set it would then
+    be running a window this program was not reading. Reading it costs nothing and
+    the source string says which answer a pass took, so the two can never disagree
+    silently. The machine's policy tier is read for the same reason.
+
+    A window nothing declares is (None, ...). The forced write then reads each
+    session against its model's default from MODEL_WINDOWS, and a model that
+    table does not name gets no token arm. `--check` says which answer it took.
+    """
+    env = parse_window(os.environ.get(WINDOW_ENV))
+    if env:
+        return env, "the environment's %s" % WINDOW_ENV
+    for path in (os.path.expanduser("~/.claude/settings.json"), MANAGED_SETTINGS):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        value = parse_window(data.get(WINDOW_KEY))
+        if value:
+            return value, "%s, %s" % (path, WINDOW_KEY)
+        env_block = data.get("env")
+        if isinstance(env_block, dict):
+            value = parse_window(env_block.get(WINDOW_ENV))
+            if value:
+                return value, ("%s, env.%s, which this harness does not honour"
+                               % (path, WINDOW_ENV))
+    return None, "nothing declares one, so each session is read against its model's default"
+
+
+def model_window(model):
+    """The harness's default window for a model id, and why, from MODEL_WINDOWS."""
+    for prefix, tokens in MODEL_WINDOWS:
+        if model and model.startswith(prefix):
+            return tokens, "the default for %s" % prefix
+    return None, ("no default known for %s, so the token arm is off for it"
+                  % (model or "a session whose transcript names no model"))
+
+
+# ------------------------------------------------------------- the workpaper
+def find_workpaper(cwd, recorded=""):
+    """The workpaper whose clock answers for a handle, and how it was found.
+
+    Nothing on the bus carries this path. The handle records the directory its
+    session started in, and the orchestrate skill files a project's workpaper
+    inside the project, which is usually below that directory rather than in it.
+    Read on this machine 2026-09-26: one orchestrator's recorded directory had
+    thirteen workpapers under it, so a search that took the first would answer
+    for the wrong project.
+
+    So: a recorded path wins, then the recorded directory itself, then a search
+    that answers only when it finds exactly one. Anything else is unresolved, and
+    unresolved is said rather than guessed.
+    """
+    if recorded:
+        if os.path.isfile(recorded):
+            return recorded, "recorded in this handle's state file"
+        return "", "the recorded path %s is not a file" % recorded
+    if not (cwd and os.path.isdir(cwd)):
+        return "", "the handle records no directory this account can read"
+    direct = os.path.join(cwd, "workpaper.md")
+    if os.path.isfile(direct):
+        return direct, "workpaper.md in the handle's recorded directory"
+    found = []
+    base_depth = cwd.rstrip(os.sep).count(os.sep)
+    for root, dirs, files in os.walk(cwd):
+        depth = root.rstrip(os.sep).count(os.sep) - base_depth
+        if depth >= WORKPAPER_SEARCH_DEPTH:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in WORKPAPER_SKIP]
+        if "workpaper.md" in files:
+            found.append(os.path.join(root, "workpaper.md"))
+        if len(found) > 1:
+            break
+    if len(found) == 1:
+        return found[0], "the one workpaper.md under %s" % cwd
+    if not found:
+        return "", "no workpaper.md under %s within %d levels" % (cwd, WORKPAPER_SEARCH_DEPTH)
+    return "", ("more than one workpaper.md under %s, so --set-workpaper has to say "
+                "which: %s" % (cwd, ", ".join(sorted(found))))
+
+
+def file_stamp(path):
+    """A file's modification time, or None when there is no file to read."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# ------------------------------------------------------- the compaction records
+def records_path():
+    return os.path.join(state_dir(), COMPACTION_RECORDS)
+
+
+def read_records():
+    """Every compaction the hook recorded, newest last, with the bytes it read.
+
+    The byte count is returned because the hook appends while this program
+    rewrites. A rewrite that did not account for what arrived in between would
+    drop a compaction, which is the one event this file exists to not lose.
+    """
+    path = records_path()
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return [], 0
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("session"):
+            out.append(rec)
+    return out, len(raw)
+
+
+def rewrite_records(keep, read_bytes):
+    """Put back the records still outstanding, and whatever arrived while we read.
+
+    The tail beyond `read_bytes` is appended by the hook after this pass read the
+    file, so it is a compaction nobody has considered yet and it survives whole.
+    """
+    path = records_path()
+    tail = b""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(read_bytes)
+            tail = fh.read()
+    except OSError:
+        tail = b""
+    body = b"".join(
+        (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8") for rec in keep)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(body + tail)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log("could not rewrite %s: %s" % (path, exc))
+
+
+def record_age_hours(rec):
+    try:
+        at = datetime.datetime.fromisoformat(str(rec.get("at") or ""))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=datetime.timezone.utc)
+    return (datetime.datetime.now(datetime.timezone.utc) - at).total_seconds() / 3600.0
+
+
 # ---------------------------------------------------------------------- state
 def state_path(handle):
     return os.path.join(state_dir(), "%s.json" % re.sub(r"[^A-Za-z0-9_.-]", "_", handle))
@@ -464,7 +863,25 @@ def prune_state(older_than=30 * 86400):
 
 
 # ------------------------------------------------------------------- the acts
-def tell_human(bus_dir, handle, reason):
+def signin_reading():
+    """The sign-in check's one word for this account, or "unreadable".
+
+    The check is a sibling program and owns the reading, so the hold and the
+    hourly alarm cannot disagree about what the harness said.
+    """
+    check = beside("commonclaw-signin-check")
+    if not os.access(check, os.X_OK):
+        return "unreadable"
+    try:
+        proc = subprocess.run([check, "--read"], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=150)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unreadable"
+    word = proc.stdout.decode("utf-8", "replace").strip()
+    return word if word in ("signed-in", "signed-out", "never") else "unreadable"
+
+
+def tell_human(bus_dir, handle, reason, subject="", body=""):
     """One line to the `human` handle, and nothing else anywhere on the bus.
 
     The wake rail writes to no bus at all, because a rail that filed its own
@@ -476,18 +893,24 @@ def tell_human(bus_dir, handle, reason):
     The body carries the handle and the reason. It never carries the harness's
     own output, which is where a token or a path a person did not choose to share
     would appear.
+
+    THE HOLD IS THE DEFAULT SUBJECT BECAUSE IT WAS THE FIRST CALLER. Two later
+    ones pass their own: a forced write whose workpaper never moved, and a
+    compaction the rail cannot act on. Each is a different ask with a different
+    repair, and one subject for all three would put them in one thread.
     """
     bus = beside("bus")
     if not os.access(bus, os.X_OK):
-        log("no bus command at %s, so the hold on %s reached nobody" % (bus, handle))
+        log("no bus command at %s, so the line about %s reached nobody" % (bus, handle))
         return False
     env = dict(os.environ, SESSION_BUS_DIR=bus_dir)
-    body = "%s could not be resumed: %s. No handle of this account is resumed until the hold is cleared." % (
-        handle, reason)
+    subject = subject or "continuity rail: %s is held" % handle
+    body = body or (
+        "%s could not be resumed: %s. No handle of this account is resumed until "
+        "the hold is cleared." % (handle, reason))
     try:
         proc = subprocess.run(
-            [bus, "send", "session-continuity", "human",
-             "continuity rail: %s is held" % handle, body],
+            [bus, "send", "session-continuity", "human", subject, body],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log("could not tell human about %s: %s: %s" % (handle, type(exc).__name__, exc))
@@ -498,12 +921,13 @@ def tell_human(bus_dir, handle, reason):
     return True
 
 
-def nudge(rail, adapter_dir, bus_dir, handle, rec, pid):
-    """Hand one handle to the wake rail's adapter, with the rail's own sentence.
+def nudge(rail, adapter_dir, bus_dir, handle, rec, pid, text=None):
+    """Hand one handle to the wake rail's adapter, with one fixed sentence.
 
-    The sentence is taken from the rail rather than written here. Two copies of
+    THE DEFAULT TEXT IS THE WAKE RAIL'S OWN, TAKEN FROM THE RAIL. Two copies of
     one law drift, and the rail's `--law` would then prove nothing about what a
-    session actually received.
+    session actually received. The forced write passes one of this program's own
+    sentences instead, and `--law` here proves that one.
 
     The session id is left out of the payload on purpose. A twin found by name is
     the case where the app moved the conversation to a new id, so the adapter's
@@ -517,7 +941,7 @@ def nudge(rail, adapter_dir, bus_dir, handle, rec, pid):
         "handle": handle, "bus_dir": bus_dir, "session": "", "pid": pid,
         "owner": rec.get("owner") or "", "address": rec.get("address") or "",
         "pane": rec.get("pane") or "", "cwd": rec.get("cwd") or "",
-        "unread": 0, "text": rail.nudge_text(bus_dir),
+        "unread": 0, "text": text if text is not None else rail.nudge_text(bus_dir),
     }
     try:
         proc = subprocess.run(
@@ -550,7 +974,7 @@ def resume(guard, cmd, handle, rec, model, bare):
     argv = [cmd, "--bg", "--resume", session]
     if not bare:
         argv += ["--name", handle, "--model", model, "--dangerously-skip-permissions"]
-    argv.append(BOOT_SENTENCE)
+    argv.append(RESUME_TURN)
     try:
         proc = subprocess.run(
             argv, cwd=rec["cwd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -568,6 +992,33 @@ def resume(guard, cmd, handle, rec, model, bare):
 
 
 # ------------------------------------------------------------------ the stop
+def stop_session(cmd, row, session):
+    """End one listed session. Returns (ok, the job id used, why not).
+
+    THE JOB ID, NOT THE SESSION ID. The listing carries both, and only the short
+    `id` addresses a job: `claude stop <session id>` answers "No job matching".
+    Measured 2026-09-25 against a session whose two fields differ only in length,
+    so a reader cannot tell them apart by eye.
+
+    A ROW WITH NO JOB ID CANNOT BE STOPPED AT ALL. `claude stop` stops a
+    background session, and an interactive one carries no `id`. That is said here
+    rather than guessed at by passing the session id, which the harness answers
+    with a refusal that reads like a session already gone.
+    """
+    job = row.get("id")
+    if not job:
+        return False, "", ("this session carries no job id in the harness listing, so "
+                           "the harness has nothing to stop it by")
+    try:
+        proc = subprocess.run([cmd, "stop", job], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=60)
+        ok = proc.returncode == 0
+        why = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ok, why = False, ["%s: %s" % (type(exc).__name__, exc)]
+    return ok, job, (why[-1] if why else "the harness gave no reason")
+
+
 def stop_pass(cmd, listing, idle_stop_minutes, act):
     """End the sessions this rail resumed that have gone quiet.
 
@@ -639,22 +1090,11 @@ def stop_pass(cmd, listing, idle_stop_minutes, act):
             item["outcome"], item["detail"] = "would stop", "quiet %.1f minutes" % quiet
             out.append(item)
             continue
-        # THE JOB ID, NOT THE SESSION ID. The listing carries both, and only the
-        # short `id` addresses a job: `claude stop <session id>` answers "No job
-        # matching". Measured 2026-09-25 against a session whose two fields
-        # differ only in length, so a reader cannot tell them apart by eye.
-        job = row.get("id") or session
-        try:
-            proc = subprocess.run([cmd, "stop", job], stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=60)
-            ok = proc.returncode == 0
-            why = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            ok, why = False, ["%s: %s" % (type(exc).__name__, exc)]
+        ok, job, why = stop_session(cmd, row, session)
         item["job"] = job
         item["outcome"] = "stopped" if ok else "failed"
         item["detail"] = ("quiet %.1f minutes, the conversation is kept" % quiet if ok
-                          else (why[-1] if why else "the harness gave no reason"))
+                          else why)
         if ok:
             write_state(handle, {"resumed_session": None, "stopped_at": now_iso(),
                                  "stop_detail": item["detail"]})
@@ -694,6 +1134,22 @@ def survey(guard, listing, bus_dir, me, only=()):
                "newest_id": newest, "address": rec.get("address") or "",
                "cwd": rec.get("cwd") or ""}
         rows.append(row)
+        # THE TWIN READING IS TAKEN FOR EVERY HANDLE, MAIL OR NONE. It answers
+        # whether the session is here, and two later passes need that answer
+        # about a handle with an empty inbox: a live orchestrator is the one the
+        # forced write is delivered to, and the one a compaction record names.
+        # It used to be read inside the mail branch, where those passes could
+        # not see it.
+        carriers = guard.generations(row["session"], live) if row["session"] else []
+        wanted = {handle, row["address"], LISTING_REF.sub("", row["address"])} - {""}
+        named = [r for r in live
+                 if r["name"] in wanted and r["session"] != row["session"]]
+        if carriers:
+            row["live_pid"] = carriers[-1]["pid"]
+            row["live_session"] = row["session"]
+        elif named:
+            row["live_pid"] = named[-1]["pid"]
+            row["live_session"] = named[-1]["session"]
         if unread <= 0:
             row["action"], row["reason"] = "idle", "no mail, nothing to do"
             continue
@@ -706,10 +1162,6 @@ def survey(guard, listing, bus_dir, me, only=()):
             row["reason"] = ("the recorded directory %s is not one this account can enter"
                              % (row["cwd"] or "<none>"))
             continue
-        carriers = guard.generations(row["session"], live)
-        wanted = {handle, row["address"], LISTING_REF.sub("", row["address"])} - {""}
-        named = [r for r in live
-                 if r["name"] in wanted and r["session"] != row["session"]]
         if carriers:
             top = carriers[-1]
             row["action"] = "nudge"
@@ -750,23 +1202,457 @@ def survey(guard, listing, bus_dir, me, only=()):
     return rows, ""
 
 
+# --------------------------------------------------------- the forced write
+def credit_activity(handle, data, size, act):
+    """Add this pass's share of activity, and say how much is banked.
+
+    ACTIVITY IS THE TRANSCRIPT GROWING, NOT THE CLOCK. A session nobody is using
+    accrues none, which is the whole point: an orchestrator that sat quiet for a
+    week does not owe a write the moment somebody says hello to it. The gap since
+    the last reading is credited only when the file grew, and only up to
+    ACTIVITY_CREDIT_CAP_SECS of it, so a rail that was off for a day cannot bank
+    the day as work.
+
+    The reading is written back on an acting pass only. `--check` returns the same
+    numbers and moves nothing, which is what makes it safe to run by hand.
+    """
+    prior = data.get("activity") if isinstance(data.get("activity"), dict) else {}
+    banked = float(prior.get("seconds") or 0.0)
+    last_size = prior.get("size")
+    last_at = float(prior.get("at") or 0.0)
+    now = time.time()
+    grew = isinstance(last_size, int) and size > last_size
+    if grew and last_at:
+        banked += min(now - last_at, float(ACTIVITY_CREDIT_CAP_SECS))
+    if act:
+        write_state(handle, {"activity": {"size": size, "at": now, "seconds": banked}})
+    return banked, grew
+
+
+def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, only, act,
+                      compacting=()):
+    """Order the postures write where a live orchestrator is due one, then read the stamp.
+
+    TWO ARMS, AND EITHER ONE IS ENOUGH. The cadence arm counts the handle's own
+    activity. The token arm reads the transcript's last turn against half the
+    automatic compaction window, and fires once per crossing: a pass that reads
+    below the threshold re-arms it, which is what a compaction does. Without that
+    re-arm every pass past the threshold would deliver the same turn.
+
+    THE STAMP IS READ ON A LATER PASS, NOT IN THIS ONE. The turn has to reach the
+    session, the session has to take a turn, and the write has to land. So the
+    workpaper's clock is recorded when the turn goes out and compared
+    STAMP_GRACE_MINUTES later.
+    """
+    out = []
+    for row in rows:
+        handle = row["handle"]
+        pid = row.get("live_pid")
+        session = row.get("live_session") or row["session"]
+        item = {"handle": handle}
+        out.append(item)
+        if handle in compacting:
+            # A HANDLE WITH A COMPACTION OUTSTANDING IS NOT NUDGED. The resume
+            # the other pass owes it re-invokes the skill and runs its resume
+            # operation, which writes more than this turn asks for. A nudge here
+            # would also be delivered to a pid that pass is about to stop.
+            item["outcome"] = "skipped"
+            item["detail"] = "a compaction of this handle is outstanding, and the resume covers it"
+            continue
+        if not pid or not session:
+            item["outcome"], item["detail"] = "idle", "no live session to write anything"
+            continue
+        path = transcript_path(session)
+        if not path:
+            item["outcome"] = "waiting"
+            item["detail"] = "no transcript for session %s, so nothing says how busy it is" % session[:8]
+            continue
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            item["outcome"], item["detail"] = "waiting", "the transcript could not be read"
+            continue
+        data = read_state(handle)
+        banked, grew = credit_activity(handle, data, size, act)
+        item["activity_minutes"] = round(banked / 60.0, 1)
+        item["grew"] = grew
+
+        tokens = transcript_tokens(path)
+        item["tokens"] = tokens
+        # A window somebody declared wins. Otherwise each session is read
+        # against its own model's default, because one account runs several.
+        row_window, item["window_source"] = window, "declared"
+        if not row_window:
+            row_window, item["window_source"] = model_window(transcript_model(session)[0])
+        item["window"] = row_window
+        threshold = int(row_window / 2) if row_window else None
+        item["token_threshold"] = threshold
+        armed = data.get("token_arm_armed")
+        armed = True if armed is None else bool(armed)
+        if threshold and isinstance(tokens, int) and tokens < threshold and not armed:
+            armed = True
+            if act:
+                write_state(handle, {"token_arm_armed": True})
+
+        due = ""
+        if banked >= activity_hours * 3600:
+            due = "%.1f hours of activity since the last forced write" % (banked / 3600.0)
+        elif threshold and isinstance(tokens, int) and tokens >= threshold and armed:
+            due = ("the last turn read %d tokens, past half the %d-token window"
+                   % (tokens, row_window))
+        if not due:
+            item["outcome"] = "idle"
+            item["detail"] = ("nothing due: %.1f of %d activity hours, %s"
+                              % (banked / 3600.0, activity_hours,
+                                 "no token threshold" if not threshold
+                                 else "%s tokens against %d" % (tokens, threshold)))
+            continue
+        item["due"] = due
+        if only and handle not in only:
+            item["outcome"] = "skipped"
+            item["detail"] = "this pass was scoped to %s" % ", ".join(sorted(only))
+            continue
+        if not act:
+            item["outcome"], item["detail"] = "would write", due
+            continue
+        book, how = find_workpaper(row.get("cwd") or "", data.get("workpaper") or "")
+        got = nudge(rail, adapter_dir, bus_dir, handle,
+                    {"owner": "", "address": row.get("address") or "", "cwd": row.get("cwd") or ""},
+                    pid, text=FORCED_WRITE_TURN)
+        item["outcome"] = got.get("outcome", "failed")
+        item["detail"] = got.get("reason") or got.get("detail") or ""
+        item["workpaper"] = book
+        item["workpaper_how"] = how
+        patch = {"last_forced_write": now_iso(), "last_forced_write_reason": due,
+                 "last_forced_write_outcome": item["outcome"],
+                 "workpaper_resolved": book, "workpaper_how": how}
+        if item["outcome"] == "delivered":
+            # The cadence starts again from zero, and the token arm waits for a
+            # reading below the threshold before it may fire again.
+            patch["activity"] = {"size": size, "at": time.time(), "seconds": 0.0}
+            patch["token_arm_armed"] = False
+            patch["stamp_at_write"] = file_stamp(book) if book else None
+            patch["stamp_told_human"] = False
+        write_state(handle, patch)
+        log("%s: forced write %s -- %s" % (handle, item["outcome"], due))
+    return out
+
+
+# The two turns whose stamp is read afterwards, and the state keys each one
+# leaves: when it went out, whether it was delivered, the workpaper, its clock at
+# the time, and whether the human has been told.
+STAMPED_TURNS = (
+    ("write", "last_forced_write", "last_forced_write_outcome", "workpaper_resolved",
+     "workpaper_how", "stamp_at_write", "stamp_told_human", "stamp_outcome"),
+    ("resume", "post_compact_turn_at", None, "post_compact_workpaper",
+     "post_compact_workpaper_how", "post_compact_stamp_before", "post_compact_stamp_told",
+     "post_compact_stamp_outcome"),
+)
+
+
+def stamp_pass(bus_dir, rows, act):
+    """Read whether the workpaper moved after a turn the rail sent, and say so once.
+
+    TWO TURNS ARE READ THIS WAY. The forced write asks for the postures; the
+    post-compaction phrase runs the resume operation, which records itself in the
+    workpaper. Either one that left the workpaper still for the grace period is
+    one line in the human's queue, and the state file records that the line went
+    so the next pass does not send it again. A workpaper the search could not
+    name is reported the same way and the check is skipped, because a stamp
+    nothing read is not a stamp that failed.
+    """
+    out = []
+    for row in rows:
+        handle = row["handle"]
+        data = read_state(handle)
+        for turn, at_key, outcome_key, book_key, how_key, before_key, told_key, result_key \
+                in STAMPED_TURNS:
+            wrote = data.get(at_key)
+            if not wrote:
+                continue
+            if outcome_key and data.get(outcome_key) != "delivered":
+                continue
+            if data.get(told_key):
+                continue
+            try:
+                at = datetime.datetime.fromisoformat(str(wrote))
+            except ValueError:
+                continue
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=datetime.timezone.utc)
+            waited = (datetime.datetime.now(datetime.timezone.utc) - at).total_seconds() / 60.0
+            item = {"handle": handle, "turn": turn, "waited_minutes": round(waited, 1)}
+            if waited < STAMP_GRACE_MINUTES:
+                item["outcome"] = "waiting"
+                item["detail"] = "%.1f of the %d minutes" % (waited, STAMP_GRACE_MINUTES)
+                out.append(item)
+                continue
+            book = data.get(book_key) or ""
+            before = data.get(before_key)
+            now_stamp = file_stamp(book) if book else None
+            if book and isinstance(before, (int, float)) and isinstance(now_stamp, (int, float)) \
+                    and now_stamp > before:
+                item["outcome"] = "moved"
+                item["detail"] = "%s was written after the turn went out" % book
+                if act:
+                    write_state(handle, {told_key: True, result_key: "moved"})
+                out.append(item)
+                continue
+            if not book:
+                reason = ("the rail could not name this handle's workpaper, so nothing "
+                          "read whether the write happened: %s" % (data.get(how_key) or ""))
+            else:
+                reason = "%s has not been written since the turn went out" % book
+            item["outcome"] = "missed"
+            item["detail"] = reason
+            out.append(item)
+            if not act:
+                continue
+            if turn == "write":
+                subject = "continuity rail: %s did not write its postures" % handle
+                body = ("%s was told to write its standing postures and its skills in use to "
+                        "the workpaper %s minutes ago, and %s. Run 'session-continuity "
+                        "--set-workpaper %s <path>' where the path is what is wrong."
+                        % (handle, int(waited), reason.rstrip("."), handle))
+            else:
+                subject = "continuity rail: %s did not record its resume" % handle
+                body = ("%s was sent '%s' after a compaction %s minutes ago, and %s. The resume "
+                        "operation records itself in the workpaper, so either it did not run or "
+                        "the rail reads the wrong file. Run 'session-continuity --set-workpaper "
+                        "%s <path>' where the path is what is wrong."
+                        % (handle, RESUME_TURN, int(waited), reason.rstrip("."), handle))
+            told = tell_human(bus_dir, handle, reason, subject=subject, body=body)
+            write_state(handle, {told_key: True, result_key: "missed",
+                                 told_key + "_ok": told})
+            log("%s: %s stamp missed -- %s" % (handle, turn, reason))
+    return out
+
+
+# ------------------------------------------------- the post-compaction resume
+def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only, act, held=None):
+    """Re-ground an orchestrator the hook recorded a compaction for.
+
+    TWO ROADS, CHOSEN BY WHETHER THE SESSION IS HERE. Q184, ruled 2026-09-26.
+
+      live  RESUME_TURN is written into the session through the wake rail's
+            adapter, the road a nudge takes. The claw's resume hook matches the
+            phrase on the receiving side and puts the orchestrate front page in
+            front of the model before its first token. Nothing is stopped, so a
+            desktop session with no job id takes this road like any other.
+      gone  the session is resumed with RESUME_TURN as its prompt, which the
+            harness expands into the skill. The form is the mail road's: bare
+            for a session with a background row, flagged for one with none.
+
+    THE STAMP IS READ AFTERWARDS ON BOTH ROADS. The resume operation records
+    itself in the workpaper, so a workpaper that has not moved STAMP_GRACE_MINUTES
+    after the turn is one line in the human's queue. stamp_pass reads it.
+
+    A RECORD IS CONSUMED ONLY BY AN ACT OR BY AGE. One that cannot be acted on yet
+    is left, so the next pass finds it. A failed resume writes the same hold the
+    mail road writes, so a signed-out harness is asked about once and not every
+    two minutes.
+    """
+    held = held if held is not None else []
+    records, read_bytes = read_records()
+    out, touched = [], set()
+    if not records:
+        return out, touched
+    by_handle = {}
+    for row in rows:
+        for sid in {row.get("session"), row.get("live_session")} - {None, ""}:
+            by_handle.setdefault(sid, row)
+    saved = saved_sessions(listing)
+
+    keep = []
+    for rec in records:
+        session = str(rec.get("session") or "")
+        age = record_age_hours(rec)
+        item = {"session": session[:8], "at": rec.get("at")}
+        row = by_handle.get(session)
+        if age is not None and age > RECORD_TTL_HOURS:
+            item["outcome"] = "dropped"
+            item["detail"] = "the record is %.1f hours old, past the %d-hour life" % (age, RECORD_TTL_HOURS)
+            out.append(item)
+            continue
+        if row is None:
+            # Not an orchestrator of this account. The hook records every
+            # compaction on the machine, because it cannot ask the bus what a
+            # session is without becoming a program that can fail a session.
+            item["outcome"] = "not ours"
+            item["detail"] = "no orchestrator handle of this account records session %s" % session[:8]
+            out.append(item)
+            keep.append(rec)
+            continue
+        handle = row["handle"]
+        item["handle"] = handle
+        touched.add(handle)
+        cwd = row.get("cwd") or ""
+        if not (os.path.isdir(cwd) and os.access(cwd, os.X_OK)):
+            item["outcome"] = "refused"
+            item["detail"] = ("the recorded directory %s is not one this account can enter"
+                              % (cwd or "<none>"))
+            out.append(item)
+            keep.append(rec)
+            continue
+        if only and handle not in only:
+            item["outcome"] = "skipped"
+            item["detail"] = "this pass was scoped to %s" % ", ".join(sorted(only))
+            out.append(item)
+            keep.append(rec)
+            continue
+        pid = row.get("live_pid")
+        item["road"] = "live" if pid else "gone"
+
+        # ---- live: the phrase through the adapter ----
+        if pid:
+            if not act:
+                item["outcome"] = "would deliver"
+                item["detail"] = "pid %d carries the session, so the phrase goes to it" % pid
+                out.append(item)
+                keep.append(rec)
+                continue
+            got = nudge(rail, adapter_dir, bus_dir, handle,
+                        {"owner": "", "address": row.get("address") or "", "cwd": cwd},
+                        pid, text=RESUME_TURN)
+            item["outcome"] = got.get("outcome", "failed")
+            item["detail"] = got.get("reason") or got.get("detail") or ""
+            out.append(item)
+            patch = {"last_post_compact": now_iso(), "last_post_compact_outcome": item["outcome"],
+                     "last_post_compact_detail": item["detail"], "last_post_compact_road": "live"}
+            if item["outcome"] == "delivered":
+                patch.update(post_compact_stamp(read_state(handle), cwd))
+            else:
+                keep.append(rec)
+            write_state(handle, patch)
+            log("%s: post-compaction phrase %s -- %s" % (handle, item["outcome"], item["detail"]))
+            continue
+
+        # ---- gone: a resume with the phrase as its prompt ----
+        if saved is None:
+            item["outcome"] = "waiting"
+            item["detail"] = ("the harness's session listing could not be read, so nothing says "
+                              "which resume form this session takes")
+            out.append(item)
+            keep.append(rec)
+            continue
+        bare = session in saved
+        model = ""
+        if not bare:
+            model, _ = transcript_model(session)
+            model = model or (conf_value("ORCHESTRATE_DELEGATE_MODEL") or "")
+            if not model:
+                item["outcome"] = "refused"
+                item["detail"] = ("no model: this session carries no saved options, the transcript "
+                                  "records none and %s names no ORCHESTRATE_DELEGATE_MODEL" % CONF)
+                out.append(item)
+                keep.append(rec)
+                continue
+        item["bare"] = bare
+        if held:
+            item["outcome"] = "held"
+            item["detail"] = ("this account is held by %s, and no handle is resumed until "
+                              "--clear-hold clears it" % ", ".join(held))
+            out.append(item)
+            keep.append(rec)
+            continue
+        if not act:
+            item["outcome"] = "would resume"
+            item["detail"] = ("no process carries the session; a %s resume with the phrase as "
+                              "its prompt" % ("bare" if bare else "flagged"))
+            out.append(item)
+            keep.append(rec)
+            continue
+        resumed, detail = resume(guard, cmd, handle, {"session": session, "cwd": cwd}, model, bare)
+        item["outcome"] = "resumed" if resumed else "failed"
+        item["detail"] = detail
+        out.append(item)
+        patch = {"last_post_compact": now_iso(), "last_post_compact_outcome": item["outcome"],
+                 "last_post_compact_detail": detail, "last_post_compact_road": "gone"}
+        if resumed:
+            # What this rail started is what this rail ends: the stop pass reads
+            # this name once the session goes quiet.
+            patch["resumed_session"] = session
+            patch["stopped_at"] = None
+            patch["hold"] = None
+            patch.update(post_compact_stamp(read_state(handle), cwd))
+        else:
+            patch.update(hold_patch(bus_dir, handle, detail, model))
+            held.append(handle)
+            keep.append(rec)
+        write_state(handle, patch)
+        log("%s: post-compaction %s -- %s" % (handle, item["outcome"], detail))
+
+    if act and len(keep) != len(records):
+        rewrite_records(keep, read_bytes)
+    return out, touched
+
+
+def post_compact_stamp(data, cwd):
+    """The state a post-compaction turn leaves for stamp_pass to read later."""
+    book, how = find_workpaper(cwd, data.get("workpaper") or "")
+    return {"post_compact_turn_at": now_iso(), "post_compact_workpaper": book,
+            "post_compact_workpaper_how": how,
+            "post_compact_stamp_before": file_stamp(book) if book else None,
+            "post_compact_stamp_told": False}
+
+
+def hold_patch(bus_dir, handle, detail, model):
+    """The hold a failed resume writes, and the one line that tells the human.
+
+    BOTH RESUME ROADS WRITE THIS, and one function is what keeps them saying the
+    same thing. A resume that failed because the harness is signed out is named
+    as a sign-out, because that is what the person has to fix.
+    """
+    signin = signin_reading()
+    body = ""
+    if signin == "signed-out":
+        body = ("%s could not be resumed because the harness is signed out for this "
+                "account. Somebody runs /login as it, then 'session-continuity "
+                "--clear-hold %s'." % (handle, handle))
+    return {"hold": {"at": now_iso(), "reason": detail, "model": model, "signin": signin,
+                     "kind": "sign-out" if signin == "signed-out" else "resume-failed"},
+            "hold_told_human": tell_human(bus_dir, handle, detail, body=body)}
+
+
+# ------------------------------------------------------------------- the pass
 def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minutes=IDLE_STOP_MINUTES,
-             act=True):
+             activity_hours=ACTIVITY_HOURS, act=True):
     listing = listed_sessions(cmd)
     rows, why = survey(guard, listing, bus_dir, me, only)
+    window, window_source = compaction_window()
     result = {"bus_dir": bus_dir, "user": me, "only": sorted(only),
-              "idle_stop_minutes": idle_stop_minutes,
+              "idle_stop_minutes": idle_stop_minutes, "activity_hours": activity_hours,
+              "window": window, "window_source": window_source,
               "held": [h for h, _ in holds()], "rows": rows,
               "stops": stop_pass(cmd, listing, idle_stop_minutes, act)}
+    # A BOARD THIS PROGRAM CANNOT READ ENDS THE PASS BEFORE ANY OTHER READING.
+    # The three passes below each decide from a handle row, and a pass with no
+    # rows would report every compaction as belonging to nobody and rewrite the
+    # record file on that reading.
     if why:
         result["blocking"] = [why]
         return result, 3
+    # THE COMPACTION ROAD RUNS FIRST, AND WHAT IT TOUCHED THE OTHER TWO LEAVE
+    # ALONE. It delivers the resume phrase or starts the session again, and a
+    # forced write or a mail nudge on top of that would be a second turn racing
+    # the resume.
+    result["compactions"], compacting = compaction_pass(guard, rail, adapter_dir, cmd, listing,
+                                                        bus_dir, rows, only, act,
+                                                        result["held"])
+    result["writes"] = forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours,
+                                         window, only, act, compacting)
+    result["stamps"] = stamp_pass(bus_dir, rows, act)
     if not act:
         return result, 0
     for row in rows:
         if row["action"] not in ("resume", "nudge"):
             continue
         handle = row["handle"]
+        if handle in compacting:
+            row["outcome"] = "skipped"
+            row["detail"] = ("the compaction road acted on this handle in this pass, so its "
+                             "mail is read by the session that road resumed")
+            continue
         if only and handle not in only:
             row["outcome"] = "skipped"
             row["detail"] = "this pass was scoped to %s" % ", ".join(sorted(only))
@@ -799,8 +1685,7 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
             patch["resumed_session"] = row["session"]
             patch["stopped_at"] = None
         else:
-            patch["hold"] = {"at": now_iso(), "reason": detail, "model": row["model"]}
-            patch["hold_told_human"] = tell_human(bus_dir, handle, detail)
+            patch.update(hold_patch(bus_dir, handle, detail, row.get("model") or ""))
             result["held"].append(handle)
         write_state(handle, patch)
         log("%s: resume %s -- %s" % (handle, row["outcome"], detail))
@@ -809,15 +1694,31 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
 
 # ------------------------------------------------------------------ the modes
 def cmd_law():
-    fields = sorted(law_fields())
-    percent = PERCENT_FIELD.search(BOOT_SENTENCE)
-    print(json.dumps({"sentence": BOOT_SENTENCE, "format_fields": fields,
-                      "percent_fields": percent.group(0) if percent else None,
-                      "lawful": lawful()}, indent=2))
-    if not lawful():
-        log("THE SENTENCE LAW IS BROKEN: the boot sentence interpolates %s, and the ruling "
-            "allows nothing at all." % (fields or [percent.group(0)]))
-        return 1
+    readings = sentence_law()
+    print(json.dumps({"sentences": readings, "lawful": lawful()}, indent=2))
+    for r in readings:
+        if r["lawful"]:
+            continue
+        log("THE SENTENCE LAW IS BROKEN: %s interpolates %s, and the ruling allows nothing "
+            "at all." % (r["name"], r["format_fields"] or [r["percent_fields"]]))
+    return 0 if lawful() else 1
+
+
+def cmd_set_workpaper(handle, path):
+    """Record which workpaper a handle's stamp is read from.
+
+    The search answers most handles. It cannot answer one whose recorded directory
+    holds several projects, and the line in the human's queue names this command
+    because a guess there would read the wrong project's clock and call the write
+    done.
+    """
+    full = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(full):
+        log("no file at %s, so nothing was recorded" % full)
+        return 2
+    write_state(handle, {"workpaper": full, "workpaper_set_at": now_iso()})
+    print(json.dumps({"handle": handle, "workpaper": full,
+                      "state": state_path(handle)}, indent=2))
     return 0
 
 
@@ -843,25 +1744,37 @@ def main(argv):
         return cmd_law() if len(args) == 1 else 2
     if mode == "--clear-hold":
         return cmd_clear_hold(args[1]) if len(args) == 2 else 2
-    idle_stop = IDLE_STOP_MINUTES
-    if "--idle-stop-minutes" in args[1:]:
-        i = args.index("--idle-stop-minutes")
+    if mode == "--set-workpaper":
+        return cmd_set_workpaper(args[1], args[2]) if len(args) == 3 else 2
+    # The two numbers a proof moves. Each is read the same way, so a third one
+    # later is one entry rather than one more block.
+    numbers = {"--idle-stop-minutes": IDLE_STOP_MINUTES, "--activity-hours": ACTIVITY_HOURS}
+    for flag in list(numbers):
+        if flag not in args[1:]:
+            continue
+        i = args.index(flag)
         if len(args) <= i + 1 or not args[i + 1].isdigit():
-            sys.stderr.write("--idle-stop-minutes takes a whole number of minutes\n")
+            sys.stderr.write("%s takes a whole number\n" % flag)
             return 2
-        idle_stop = int(args[i + 1])
+        numbers[flag] = int(args[i + 1])
         del args[i:i + 2]
+    idle_stop = numbers["--idle-stop-minutes"]
+    activity_hours = numbers["--activity-hours"]
+    allow_tree = "--allow-source-tree" in args[1:]
+    if allow_tree:
+        args.remove("--allow-source-tree")
     only = set(args[1:])
     if mode not in ("--check", "--once") or (mode == "--check" and only) \
             or any(a.startswith("-") for a in only):
         sys.stderr.write("usage: session-continuity [--check | --once [<handle> ...]] "
-                         "[--idle-stop-minutes <n>] | --law | --clear-hold <handle>\n")
+                         "[--idle-stop-minutes <n>] [--activity-hours <n>] [--allow-source-tree] | --law | "
+                         "--clear-hold <handle> | --set-workpaper <handle> <path>\n")
         return 2
 
     # The law is proved before anything is delivered, every run. A build that
     # broke it must not reach a session at all.
     if not lawful():
-        log("refusing to run: the boot sentence interpolates. See --law.")
+        log("refusing to run: a fixed sentence interpolates. See --law.")
         return 1
 
     me = pwd.getpwuid(os.geteuid()).pw_name
@@ -896,19 +1809,25 @@ def main(argv):
         blocking.append("no 'claude' command for this account, so no session can be resumed")
 
     if mode == "--check":
+        window, window_source = compaction_window()
         out = {"user": me, "conf": CONF, "bus_dir": bus_dir, "state_dir": state_dir(),
                "session_guard": beside("session-guard"), "wake_rail": beside("bus-nudge"),
                "adapter_dir": adapter_dir, "harness": cmd,
                "fallback_model": conf_value("ORCHESTRATE_DELEGATE_MODEL") or "",
-               "sentence": BOOT_SENTENCE, "alive_after_secs": ALIVE_AFTER_SECS,
-               "idle_stop_minutes": idle_stop,
+               "sentences": sentence_law(), "alive_after_secs": ALIVE_AFTER_SECS,
+               "idle_stop_minutes": idle_stop, "activity_hours": activity_hours,
+               "stamp_grace_minutes": STAMP_GRACE_MINUTES,
+               "compaction_records": records_path(), "record_ttl_hours": RECORD_TTL_HOURS,
+               "window": window, "window_source": window_source,
+               "token_threshold": int(window / 2) if window else None,
                "holds": [{"handle": h, "hold": v} for h, v in holds()],
                "ready": not blocking, "blocking": blocking}
         if not blocking:
             checked, _ = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me,
-                                  idle_stop_minutes=idle_stop, act=False)
-            out["rows"] = checked["rows"]
-            out["stops"] = checked["stops"]
+                                  idle_stop_minutes=idle_stop,
+                                  activity_hours=activity_hours, act=False)
+            for key in ("rows", "stops", "compactions", "writes", "stamps"):
+                out[key] = checked.get(key)
             if checked.get("blocking"):
                 out["ready"], out["blocking"] = False, checked["blocking"]
         print(json.dumps(out, indent=2))
@@ -919,6 +1838,24 @@ def main(argv):
             log("refusing to run: %s" % line)
         return 3
 
+    # ONLY THE INSTALLED COPY ACTS. A copy read out of a source tree finds no
+    # siblings there, so beside() hands it the installed wake rail, adapters and
+    # conf, and its acting pass would drive the claw's real board. Found in w300.
+    # From anywhere else a pass prints what it would do and acts on nothing,
+    # unless --allow-source-tree says the caller means it.
+    if not installed_copy() and not allow_tree:
+        log("not acting: this copy runs from %s, not %s, so it acts on nothing. It "
+            "printed what a pass would do. Pass --allow-source-tree to act from here."
+            % (os.path.realpath(__file__), INSTALLED))
+        result, _ = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only, idle_stop,
+                             activity_hours, act=False)
+        result["acting"] = False
+        result["not_acting_because"] = "not the installed copy at %s" % INSTALLED
+        # Under the journal the line above is the record, and the block is not.
+        if not os.environ.get("JOURNAL_STREAM"):
+            print(json.dumps(result, indent=2))
+        return 5
+
     # BEFORE THE PASS READS THE STATE DIRECTORY, and only on a pass that acts.
     # --check returns above this line, so a reading changes nothing on disk.
     dropped = prune_state()
@@ -926,10 +1863,11 @@ def main(argv):
         log("pruned state for %s: nothing has written to it in thirty days"
             % ", ".join(dropped))
 
-    result, code = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only, idle_stop)
+    result, code = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only, idle_stop,
+                            activity_hours)
     result["pruned"] = dropped
-    acted = [r for r in result["rows"] if r.get("outcome") not in (None, "skipped")]
-    # UNDER THE JOURNAL, ONE LINE A PASS, AND THE WHOLE RESULT ONLY WHEN IT ACTED.
+    result["acting"] = True
+    # UNDER THE JOURNAL, ONE LINE A PASS AND ONE LINE AN ACT. NEVER THE BLOCK.
     #
     # The sweeper beside this program writes nothing at all on a quiet pass,
     # because a result block every five minutes per account is the journal volume
@@ -937,21 +1875,32 @@ def main(argv):
     # that is worth more than the bytes: a stopped instance and a quiet board
     # read the same, which is the failure wake-rail.md names about the rail
     # itself. So a pass says what it saw and what it decided in one short line,
-    # and the block that names every handle is kept for a pass that acted.
+    # and each act says what it did in one more, written where the act happened.
     #
-    # The cost is stated rather than assumed: one line every two minutes is about
-    # seven hundred a day per account, against the forty-three thousand a day the
-    # loop this rail sits beside was fixed for.
+    # THE BLOCK IS GONE FROM THE JOURNAL, WHICH IS FINDING 3 OF w292's HUB RIDE.
+    # An acting pass printed its whole result, about four kilobytes, and on a busy
+    # box a pass runs every two minutes. That is a few megabytes of journal a day
+    # per account for a reading nobody takes from the journal. `--check` prints the
+    # same structure whole, and a hand run of `--once` still does, so nothing that
+    # read the block has lost it.
+    #
+    # The cost of what is left is stated rather than assumed: one line every two
+    # minutes is about seven hundred a day per account, against the forty-three
+    # thousand a day the loop this rail sits beside was fixed for.
     if os.environ.get("JOURNAL_STREAM"):
         said = ["%s %s" % (r["handle"], r.get("outcome") or r["action"])
                 for r in result["rows"] if r["action"] != "idle"]
         said += ["%s %s" % (t["handle"], t["outcome"]) for t in result["stops"]]
+        said += ["%s compaction %s" % (c.get("handle") or c.get("session"), c["outcome"])
+                 for c in result["compactions"] if c["outcome"] != "not ours"]
+        said += ["%s write %s" % (w["handle"], w["outcome"])
+                 for w in result["writes"] if w["outcome"] not in ("idle", "skipped")]
+        said += ["%s %s stamp %s" % (s["handle"], s["turn"], s["outcome"])
+                 for s in result["stamps"] if s["outcome"] != "waiting"]
         log("%d orchestrator handle(s), %d with mail, %s" % (
             len(result["rows"]),
             len([r for r in result["rows"] if r["unread"] > 0]),
             ", ".join(said) or "nothing to do"))
-        if acted or [t for t in result["stops"] if t["outcome"] in ("stopped", "failed")]:
-            print(json.dumps(result))
     else:
         print(json.dumps(result, indent=2))
     return code

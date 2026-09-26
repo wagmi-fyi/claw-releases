@@ -62,6 +62,12 @@
 # programs, one installer, one reading of who is where. Its timer is its switch,
 # the way the sweeper's is.
 #
+# THE SIGN-IN CHECK RIDES HERE TOO. 'commonclaw-signin-check' asks the harness
+# once an hour whether the account is signed in, under
+# commonclaw-signin-check@<account>.timer, and sends one line when it is not. A
+# signed-out harness is what makes the continuity rail hold, and the rail takes
+# the same reading for its hold. Its timer is its switch.
+#
 # EXIT CODES. 0 the rail is standing. 1 something this script owns did not
 # take. 2 usage.
 #
@@ -86,6 +92,8 @@ ENABLED_RECORD="/var/lib/commonclaw/bus-nudge-enabled"
 SWEEP_RECORD="/var/lib/commonclaw/session-sweep-enabled"
 # And for the continuity rail's timer.
 CONTINUITY_RECORD="/var/lib/commonclaw/session-continuity-enabled"
+# And for the sign-in check's timer.
+SIGNIN_RECORD="/var/lib/commonclaw/signin-check-enabled"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAYLOAD_DIR="${HERE}/../payload"
 TEMPLATE_DIR="${HERE}/../templates"
@@ -126,6 +134,8 @@ if [ "$MODE" = uninstall ]; then
     ok "session-sweep@${a}.timer stopped and disabled"
     systemctl disable --now "session-continuity@${a}.timer" >/dev/null 2>&1
     ok "session-continuity@${a}.timer stopped and disabled"
+    systemctl disable --now "commonclaw-signin-check@${a}.timer" >/dev/null 2>&1
+    ok "commonclaw-signin-check@${a}.timer stopped and disabled"
   done
   systemctl daemon-reload
   printf '{"mode":"uninstall","accounts":["%s"],"note":"the program, the conf and the managed-settings opt-in were left in place: each is shared and removing one is its own decision"}\n' \
@@ -137,7 +147,7 @@ DRY=""; [ "$MODE" = dry-run ] && DRY="would "
 pair=""; src=""; dst=""
 
 # ------------------------------------------------------ the program + adapters
-for f in bus-nudge session-guard session-sweep session-continuity; do
+for f in bus-nudge session-guard session-sweep session-continuity commonclaw-signin-check; do
   [ -r "${PAYLOAD_DIR}/${f}" ] || { bad "no ${PAYLOAD_DIR}/${f}. The assembler takes it from the public skills repository at the pin, so run this from an assembled stage"; }
 done
 [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] || bad "no ${PAYLOAD_DIR}/bus-nudge-adapters — the core refuses to deliver without one, and the assembler vendors it beside the program"
@@ -177,6 +187,7 @@ if [ "$MODE" != dry-run ]; then
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-guard" "${BIN_DIR}/session-guard"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-sweep" "${BIN_DIR}/session-sweep"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-continuity" "${BIN_DIR}/session-continuity"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/commonclaw-signin-check" "${BIN_DIR}/commonclaw-signin-check"
   for f in "${PAYLOAD_DIR}"/bus-nudge-adapters/*; do
     install -m 0755 -o root -g root "$f" "${BIN_DIR}/bus-nudge-adapters/$(basename "$f")"
   done
@@ -201,8 +212,9 @@ if [ "$MODE" != dry-run ]; then
   # than the rail's and is proved the same way, by a command.
   check "the boot sentence the continuity rail delivers carries no interpolation" \
     bash -c "${BIN_DIR}/session-continuity --law >/dev/null"
+  check "${BIN_DIR}/commonclaw-signin-check parses" bash -n "${BIN_DIR}/commonclaw-signin-check"
 else
-  ok "${DRY}install ${BIN_DIR}/bus-nudge, its adapters, session-guard and session-sweep"
+  ok "${DRY}install ${BIN_DIR}/bus-nudge, its adapters, session-guard, session-sweep, session-continuity and commonclaw-signin-check"
 fi
 
 # ------------------------------------------------------------- the claw's docs
@@ -387,9 +399,10 @@ if [ "$MODE" != dry-run ] && command -v jq >/dev/null 2>&1; then
     bash -c "[ -n \"\$('${BIN_DIR}/bus-nudge' --check 2>/dev/null | jq -r '.shared_bus // empty')\" ]"
 fi
 
-# ------------------------------------------------------------- the six units
+# ------------------------------------------------------------- the eight units
 for u in bus-nudge@.service bus-nudge@.timer session-sweep@.service session-sweep@.timer \
-         session-continuity@.service session-continuity@.timer; do
+         session-continuity@.service session-continuity@.timer \
+         commonclaw-signin-check@.service commonclaw-signin-check@.timer; do
   [ -r "${TEMPLATE_DIR}/${u}" ] || { bad "no ${TEMPLATE_DIR}/${u}"; continue; }
   if [ "$MODE" = dry-run ]; then ok "${DRY}install ${UNIT_DIR}/${u}"; continue; fi
   if [ -e "${UNIT_DIR}/${u}" ] && ! cmp -s "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"; then
@@ -401,13 +414,31 @@ done
 
 # ------------------------------------------------------- one instance per head
 STARTED=()
-state=""; restarts=""; was_active=""; sw_word=""; ct_word=""
+state=""; restarts=""; was_active=""; sw_word=""; ct_word=""; si_word=""
 for a in "${ACCOUNTS[@]}"; do
   if [ "$MODE" = dry-run ]; then
     ok "${DRY}enable and start bus-nudge@${a}"
     ok "${DRY}enable session-sweep@${a}.timer"
     ok "${DRY}enable session-continuity@${a}.timer"
+    ok "${DRY}enable commonclaw-signin-check@${a}.timer"
     continue
+  fi
+
+  # THE SIGN-IN CHECK'S TIMER, on the same law as the two timers below it.
+  si_word="$(systemctl is-enabled "commonclaw-signin-check@${a}.timer" 2>/dev/null || true)"
+  if [ "$si_word" = masked ]; then
+    warn "commonclaw-signin-check@${a}.timer is masked and was left off"
+  elif [ "$si_word" = disabled ] && [ -e "${SIGNIN_RECORD}/${a}" ]; then
+    warn "commonclaw-signin-check@${a}.timer is deliberately disabled and was left off"
+  else
+    systemctl enable --now "commonclaw-signin-check@${a}.timer" >/dev/null 2>&1
+    check "commonclaw-signin-check@${a}.timer is enabled" \
+      bash -c "systemctl is-enabled 'commonclaw-signin-check@${a}.timer' 2>/dev/null | grep -qx enabled"
+    if [ "$(systemctl is-enabled "commonclaw-signin-check@${a}.timer" 2>/dev/null || true)" = enabled ]; then
+      install -d -m 0755 -o root -g root "$SIGNIN_RECORD" \
+        && : > "${SIGNIN_RECORD}/${a}" \
+        || bad "could not record that commonclaw-signin-check@${a}.timer was enabled, so a later disable of it may be undone"
+    fi
   fi
 
   # THE CONTINUITY RAIL'S TIMER, on the sweeper's law and for the same reason:

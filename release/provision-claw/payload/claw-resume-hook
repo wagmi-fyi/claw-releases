@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# claw-resume-hook -- put the orchestrate skill's front page in front of a
+# session whose prompt is the fixed resume phrase.
+#
+# Installed machine-wide and run by the harness on every prompt a session
+# submits (the UserPromptSubmit event), beside the session-start join and the
+# two compaction hooks.
+#
+# WHY A HOOK ON THE RECEIVING SESSION. After a compaction the continuity rail
+# writes one fixed phrase into a live orchestrator's socket. Measured
+# 2026-09-26 (w293, w297): a slash command written into a live session arrives
+# as words, and the model then decides whether to invoke the skill. One trial of
+# four answered from memory with no invocation. This hook takes that decision
+# away. The harness gives it the prompt's text, and what it prints as
+# additionalContext reaches the model before its first token. Measured
+# deterministic on 2.1.283 and on the desktop app's 2.1.281. Q184, ruled
+# 2026-09-26.
+#
+# ONE EXACT PHRASE, AND NOTHING ELSE MATCHES. The phrase is the continuity
+# rail's RESUME_TURN, and the controls prove the two are the same bytes. A
+# prompt that only contains the phrase is not a match: a person quoting it in a
+# sentence is asking about it, not asking for it. Leading and trailing
+# whitespace is taken off first, because a typed prompt can carry either.
+#
+# THE PAGE IS THE INSTALLED ONE, NEVER A COPY. The hook reads SKILL.md from the
+# machine skill directory the harness itself loads the skill from. A copy here
+# would drift from the skill the claw carries, and the drift would be silent.
+#
+# THE CAP IS A REFUSAL, NOT A TRUNCATION. The harness caps a hook's context at
+# 10,000 characters. Past that it saves the text to a file and passes a
+# 2,000-character preview, which is a truncated page that reads like a whole
+# one. So a page longer than PAGE_CAP characters is refused: nothing is printed
+# on stdout, and one line on stderr names the page and its length. The head this
+# hook puts above the page fits in the difference.
+#
+# THE COST ON EVERY OTHER PROMPT IS ONE SHELL AND ONE STRING TEST. Nothing is
+# forked before the test. Measured on the hub: 2 ms for a prompt that does not
+# match.
+#
+# THIS PROGRAM NEVER FAILS A SESSION. Every path exits 0. A prompt the hook
+# cannot read, a page that is missing, a page over the cap: each prints nothing
+# on stdout and the prompt goes on as typed.
+
+PHRASE="/orchestrate full resume operation please"
+SKILL_DIR="/etc/claude-code/.claude/skills/orchestrate"
+PAGE_CAP=9500
+
+# The input is one small JSON object. `read -d ''` takes all of it with no fork.
+IFS= read -r -d '' input || true
+
+# THE FAST PATH. A prompt that does not carry the phrase anywhere cannot be the
+# phrase, and that is every prompt but one.
+case "$input" in
+  *"$PHRASE"*) ;;
+  *) exit 0 ;;
+esac
+
+command -v jq >/dev/null 2>&1 || exit 0
+prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null)" || exit 0
+# Whitespace off both ends, with no fork.
+prompt="${prompt#"${prompt%%[![:space:]]*}"}"
+prompt="${prompt%"${prompt##*[![:space:]]}"}"
+[ "$prompt" = "$PHRASE" ] || exit 0
+
+page="${SKILL_DIR}/SKILL.md"
+if [ ! -r "$page" ]; then
+  echo "claw-resume-hook: no page at ${page}, so nothing was loaded" >&2
+  exit 0
+fi
+
+# CHARACTERS, NOT BYTES, because the harness counts characters. Under a locale
+# with no UTF-8 the count is bytes, which is never fewer, so the refusal still
+# holds.
+body="$(LC_ALL=C.UTF-8 cat -- "$page")"
+chars="$(LC_ALL=C.UTF-8 wc -m < "$page")"
+if [ "$chars" -gt "$PAGE_CAP" ]; then
+  echo "claw-resume-hook: ${page} is ${chars} characters, over the ${PAGE_CAP} this hook may print. Nothing was loaded. Cut the page, or raise the cap where the harness allows it." >&2
+  exit 0
+fi
+
+# The head says where the page came from and where it lives, because the page
+# names its operations and scripts by paths relative to that directory. It
+# follows the form of the harness's own skill expansion.
+head="The claw's resume hook loaded the orchestrate skill because the prompt is its resume phrase. Base directory for this skill: ${SKILL_DIR}"
+jq -n --arg ctx "${head}"$'\n\n'"${body}" \
+  '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null
+exit 0

@@ -337,6 +337,16 @@ PAYLOAD_DIR="${SCRIPT_DIR}/../payload"
 # shellcheck source=agents-plane.sh
 . "${SCRIPT_DIR}/agents-plane.sh"
 
+# Whether a running unit's process holds the groups its account holds. The
+# access door and two installers read it already; phase 8 reads it for each
+# person's own service manager. One copy, for the same reason as the two above.
+[ -r "${SCRIPT_DIR}/unit-groups.sh" ] || {
+  printf 'missing sibling: %s/unit-groups.sh -- copy the whole skill directory\n' "$SCRIPT_DIR" >&2
+  exit 1
+}
+# shellcheck source=unit-groups.sh
+. "${SCRIPT_DIR}/unit-groups.sh"
+
 usage() {
   awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2
   exit 2
@@ -596,9 +606,10 @@ WRAPPER_SHA256="95a492ed7f583208f3f8c048865a8ce5cfe30db504a91711a37649759d3a6aa4
 #
 # WHAT IT CARRIES DEPENDS ON WIDE MODE, and on nothing else. With wide mode off
 # it carries no privilege at all: no sudoers file names it, and it owns exactly
-# one path, which phase 16 proves rather than states. With wide mode on, phase 19
-# writes the ONE file that names it, and phase 8 still refuses every other one.
-# A group that owns one file carries what that file carries.
+# two paths, the briefing and the filing rules, which phase 16 proves rather
+# than states. With wide mode on, phase 19 writes the ONE file that names it,
+# and phase 8 still refuses every other one. A group that owns two files
+# carries what those files carry.
 #
 # IT HOLDS PEOPLE AND NOTHING ELSE. Wide mode grants root to this group, and the
 # people phases read it as the claw's people, so a service in it would be handed
@@ -629,6 +640,14 @@ WIDE_SUDOERS="${SUDOERS_DIR}/commonclaw-wide-mode"
 # it exactly as a workspace does.
 CLAW_BRIEFING="${WORKSPACE_ROOT}/CLAUDE.md"
 CLAW_BRIEFING_LINK="${WORKSPACE_ROOT}/AGENTS.md"
+
+# The claw-wide filing rules: where a project lives, what it is called, what its
+# directory holds. The orchestrate skill's launch operation reads a file of this
+# shape. It sits beside the briefing and is laid the same way: seeded into an
+# absence, never rewritten, and owned by the members group so every person here
+# can edit it. Q180, ruled 2026-09-26: a hand-made copy of this file with that
+# group stopped the hub's 1.8.0 apply, because the release did not declare it.
+CLAW_CONVENTIONS="${WORKSPACE_ROOT}/project-conventions.md"
 
 # The fleet skill plane. One canonical copy per skill, symlinked into both
 # cores' machine-wide directories.
@@ -668,6 +687,31 @@ BUS_DOC="${ETC_ROOT}/session-bus.md"
 CLAW_BIN="${OPT_ROOT}/bin"
 BUS_CLI="${CLAW_BIN}/bus"
 BUS_JOIN_HOOK="${CLAW_BIN}/claw-bus-join"
+# THE TWO COMPACTION HOOKS SIT BESIDE THE JOIN, AND EACH DECIDES ONE QUESTION.
+# The record is a fact on disk for the continuity rail, on an event whose stdout
+# the harness ignores. The advisory is one line into an orchestrator's context, on
+# the one compaction event whose stdout reaches the model. One program doing both
+# would answer two unrelated questions in one place, and the join already runs on
+# the second event without a matcher.
+COMPACT_RECORD_HOOK="${CLAW_BIN}/claw-compaction-record"
+COMPACT_ADVISORY_HOOK="${CLAW_BIN}/claw-compaction-advisory"
+# THE RESUME HOOK RUNS ON EVERY PROMPT AND ANSWERS ONE. When a prompt is exactly
+# the continuity rail's resume phrase, it puts the installed orchestrate skill's
+# front page in front of the model. Q184, ruled 2026-09-26. On every other prompt
+# it exits in about two milliseconds with nothing printed.
+RESUME_HOOK="${CLAW_BIN}/claw-resume-hook"
+# THE AUTOMATIC COMPACTION WINDOW, IN TOKENS. Ruled 2026-09-26: 600,000. The
+# key is one number per person and not per model. Fable and Sonnet 5 carry a
+# 1M window, so they compact at sixty percent of it and keep room to do so. A
+# 200,000-token model such as Haiku 4.5 never reaches the number and compacts
+# where the harness decides. The continuity rail forces the postures write at
+# half of whatever window a person carries.
+AUTOCOMPACT_WINDOW="600000"
+# The settings key, which is what the harness reads. Phase 10 seeds it into each
+# person's own settings file, which is the scope the measurement proves. The
+# environment form of the same value does nothing on 2.1.266, and the block that
+# seeds this says so.
+AUTOCOMPACT_WINDOW_KEY="autoCompactWindow"
 
 # The shared language runtimes, and the farm of links that puts them on a
 # member's PATH.
@@ -1476,6 +1520,13 @@ phase_1_preflight() {
   # the file and would silently skip the seeding on the one that does not.
   [ -r "${TEMPLATE_DIR}/claw-instructions.md" ] \
     || missing_payload="$missing_payload ../templates/claw-instructions.md"
+  # The claw-wide filing rules' seed, for the same reason.
+  [ -r "${TEMPLATE_DIR}/project-conventions.md" ] \
+    || missing_payload="$missing_payload ../templates/project-conventions.md"
+  # The release notes' shape. Nothing on a claw reads it; a release that
+  # dropped it would leave the next cut with no template to start from.
+  [ -r "${TEMPLATE_DIR}/notes.md" ] \
+    || missing_payload="$missing_payload ../templates/notes.md"
   # The runtimes phase's two files. Named here rather than only in phase 17
   # because one of them is what puts the shared runtimes on every member's PATH:
   # a run that reached the phase without it would install the trees, converge
@@ -1492,6 +1543,15 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../payload/bus"
   [ -r "${PAYLOAD_DIR}/claw-bus-join" ] \
     || missing_payload="$missing_payload ../payload/claw-bus-join"
+  # The two compaction hooks and the resume hook, for the same reason as the
+  # join: phase 16 registers each one machine-wide, and a hook pointing at
+  # nothing fires on every session. The resume hook fires on every prompt.
+  [ -r "${PAYLOAD_DIR}/claw-compaction-record" ] \
+    || missing_payload="$missing_payload ../payload/claw-compaction-record"
+  [ -r "${PAYLOAD_DIR}/claw-compaction-advisory" ] \
+    || missing_payload="$missing_payload ../payload/claw-compaction-advisory"
+  [ -r "${PAYLOAD_DIR}/claw-resume-hook" ] \
+    || missing_payload="$missing_payload ../payload/claw-resume-hook"
   [ -r "${TEMPLATE_DIR}/session-bus.md" ] \
     || missing_payload="$missing_payload ../templates/session-bus.md"
   # The authority plane's three pieces, and the first of them is the one that
@@ -1538,6 +1598,10 @@ phase_1_preflight() {
   # whose session has gone. Same installer, same refusal.
   [ -r "${PAYLOAD_DIR}/session-continuity" ] \
     || missing_payload="$missing_payload ../payload/session-continuity"
+  # The sign-in check, laid by the same installer, whose hold reading the
+  # continuity rail takes.
+  [ -r "${PAYLOAD_DIR}/commonclaw-signin-check" ] \
+    || missing_payload="$missing_payload ../payload/commonclaw-signin-check"
   [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] \
     || missing_payload="$missing_payload ../payload/bus-nudge-adapters"
   # EACH ADAPTER BY NAME, and not just the directory. A present-but-short
@@ -1563,6 +1627,10 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/session-continuity@.service"
   [ -r "${TEMPLATE_DIR}/session-continuity@.timer" ] \
     || missing_payload="$missing_payload ../templates/session-continuity@.timer"
+  [ -r "${TEMPLATE_DIR}/commonclaw-signin-check@.service" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-signin-check@.service"
+  [ -r "${TEMPLATE_DIR}/commonclaw-signin-check@.timer" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-signin-check@.timer"
   [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
     || missing_payload="$missing_payload ../templates/wake-rail.md"
   # The operator's runbook, which the same installer lays beside the member's
@@ -2200,7 +2268,7 @@ reconcile_briefings() {
 # before the file can belong to it, and this phase runs before phase 8 makes any
 # person. Creating a group is not creating a person: `groupadd -f` needs nobody,
 # which is why phase 13 already creates `claw-admin` before it adds anybody to
-# it. So the group is made HERE, beside the one file it exists for, and the
+# it. So the group is made HERE, beside the two files it exists for, and the
 # people join it in phase 8 and in the granted onboarding door. One owner for the
 # group, one owner for the membership, and this phase still stands alone under
 # `--only 7`.
@@ -2237,6 +2305,11 @@ claw_briefing() {
       say "  would seed ${CLAW_BRIEFING} from ../templates/claw-instructions.md"
     fi
     say "  would link ${CLAW_BRIEFING_LINK} -> CLAUDE.md"
+    if [ -e "$CLAW_CONVENTIONS" ]; then
+      say "  would keep ${CLAW_CONVENTIONS} byte for byte, and set it root:${MEMBERS_GROUP} 0664"
+    else
+      say "  would seed ${CLAW_CONVENTIONS} from ../templates/project-conventions.md"
+    fi
     return 0
   fi
 
@@ -2292,6 +2365,27 @@ claw_briefing() {
   check "claw briefing carries content" test -s "$CLAW_BRIEFING"
   check "${CLAW_BRIEFING_LINK} is a symlink to CLAUDE.md" \
     bash -c "[ \"\$(readlink '$CLAW_BRIEFING_LINK')\" = 'CLAUDE.md' ]"
+
+  # THE FILING RULES, LAID BY THE BRIEFING'S LAW. The content is the people's,
+  # written once into an absence. The group and the mode are converged on every
+  # run, which is what puts the write back on a claw where somebody took the
+  # group off by hand (the hub, Q180). A symlink here is left for a human: this
+  # run would otherwise change the owner of whatever it points at.
+  if [ -L "$CLAW_CONVENTIONS" ]; then
+    bad "${CLAW_CONVENTIONS} is a symlink -- the claw's filing rules are one real file; replace the link with the file it names"
+    return 0
+  fi
+  if [ -e "$CLAW_CONVENTIONS" ]; then
+    say "  keeping ${CLAW_CONVENTIONS} -- its content belongs to the people here"
+  else
+    install -m 0664 "${TEMPLATE_DIR}/project-conventions.md" "$CLAW_CONVENTIONS"
+    say "  seeded ${CLAW_CONVENTIONS}"
+  fi
+  chown root:"$MEMBERS_GROUP" "$CLAW_CONVENTIONS"
+  chmod 0664 "$CLAW_CONVENTIONS"
+  check "claw filing rules are 0664 root:${MEMBERS_GROUP}" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$CLAW_CONVENTIONS')\" = '664 root:${MEMBERS_GROUP}' ]"
+  check "claw filing rules carry content" test -s "$CLAW_CONVENTIONS"
 }
 
 phase_7_roots() {
@@ -3095,7 +3189,53 @@ phase_8_users() {
     bad "sudoers file(s) name ${BUS_GROUP}: ${grants}-- that group holds services, and a service carries no grant on this claw"
   fi
 
+  reconcile_service_managers
+
   human "each person completes their own core logins in their own home"
+}
+
+# A PERSON'S SERVICE MANAGER KEEPS THE GROUPS IT STARTED WITH. With linger on it
+# runs for weeks, so a workspace granted after it started is a directory it
+# cannot enter. A job the person schedules there links its unit into place, and
+# the manager reports "Unit file ... does not exist" because it cannot follow the
+# link. Measured on a tenant claw 2026-09-26 (w299): a manager started 43 days
+# earlier held three of the account's ten groups, and the first scheduled job
+# failed that way. The access door restarts a manager when a grant changes its
+# groups, from 1.8.0 on. A manager that went stale before that is this reading's.
+#
+# NO LIVE SESSION, SO IT IS RESTARTED. The restart ends what that person runs
+# under the manager, and with nobody logged in that is their scheduled work,
+# which comes back with it on time.
+#
+# A LIVE SESSION, SO IT IS NAMED AND LEFT. A restart would end what they are
+# working in right now. The apply log says who, and the command that settles it.
+reconcile_service_managers() {
+  local user uid unit drift_rc sessions
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would restart each person's service manager whose groups differ from their account's, when they have no live session, and name it when they do"
+    return 0
+  fi
+  for user in "${PEOPLE[@]}"; do
+    uid="$(id -u "$user" 2>/dev/null)" || continue
+    unit="user@${uid}.service"
+    drift_rc=0; unit_group_drift "$unit" "$user" || drift_rc=$?
+    [ "$drift_rc" -eq 0 ] || continue
+    sessions="$(loginctl show-user "$user" -p Sessions --value 2>/dev/null || true)"
+    if [ -n "${sessions// /}" ]; then
+      warn "${user}'s service manager (${unit}) holds different groups from the account, and ${user} has a live session (${sessions}), so it was left running. A job they schedule in a workspace granted since it started fails with 'Unit file ... does not exist'. Restarting it ends what they run under it: 'systemctl restart ${unit}' as root, once they are done."
+      continue
+    fi
+    if systemctl restart "$unit" >/dev/null 2>&1; then
+      drift_rc=0; unit_group_drift "$unit" "$user" || drift_rc=$?
+      case "$drift_rc" in
+        1) ok "${user}'s service manager held groups the account no longer matches, and nobody was logged in, so ${unit} was restarted and now holds the account's groups" ;;
+        *) bad "${unit} was restarted and still does not hold ${user}'s groups" ;;
+      esac
+    else
+      bad "${user}'s service manager holds different groups from the account and ${unit} could not be restarted -- a job they schedule in a workspace granted since it started will fail"
+    fi
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------- phase 9
@@ -3350,7 +3490,75 @@ phase_10_claude() {
 
   [ "$DRY_RUN" -eq 1 ] && return 0
   [ "$any_fail" -eq 0 ] && ok "every person is at or above the floor ${CLAUDE_FLOOR}; ${moved} core(s) moved and ${fresh} installed fresh this run"
+
+  seed_autocompact_window
+
   human "each person completes the browser login for this core"
+}
+
+# ------------------------------------------- the automatic compaction window
+#
+# WHY A CLAW SETS THIS AT ALL. With nothing set the harness compacts near the
+# model's limit, which leaves a session little room to compact in. Measured
+# 2026-09-26: at the limit every turn answers "Prompt is too long", the board row
+# reads blocked, and only a stop and a resume from outside clears it. A window
+# under the limit is what keeps a session able to compact. The value is
+# AUTOCOMPACT_WINDOW above, and the reason for that number is written there.
+#
+# WHY PER PERSON AND NOT MACHINE-WIDE. The setting is user scope. Three matched
+# background sessions on 2026-09-26, each filled to about 175,000 tokens over
+# fifteen turns with the window asked for at 100,000: `autoCompactWindow` in a
+# user settings file compacted twice, the `--autocompact` flag compacted twice,
+# and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` compacted not at all, against its own
+# documentation. The user file is the one scope this run can write and this claw
+# has measured. Whether the machine's policy tier carries the key is untested,
+# and an untested key in the file every session's bus join depends on is not
+# worth the reach.
+#
+# SEEDED INTO AN ABSENCE, NEVER REWRITTEN. The file is the person's own. A window
+# they chose is their ruling about their own sessions, and a release that flipped
+# it back with nothing saying so is the fault the seat roster's law exists for.
+seed_autocompact_window() {
+  local user home settings current seeded=0 kept=0
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "jq is absent, so no person's compaction window was seeded. A session then compacts at its model's limit, where it has no turns left to compact in"
+    return 0
+  fi
+  for user in "${PEOPLE[@]}"; do
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [ -n "$home" ] && [ -d "$home" ] || { warn "$user: no home directory, so no compaction window was seeded"; continue; }
+    settings="${home}/.claude/settings.json"
+    current=""
+    if [ -s "$settings" ]; then
+      current="$(jq -r --arg k "$AUTOCOMPACT_WINDOW_KEY" '.[$k] // empty' "$settings" 2>/dev/null || true)"
+    fi
+    if [ -n "$current" ]; then
+      ok "$user: keeps the compaction window they already carry, ${current}"
+      kept=$((kept+1))
+      continue
+    fi
+    # The file may not exist, and it may hold other settings of theirs. Both are
+    # one jq away, and the write lands as the person so nothing of theirs ends up
+    # owned by root.
+    sudo -u "$user" -H bash -c '
+      set -e
+      settings="$1"; key="$2"; value="$3"
+      install -d -m 0755 "$(dirname "$settings")"
+      if [ -s "$settings" ]; then
+        tmp="$(mktemp "${settings}.XXXXXX")"
+        jq --arg k "$key" --argjson v "$value" ". + {(\$k): \$v}" "$settings" > "$tmp"
+        mv -- "$tmp" "$settings"
+      else
+        jq -n --arg k "$key" --argjson v "$value" "{(\$k): \$v}" > "$settings"
+      fi
+      chmod 0600 "$settings"
+    ' _ "$settings" "$AUTOCOMPACT_WINDOW_KEY" "$AUTOCOMPACT_WINDOW" 2>/dev/null \
+      || { bad "$user: the compaction window was NOT seeded at ${settings}. That session compacts at its model's limit, where a refusal wedges it"; continue; }
+    check "$user: the compaction window reads ${AUTOCOMPACT_WINDOW} at ${settings}" \
+      bash -c "[ \"\$(jq -r --arg k '$AUTOCOMPACT_WINDOW_KEY' '.[\$k] // empty' '$settings')\" = '$AUTOCOMPACT_WINDOW' ]"
+    seeded=$((seeded+1))
+  done
+  say "  compaction window: ${seeded} seeded, ${kept} left as the person set it"
 }
 
 # ---------------------------------------------------------------- phase 11
@@ -4724,7 +4932,7 @@ group_ownership_sweep() {
   while IFS=$'\t' read -r g p; do
     [ -n "$p" ] || continue
     if [ "$g" = "$MEMBERS_GROUP" ]; then
-      case "$p" in "$CLAW_BRIEFING") continue ;; esac
+      case "$p" in "$CLAW_BRIEFING"|"$CLAW_CONVENTIONS") continue ;; esac
       members_extra="${members_extra}${p} "
     elif [ "$g" = "$BUS_GROUP" ]; then
       case "$p" in "$BUS_HOME"|"$BUS_HOME"/*) continue ;; esac
@@ -4735,9 +4943,9 @@ group_ownership_sweep() {
              -o \( -group "$MEMBERS_GROUP" -o -group "$BUS_GROUP" \) -printf '%g\t%p\n' 2>/dev/null \
              | LC_ALL=C sort)
   if [ -z "${members_extra// /}" ]; then
-    ok "${MEMBERS_GROUP} owns only what this release declares: ${CLAW_BRIEFING}"
+    ok "${MEMBERS_GROUP} owns only what this release declares: ${CLAW_BRIEFING} and ${CLAW_CONVENTIONS}"
   else
-    bad "${MEMBERS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${members_extra}-- declared: ${CLAW_BRIEFING} alone"
+    bad "${MEMBERS_GROUP} owns path(s) this release does NOT declare, where the group is a grant: ${members_extra}-- declared: ${CLAW_BRIEFING} and ${CLAW_CONVENTIONS} alone"
   fi
   if [ -z "${bus_extra// /}" ]; then
     ok "${BUS_GROUP} owns only what this release declares: ${BUS_HOME} with its contents"
@@ -4754,9 +4962,10 @@ phase_16_session_bus() {
     say "  would converge ${STATE_ROOT} to 0755 root:root and say whether it was adopted or moved,"
     say "  move every path under ${BUS_HOME} to group ${BUS_GROUP} with its mode kept, and count them,"
     say "  create ${BUS_HOME} 2770 root:${BUS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
-    say "  register the session-start join in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
+    say "  install the two compaction hooks and ${RESUME_HOOK},"
+    say "  register the session-start join and the three hooks in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
     say "  read a member's own traverse and write before running the join as them,"
-    say "  and read that ${MEMBERS_GROUP} owns only ${CLAW_BRIEFING} and ${BUS_GROUP} only the bus"
+    say "  and read that ${MEMBERS_GROUP} owns only ${CLAW_BRIEFING} and ${CLAW_CONVENTIONS}, and ${BUS_GROUP} only the bus"
     return 0
   fi
 
@@ -4847,7 +5056,7 @@ phase_16_session_bus() {
   # ---- the two programs every member's session runs ----
   install -d -m 0755 -o root -g root "$CLAW_BIN"
   local p missing=""
-  for p in bus claw-bus-join; do
+  for p in bus claw-bus-join claw-compaction-record claw-compaction-advisory claw-resume-hook; do
     [ -r "${PAYLOAD_DIR}/${p}" ] || missing="$missing $p"
   done
   if [ -n "$missing" ]; then
@@ -4859,10 +5068,19 @@ phase_16_session_bus() {
   # commit _fleet/skills-source.yaml pins, and this phase installs that copy.
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus" "$BUS_CLI"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-bus-join" "$BUS_JOIN_HOOK"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-compaction-record" "$COMPACT_RECORD_HOOK"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-compaction-advisory" "$COMPACT_ADVISORY_HOOK"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-resume-hook" "$RESUME_HOOK"
   check "${BUS_CLI} is 0755 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_CLI')\" = '755 root:root' ]"
   check "${BUS_JOIN_HOOK} is 0755 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_JOIN_HOOK')\" = '755 root:root' ]"
+  check "${COMPACT_RECORD_HOOK} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$COMPACT_RECORD_HOOK')\" = '755 root:root' ]"
+  check "${COMPACT_ADVISORY_HOOK} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$COMPACT_ADVISORY_HOOK')\" = '755 root:root' ]"
+  check "${RESUME_HOOK} is 0755 root:root" \
+    bash -c "[ \"\$(stat -c '%a %U:%G' '$RESUME_HOOK')\" = '755 root:root' ]"
 
   # ---- the join, registered where the harness reads it ----
   #
@@ -4872,14 +5090,42 @@ phase_16_session_bus() {
   install -d -m 0755 -o root -g root "$(dirname "$MANAGED_SETTINGS")"
   local existing='{}' merged
   [ -s "$MANAGED_SETTINGS" ] && existing="$(cat "$MANAGED_SETTINGS")"
+  # FIVE THINGS OF OURS IN THIS FILE NOW, AND THE MERGE IS STILL BY VALUE.
+  # Each entry is replaced by name and everything else in the file survives. The
+  # advisory carries the `compact` matcher because its line is true only after a
+  # compaction; the join carries none, because every session joins the bus. Both
+  # sit under SessionStart, which is the one compaction event whose stdout the
+  # harness puts in the model's context. The resume hook sits under
+  # UserPromptSubmit with no matcher, because that event takes none. The hook
+  # reads the prompt itself.
+  #
+  # THE COMPACTION WINDOW IS NOT WRITTEN HERE, AND THE MEASUREMENT IS WHY.
+  # `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is documented to override the setting, and
+  # on 2.1.266 it does nothing. Three matched background sessions, 2026-09-26,
+  # each filled to about 175,000 tokens over fifteen turns with the window asked
+  # for at 100,000: the `--autocompact` flag compacted twice, `autoCompactWindow`
+  # in a user settings file compacted twice, the environment variable compacted
+  # not at all. So the window is seeded per person in phase 10, in the scope the
+  # measurement proves, and this file carries no line claiming otherwise.
   if ! merged="$(printf '%s' "$existing" | jq \
-        --arg dir "$BUS_HOME" --arg hook "$BUS_JOIN_HOOK" '
+        --arg dir "$BUS_HOME" --arg hook "$BUS_JOIN_HOOK" \
+        --arg rec "$COMPACT_RECORD_HOOK" --arg adv "$COMPACT_ADVISORY_HOOK" \
+        --arg res "$RESUME_HOOK" '
         .env = ((.env // {}) + {SESSION_BUS_DIR: $dir})
         | .hooks = ((.hooks // {}) + {SessionStart:
             (((.hooks.SessionStart // []) | map(select(
-                 [.hooks[]?.command] | index($hook) | not)))
-             + [{hooks: [{type: "command", command: $hook}]}])})' 2>/dev/null)"; then
-    bad "${MANAGED_SETTINGS} is not readable as JSON, so the session-start join was NOT registered. Sessions will not auto-join. Fix the file by hand."
+                 [.hooks[]?.command] | (index($hook) or index($adv)) | not)))
+             + [{hooks: [{type: "command", command: $hook}]}]
+             + [{matcher: "compact", hooks: [{type: "command", command: $adv}]}])})
+        | .hooks = (.hooks + {PostCompact:
+            (((.hooks.PostCompact // []) | map(select(
+                 [.hooks[]?.command] | index($rec) | not)))
+             + [{hooks: [{type: "command", command: $rec}]}])})
+        | .hooks = (.hooks + {UserPromptSubmit:
+            (((.hooks.UserPromptSubmit // []) | map(select(
+                 [.hooks[]?.command] | index($res) | not)))
+             + [{hooks: [{type: "command", command: $res}]}])})' 2>/dev/null)"; then
+    bad "${MANAGED_SETTINGS} is not readable as JSON, so the session-start join, the two compaction hooks and the resume hook were NOT registered. Sessions will not auto-join. Fix the file by hand."
   else
     printf '%s\n' "$merged" > "$MANAGED_SETTINGS"
     chmod 0644 "$MANAGED_SETTINGS"; chown root:root "$MANAGED_SETTINGS"
@@ -4887,6 +5133,12 @@ phase_16_session_bus() {
       bash -c "[ \"\$(jq -r '.env.SESSION_BUS_DIR // empty' '$MANAGED_SETTINGS')\" = '$BUS_HOME' ]"
     check "${MANAGED_SETTINGS} runs ${BUS_JOIN_HOOK} on SessionStart, once" \
       bash -c "[ \"\$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command == \"$BUS_JOIN_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    check "${MANAGED_SETTINGS} runs ${COMPACT_ADVISORY_HOOK} on SessionStart, once, under the compact matcher" \
+      bash -c "[ \"\$(jq '[.hooks.SessionStart[]? | select(.matcher == \"compact\") | .hooks[]? | select(.command == \"$COMPACT_ADVISORY_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    check "${MANAGED_SETTINGS} runs ${COMPACT_RECORD_HOOK} on PostCompact, once" \
+      bash -c "[ \"\$(jq '[.hooks.PostCompact[]?.hooks[]? | select(.command == \"$COMPACT_RECORD_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    check "${MANAGED_SETTINGS} runs ${RESUME_HOOK} on UserPromptSubmit, once" \
+      bash -c "[ \"\$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command == \"$RESUME_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
     check "${MANAGED_SETTINGS} is 0644 root:root -- a member who could edit it could redirect every session's bus" \
       bash -c "[ \"\$(stat -c '%a %U:%G' '$MANAGED_SETTINGS')\" = '644 root:root' ]"
   fi
@@ -6051,7 +6303,7 @@ NOTIFYENVEOF
   # own dedupe stamps, and --dry-run reaches no channel.
   local ctl; ctl="$(mktemp -d)"
   local p prev="" out differed=1
-  for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late; do
+  for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late harness-signin; do
     out="$(NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>&1)" || true
     [ -n "$prev" ] && [ "$out" = "$prev" ] && differed=0
@@ -6087,7 +6339,7 @@ NOTIFYENVEOF
   # which is the failure it was written after, and it is kept for that.
   #
   # The claim that each row is read for its TITLE needs its own control, and this
-  # is it: seven classes, seven distinct titles, pulled out of the rendered text.
+  # is it: eight classes, eight distinct titles, pulled out of the rendered text.
   # `|| true` ON THE ASSIGNMENT, and it is the whole reason this phase can run
   # on a claw nobody has wired yet. The notifier exits 3 when no webhook
   # resolves, which this phase treats as a supported state eleven lines below.
@@ -6103,7 +6355,7 @@ NOTIFYENVEOF
   # before it exits 3, so the titles are captured either way and this control
   # still measures the table on a claw with no webhook.
   local titles distinct
-  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late; do
+  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late harness-signin; do
     NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>/dev/null \
       | sed -n 's/^  "text": "[^·]*· \(.*\) · .*/\1/p'
@@ -6111,15 +6363,15 @@ NOTIFYENVEOF
   # grep -c PRINTS 0 and EXITS 1 on no match, so the fallback is an assignment
   # rather than an appended second line.
   distinct="$(printf '%s\n' "$titles" | sort -u | grep -c . )" || distinct=0
-  if [ "$distinct" -eq 7 ]; then
-    ok "the seven classes render seven distinct titles, so the class table is read row by row"
+  if [ "$distinct" -eq 8 ]; then
+    ok "the eight classes render eight distinct titles, so the class table is read row by row"
   elif [ "$distinct" -eq 0 ]; then
     # Zero is a different finding from two-sharing-a-heading, and naming it as
     # the sharing case sends a reader to the class table when the notifier
     # printed nothing at all.
-    bad "the seven classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
+    bad "the eight classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
   else
-    bad "the classes render ${distinct} distinct title(s), not seven: two of them share a heading and a finding lands under the wrong topic"
+    bad "the classes render ${distinct} distinct title(s), not eight: two of them share a heading and a finding lands under the wrong topic"
   fi
 
   # A class nobody put in the table is a usage error, not a generic heading.
@@ -6263,6 +6515,7 @@ phase_24_wake_rail() {
   check "the continuity program is installed" test -x "${CLAW_BIN}/session-continuity"
   check "the boot sentence it delivers carries no interpolation at all" \
     "${CLAW_BIN}/session-continuity" --law
+  check "the sign-in check is installed" test -x "${CLAW_BIN}/commonclaw-signin-check"
 
   # ---- the orchestration settings ----
   #
@@ -6293,7 +6546,14 @@ phase_24_wake_rail() {
   # w273. An operator reading a modification time to find when a decision last
   # changed was reading the date of the last apply.
   local cur_model="$DELEGATE_MODEL" cur_skip="$DELEGATE_SKIP_PERMISSIONS" kept=""
-  local before="" added="" want=""
+  local before="" added="" want="" rail_line=""
+  # THE CONTINUITY RAIL IS A FACT WHERE IT IS INSTALLED, and absent where it is
+  # not. The orchestrate skill's `spawn --check` reads this key to say whether a
+  # rail runs here, and a session never guesses which case holds. The installer
+  # above lays the program only on a claw with people, so the line follows the
+  # program rather than the release.
+  [ -x "${CLAW_BIN}/session-continuity" ] \
+    && rail_line="ORCHESTRATE_CONTINUITY_RAIL=\"${CLAW_BIN}/session-continuity\""
   if [ -r "$ORCHESTRATE_CONF_FILE" ]; then
     before="$(cat "$ORCHESTRATE_CONF_FILE")"
     local v
@@ -6313,19 +6573,21 @@ phase_24_wake_rail() {
 # ruling written there is either refused or overwritten. This is the layer a
 # machine's ruling survives in.
 #
-# The first three lines are facts about this claw and provisioning asserts them
-# on every run. The last two are decisions: they are seeded once and whatever
-# this claw carries afterwards is kept.
+# The lines above the model are facts about this claw and provisioning asserts
+# them on every run. The model and the permissions flag are decisions: they are
+# seeded once and whatever this claw carries afterwards is kept.
 ORCHESTRATE_SHARED_BUS="${BUS_HOME}"
 ORCHESTRATE_BUS_DIR="${BUS_HOME}"
-ORCHESTRATE_SUBSTRATE="claude"
+ORCHESTRATE_SUBSTRATE="claude"${rail_line:+
+${rail_line}}
 ORCHESTRATE_DELEGATE_MODEL="${cur_model}"
 ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
 ORCHEOF
 )"
   [ -n "$kept" ] && say "  kept ${kept} this claw already recorded in ${ORCHESTRATE_CONF_FILE}"
   local k
-  for k in ORCHESTRATE_SHARED_BUS ORCHESTRATE_BUS_DIR ORCHESTRATE_SUBSTRATE; do
+  for k in ORCHESTRATE_SHARED_BUS ORCHESTRATE_BUS_DIR ORCHESTRATE_SUBSTRATE \
+           ${rail_line:+ORCHESTRATE_CONTINUITY_RAIL}; do
     printf '%s\n' "$before" | grep -q "^${k}=" || added="${added:+${added}, }${k}"
   done
   # Both readings strip trailing newlines, and the write puts back exactly the
@@ -6346,6 +6608,10 @@ ORCHEOF
   check "the orchestration config hands a delegate the bus this claw carries" \
     bash -c "[ \"\$(sed -n 's/^ORCHESTRATE_BUS_DIR=\"\\(.*\\)\"$/\\1/p' '$ORCHESTRATE_CONF_FILE')\" = '$BUS_HOME' ]"
   check "the shared bus the config names exists on this claw" test -d "$BUS_HOME"
+  if [ -n "$rail_line" ]; then
+    check "the orchestration config names the continuity rail this claw runs" \
+      bash -c "[ \"\$(sed -n 's/^ORCHESTRATE_CONTINUITY_RAIL=\"\\(.*\\)\"$/\\1/p' '$ORCHESTRATE_CONF_FILE')\" = '${CLAW_BIN}/session-continuity' ]"
+  fi
 
   # A file every session reads has to be readable by every session.
   check "every member can read the orchestration config" \

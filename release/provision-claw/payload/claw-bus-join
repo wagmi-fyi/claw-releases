@@ -14,6 +14,24 @@ The handle is qualified with the unix account and the session id:
 `<user>-<first 8 of session id>`. Two members cannot collide, and the same
 member's two sessions cannot either. A resume carries its session id forward,
 so a resumed session re-registers the handle it already had.
+
+A PRINT-MODE SESSION GETS NO HANDLE, AND THE HOOK INPUT IS NOT WHAT SAYS SO.
+Measured 2026-09-26: the input for `claude -p` carries the same five keys as an
+interactive startup, with `source` reading `startup` in both, so nothing in the
+hook contract separates them. Every such call was leaving a handle on the board
+that nothing could ever reach, and the board carries dozens. What does separate
+them is the harness's own environment. Read on this machine the same day, each
+from a session started with none of another's environment: `-p` sets
+CLAUDE_CODE_ENTRYPOINT to `sdk-cli`, a desktop session sets it to
+`claude-desktop`, and a `claude --bg` background agent sets it at all. So the
+skip is on that one value, and the line this program prints names it.
+
+THE LIMIT OF THAT READING, STATED. It is the harness's environment, not a
+documented field of the hook contract, and any future caller that starts a
+long-running session through the same entrypoint would be skipped with it. A
+background agent is the case that matters here and it is not skipped, because it
+sets the variable to nothing at all. A claw that needs the other behaviour reads
+the printed line and changes this program.
 """
 import json
 import os
@@ -22,6 +40,10 @@ import subprocess
 import sys
 
 BUS = os.environ.get("CLAW_BUS_CLI", "/opt/commonclaw/bin/bus")
+# The entrypoint a non-interactive run of the harness sets. A session started
+# this way answers one prompt and exits, so an address for it is an address
+# nothing can use.
+SKIP_ENTRYPOINT = "sdk-cli"
 
 
 def whoami():
@@ -36,6 +58,15 @@ def say(msg):
 
 
 def main():
+    entrypoint = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+    if entrypoint == SKIP_ENTRYPOINT:
+        # BEFORE THE BUS IS EVEN LOOKED AT. This session answers one prompt and
+        # ends, so a handle for it is a row on the board that nothing can reach
+        # and nobody removes.
+        say("this is a non-interactive run of the harness "
+            f"(CLAUDE_CODE_ENTRYPOINT={entrypoint}), so it holds no bus address. "
+            "A session that answers one prompt and exits cannot be reached at one.")
+        return 0
     bus_dir = os.environ.get("SESSION_BUS_DIR", "")
     if not bus_dir:
         # The env var is set machine-wide beside this hook. Missing means the

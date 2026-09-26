@@ -1,6 +1,6 @@
 ---
 name: claw-ops
-description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, when a seat that has gone has to come off the roster, when checking whether a person's shell startup file exports a 1Password token, before a skill is installed for everybody on the claw outside a release, when a project's work has to run on a timer, when asking what is scheduled on this claw, or when a departed person's jobs must move accounts."
+description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, when a seat that has gone has to come off the roster, when checking whether a person's shell startup file exports a 1Password token, before a skill is installed for everybody on the claw outside a release, when a project's work has to run on a timer, when asking what is scheduled on this claw, when asking what the continuity rail has done for an account's orchestrators, or when a departed person's jobs must move accounts."
 ---
 
 # Claw Ops
@@ -21,6 +21,7 @@ A **claw** is one firm's Linux machine. **CommonClaw** is the project. A claw is
 |---|---|---|---|
 | Bootstrap a workspace | `operations/bootstrap-workspace.md` | `claw-admin` | A domain of work needs its own directory, group, manifest, and members |
 | Claw status | `operations/claw-status.md` | `member` | Somebody asks what exists on this claw, who reaches it, or whether the rail and the seats are healthy |
+| Continuity | `operations/continuity.md` | `member` | Somebody asks what the continuity rail has done for this account's orchestrators, or whether one is held |
 | Seats | `operations/seats.md` | `member`, `claw-admin` to retire | Somebody asks which core seats this claw expects, or a seat this claw expects has gone and its row has to come off |
 | Startup tokens | `operations/startup-tokens.md` | `claw-admin` | Somebody asks whether a person's shell startup file exports a 1Password token into every shell |
 | Schedule a job | `operations/schedule-job.md` | `member` | A project's work has to run on a timer, unattended |
@@ -42,6 +43,7 @@ Agent-invoked. Structured JSON to stdout, progress to stderr, `--help` on each. 
 |---|---|
 | `scripts/bootstrap-workspace.sh` | open the door, then run the claw's own scaffold behind it |
 | `scripts/claw-status.sh` | read this claw's state from what the caller can reach |
+| `scripts/continuity.sh` | read the continuity rail's own state for this account |
 | `scripts/seats.sh` | read the seat roster and the seat check's own recent verdicts |
 | `scripts/seats-retire.sh` | open the door, then run the claw's own seat retirement behind it |
 | `scripts/startup-tokens.sh` | open the door, then run the agents token door's startup-file survey behind it |
@@ -64,6 +66,7 @@ Report the outcome of a first run rather than assuming a step worked. An operati
 | `sudo` | The door to a privileged operation. The grant itself is installed at provisioning | `sudo -n -l` |
 | `systemctl` | The rail's last run comes from unit state | `systemctl --version` |
 | the claw's own seat check | It is the one reader of the roster's grammar, and the seats operation asks it rather than parsing that file a second time | it answers `--state` |
+| the claw's continuity rail | It is the one reader of which handles are orchestrators, and the continuity operation asks it rather than reading the bus a second time. Absent, the readout says so | it answers `--check` |
 | `loginctl` | Linger decides whether scheduled work runs with nobody logged in | `loginctl show-user <person> -p Linger` |
 
 ## Limits

@@ -35,9 +35,20 @@ table's `self` entry as of a date, so a new address means correcting that line,
 under the approval the runbook's change section names.
 
 **The firm has said who releases mail to people.** If it has not, that is
-question 5 of the elicitation below, and §2 answers it before §4 can run.
+question 5 of the elicitation below, and §3 answers it before §5 can run.
 
-## 1. Write the runbook where it rests, then record where that is
+## 1. Launch the project under orchestrate
+
+An email orchestrator is an orchestrator, so it is launched the way every
+orchestrator is. Run the orchestrate skill's launch operation for it first. That
+gives the session a project directory, a workpaper, and a row in its parent's
+index. In the workpaper's skills-in-use block, record this skill as the one guiding
+the run, with `operations/route-inbound.md` as the operation it runs between beats.
+
+Launched under this skill alone, the session holds no workpaper, so nothing brings
+it back after a gap.
+
+## 2. Write the runbook where it rests, then record where that is
 
 SKILL.md says where a firm's runbook rests: `communication-runbook.md`, in the
 email orchestrator's own directory, the one its session runs in. Copy
@@ -58,7 +69,7 @@ SKILL.md names, and `email self` prints that same path.
 The copy is the live document from that moment on, and the template is never
 edited for one firm.
 
-## 2. Fill the runbook in
+## 3. Fill the runbook in
 
 Walk every value written in angle brackets, in the order the template names
 them. `reference/runbook-elicitation.md` holds the question for each one, what
@@ -76,7 +87,7 @@ Where a firm cannot rule a value today, mark the sentence it belongs to
 `[draft]` and put the question on the named human's queue. A `[draft]` is an
 open question, and the gate counts them.
 
-## 3. Register the handle
+## 4. Register the handle
 
 The email orchestrator registers a bus handle from inside its own session.
 Registering from anywhere else records the wrong session, and every wake aimed
@@ -90,7 +101,7 @@ reports a fault.
 When this session is gone, the claw's mail alarm tells the firm's named person
 that its mail is waiting unread.
 
-## 4. The first routing-table entries
+## 5. The first routing-table entries
 
 An entry that carries the agent mark is what lets a message leave the firm with
 no person in the path. So an edit to the table is a change to the runbook, and
@@ -106,7 +117,7 @@ Add what the named human has approved, and nothing else:
 The `--agent` mark says the address is another machine. Leave it off and the
 address is a person, whose mail waits for a release.
 
-## 5. Say what the firm now has
+## 6. Say what the firm now has
 
 Tell the firm three things in plain words: the address mail comes from, what
 goes out on its own, and what waits for a person. They are the three sentences
@@ -114,6 +125,8 @@ somebody will ask about first, and they are all in the runbook already.
 
 ## Gate
 
+- The project has a workpaper from orchestrate's launch, and its skills-in-use
+  block names this skill.
 - `email status` answers, and names an adapter and an inbox.
 - The runbook sits at the path SKILL.md names, and holds no angle bracket.
 - `email self` prints `runbook`, and it is the file this launch wrote.

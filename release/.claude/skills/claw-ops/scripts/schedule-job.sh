@@ -397,8 +397,33 @@ link_one() { # link_one <source file>
 link_one "$SERVICE_FILE" || finish
 link_one "$TIMER_FILE"   || finish
 
+# THE CAUSE OF A MISSING UNIT, NAMED. A service manager keeps the groups it
+# started with, and with linger on it runs for weeks. A project in a workspace
+# granted after it started is a directory it cannot enter, so it cannot follow
+# the link and reports "Unit file ... does not exist", while the caller reads
+# the same file fine. Measured on a tenant claw 2026-09-26 (w299). The reading
+# is the manager's own group list, from /proc, against the group that owns the
+# project directory.
+name_enable_failure() { # name_enable_failure <the harness's last stderr line>
+  local load uid pid gid grp
+  load="$(systemctl --user show "${JOB}.timer" -p LoadState --value 2>/dev/null || true)"
+  uid="$(id -u)"
+  pid="$(systemctl show "user@${uid}.service" -p MainPID --value 2>/dev/null || true)"
+  gid="$(stat -c '%g' -- "$PROJECT_ABS" 2>/dev/null || true)"
+  grp="$(stat -c '%G' -- "$PROJECT_ABS" 2>/dev/null || true)"
+  if [ "$load" = "not-found" ] && [ -r "${USER_UNIT_DIR}/${JOB}.timer" ] \
+     && [ -n "$gid" ] && [ -r "/proc/${pid}/status" ] \
+     && ! awk -v g="$gid" '$1 == "Gid:" || $1 == "Groups:" { for (i = 2; i <= NF; i++) if ($i == g) f = 1 }
+                           END { exit f ? 0 : 1 }' "/proc/${pid}/status"; then
+    bad "systemd reports ${JOB}.timer missing, and the link resolves for $(id -un). The cause is the service manager: user@${uid}.service started before $(id -un) held ${grp}, and a running process keeps the groups it started with, so it cannot follow the link into ${PROJECT_ABS}. Restarting it ends what runs under it. The claw's admin runs 'sudo systemctl restart user@${uid}.service' once $(id -un) is done working, or the next apply restarts it when $(id -un) has no live session. Then run this again."
+  else
+    bad "enabling ${JOB}.timer failed: ${1:-systemd said nothing}"
+  fi
+}
+
 systemctl --user daemon-reload
-systemctl --user enable --now "${JOB}.timer" >/dev/null
+enable_err="$(systemctl --user enable --now "${JOB}.timer" 2>&1 >/dev/null)" \
+  || name_enable_failure "$(printf '%s\n' "$enable_err" | tail -1)"
 ACTION="scheduled"
 
 # ---------------------------------------------------------------- verify
