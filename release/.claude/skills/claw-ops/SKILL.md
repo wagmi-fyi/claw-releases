@@ -1,6 +1,6 @@
 ---
 name: claw-ops
-description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, when a seat that has gone has to come off the roster, when checking whether a person's shell startup file exports a 1Password token, or before a skill is installed for everybody on the claw outside a release."
+description: "Operate a claw from inside it. Use when somebody on a claw needs a new workspace for a domain of work, when asking which workspaces exist and who reaches them, when checking the backup rail's last run, when checking whether a core login is about to lapse, when asking which core seats this claw expects, when a seat that has gone has to come off the roster, when checking whether a person's shell startup file exports a 1Password token, before a skill is installed for everybody on the claw outside a release, when a project's work has to run on a timer, when asking what is scheduled on this claw, or when a departed person's jobs must move accounts."
 ---
 
 # Claw Ops
@@ -23,6 +23,9 @@ A **claw** is one firm's Linux machine. **CommonClaw** is the project. A claw is
 | Claw status | `operations/claw-status.md` | `member` | Somebody asks what exists on this claw, who reaches it, or whether the rail and the seats are healthy |
 | Seats | `operations/seats.md` | `member`, `claw-admin` to retire | Somebody asks which core seats this claw expects, or a seat this claw expects has gone and its row has to come off |
 | Startup tokens | `operations/startup-tokens.md` | `claw-admin` | Somebody asks whether a person's shell startup file exports a 1Password token into every shell |
+| Schedule a job | `operations/schedule-job.md` | `member` | A project's work has to run on a timer, unattended |
+| List jobs | `operations/list-jobs.md` | `member` | Somebody asks what is scheduled on this claw and who owns it |
+| Adopt jobs | `operations/adopt-jobs.md` | `member` | A departed person's jobs have to run under another account |
 
 ## Reference
 
@@ -42,6 +45,10 @@ Agent-invoked. Structured JSON to stdout, progress to stderr, `--help` on each. 
 | `scripts/seats.sh` | read the seat roster and the seat check's own recent verdicts |
 | `scripts/seats-retire.sh` | open the door, then run the claw's own seat retirement behind it |
 | `scripts/startup-tokens.sh` | open the door, then run the agents token door's startup-file survey behind it |
+| `scripts/schedule-job.sh` | check a project's unit files, then link and enable them for the caller |
+| `scripts/list-jobs.sh` | read the caller's timers, and every job declared in the tree |
+| `scripts/adopt-jobs.sh` | prove a departed account can run nothing, then schedule its jobs here |
+| `scripts/job-lib.sh` | sourced, not run: the one reading of a timer's timestamps |
 
 ## What is proven
 
@@ -57,6 +64,7 @@ Report the outcome of a first run rather than assuming a step worked. An operati
 | `sudo` | The door to a privileged operation. The grant itself is installed at provisioning | `sudo -n -l` |
 | `systemctl` | The rail's last run comes from unit state | `systemctl --version` |
 | the claw's own seat check | It is the one reader of the roster's grammar, and the seats operation asks it rather than parsing that file a second time | it answers `--state` |
+| `loginctl` | Linger decides whether scheduled work runs with nobody logged in | `loginctl show-user <person> -p Linger` |
 
 ## Limits
 
@@ -65,5 +73,6 @@ This skill must not:
 - Do root work of its own. A privileged operation calls the claw's own root-owned script through the sudo door, and there is no second implementation of it here.
 - Provision or repair the claw. That plane runs from outside and holds its own skill.
 - Read another person's home, credentials, or session history.
+- Schedule work under another person's account, or read theirs.
 - Print, log, or carry a credential value. Expiry fields and lengths only.
 - Report something it could not observe as absent. Unreadable and missing are different answers.

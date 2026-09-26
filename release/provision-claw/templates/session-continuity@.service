@@ -1,0 +1,37 @@
+# Installed VERBATIM, never rendered. The %i is systemd's own instance
+# expansion, and render-template.sh must not touch this file.
+#
+# One instance per account: session-continuity@<account>.service. It runs AS
+# that account, for the same reason the other two rails do. A session is
+# resumed from that account's transcript, under that account's harness login,
+# and starting somebody else's session is a different act with a different
+# consent story.
+#
+# A BEAT, NOT A WATCHER. The wake rail watches in seconds because it delivers
+# into a live process, and a live process can leave. This rail starts one that is
+# already gone, so nothing is lost by arriving late. Two minutes is the worst
+# case a message waits.
+#
+# IT ALSO ENDS WHAT IT STARTED. A resumed session does not exit by itself here,
+# so a pass stops one this rail resumed once it reads idle and its transcript has
+# stopped growing. Without that, every wake leaves a session behind.
+#
+# WHAT IT DOES BEFORE IT RESUMES ANYTHING is in the header of
+# /opt/commonclaw/bin/session-continuity. The twin check is there, the two resume
+# forms are there, and so is the hold that stops a signed-out harness being asked
+# every two minutes forever.
+[Unit]
+Description=Session continuity for %i: resume an orchestrator that has mail, end it when it goes quiet
+Documentation=file:/opt/commonclaw/doc/wake-rail.md
+
+[Service]
+Type=oneshot
+User=%i
+ExecStart=/opt/commonclaw/bin/session-continuity --once
+# A pass that resumes waits thirty seconds to read whether the session came up,
+# once per handle, so a board of a dozen orchestrators that all have mail is the
+# longest pass. It takes no --idle-stop-minutes: that flag is for driving a proof
+# and the shipped threshold is the program's own.
+TimeoutStartSec=15min
+Nice=10
+IOSchedulingClass=idle

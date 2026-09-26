@@ -81,7 +81,34 @@ PING_TIMEOUT=10
   esac
 }
 
-log() { logger -t commonclaw-memory-check -p "user.$1" -- "$2" 2>/dev/null || true; printf '[%s] %s\n' "$1" "$2" >&2; }
+# IS THIS RUN'S STANDARD ERROR THE JOURNAL SYSTEMD GAVE IT? systemd writes the
+# device and the inode of that stream into JOURNAL_STREAM. The variable is
+# inherited by anything a unit starts, so the reading is on the stream. A run
+# whose standard error went to a file answers no, and a control reading that
+# file still gets the line.
+#
+# THE STREAM IS READ ON FD 3. A 2>/dev/null on the reading command sends that
+# command's own fd 2 to /dev/null before it runs, so it would measure /dev/null
+# and answer no every time. fd 3 is a copy of this script's standard error,
+# taken before the stat's own is sent away.
+stderr_is_journal() {
+  [ -n "${JOURNAL_STREAM:-}" ] || return 1
+  local here
+  here="$( { stat -Lc '%d:%i' /proc/self/fd/3 2>/dev/null; } 3>&2 )"
+  [ -n "$here" ] && [ "$JOURNAL_STREAM" = "$here" ]
+}
+
+# ONE LINE PER EVENT. Under its own unit the logger line is already in the
+# journal, and the copy on standard error is the same line a second time. It
+# arrives under a different identifier, because the unit sets none and journald
+# falls back to this file's basename, so a reader filtering on the tag sees one
+# line and a reader reading the unit sees both. The logger line is the one to
+# keep: it carries the level as the journal's own priority, and it carries the
+# tag.
+log() {
+  logger -t commonclaw-memory-check -p "user.$1" -- "$2" 2>/dev/null || true
+  stderr_is_journal || printf '[%s] %s\n' "$1" "$2" >&2
+}
 
 # ------------------------------------------------------------------ the conf
 #

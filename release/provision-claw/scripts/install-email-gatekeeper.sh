@@ -407,13 +407,20 @@ fi
 
 # WHERE AN ALERT GOES, said in words. The last MAIL_ALERT_TO line wins, as it
 # does for the check. An empty value is a claw that has not named a person yet.
+#
+# THE ADDRESS IS NAMED BY PRESENCE, NEVER BY VALUE. This runs inside an apply,
+# and an apply's output is kept as a log and committed into a release record.
+# Measured 2026-09-21, w269 and w273: the address reached both apply logs of a
+# ride, and a sweep that knew the two obvious forms of the line missed it. The
+# line to read for the value is the check's own --state, which a person runs
+# when they want it.
 ALERT_TO=""
 if [ -r "$CONF" ]; then
   ALERT_TO="$(grep -E '^[[:space:]]*MAIL_ALERT_TO[[:space:]]*=' "$CONF" | tail -1 | cut -d= -f2- | tr -d "\"' \t")"
 fi
 NOTIFY_WIRED=0; [ -e /etc/commonclaw/notify.conf ] && NOTIFY_WIRED=1
 if [ -n "$ALERT_TO" ]; then
-  ok "the mail check tells ${ALERT_TO} by mail when mail waits past its threshold, and the claw's notifier as well"
+  ok "the mail check tells one person by mail when mail waits past its threshold, and the claw's notifier as well. ${CHECK_BIN} --state names them"
 elif [ "$NOTIFY_WIRED" = 1 ]; then
   warn "MAIL_ALERT_TO in ${CONF} is empty, so the mail check tells the claw's notifier only and no person by mail. Set it to one person's address to have them told"
 else

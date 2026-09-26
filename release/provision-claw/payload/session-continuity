@@ -1,0 +1,964 @@
+#!/usr/bin/env python3
+"""session-continuity -- bring an orchestrator's session back when mail waits for it.
+
+THE DEFECT THIS CLOSES. An orchestrator is a registration on the bus and a
+workpaper on disk. Its process is not part of it. A background session ends, the
+desktop app moves a conversation, and the handle reads gone while the work it
+names is still open. Mail then sits in that inbox until somebody looks. The wake
+rail beside this program tells a live session it has mail and refuses a gone one,
+by its own law. This program is the other half: it starts the recorded session
+again, under its owner, from its own transcript, and ends it when it goes quiet.
+
+WHAT IT DELIVERS. One fixed sentence, BOOT_SENTENCE below, carrying no
+interpolation at all. It says the rail resumed you and that your inbox is what to
+read. Everything the session then does comes from the bus and from its own
+workpaper. `--law` re-derives the field set from the string at runtime and the
+program refuses to run when it carries a field, so the claim is a command anybody
+can run rather than a grep of the author's honesty.
+
+A RESUME IS NOT A FORK, AND ONE RESUME FORM MAKES IT ONE. `--resume` continues
+one session id and one transcript. A session the harness has already run in the
+background carries its own saved options, and flags passed to a resume of that
+session start a COPY under a new session id; it says so on stderr, after the copy
+exists. Measured 2026-09-25: a first resume with flags continued session
+0be4ddbb, the next resume of it with the same flags started 3273f5c5 carrying a
+copy of its whole history, and a resume with no flags continued 3273f5c5 and kept
+its id.
+
+So there are two forms. A session the harness lists with kind `background` is
+resumed bare and wakes with the name, model and permission flag it already has. A
+session with no row takes the flags, which set those three the first time. A
+listing that cannot be read is refused, because a flagged resume of the wrong
+case is the one outcome nothing later can undo.
+
+THE TWIN CHECK, BOTH HALVES, BEFORE ANY RESUME.
+
+  1. No live process on this machine carries the handle's session id. Read from
+     the harness's own session records through `session-guard`, which is the one
+     reading of that question the wake rail and the sweeper also take.
+  2. No live session carries the handle's recorded address or its handle name.
+     The app can continue a conversation under a new session id while the bus
+     still records the old one, and the name is what survives that move.
+
+Either half true means the session is already here. The handle is handed to the
+wake rail's adapter for a nudge and nothing is resumed.
+
+THE RAIL ENDS WHAT IT STARTED. A resumed session does not exit by itself.
+Measured 2026-09-25: one sat idle 29 minutes holding 351 MB and was still there.
+So a pass stops a session this rail resumed once the harness listing reads it
+idle and its transcript has not grown for the threshold. Two readings, because
+the listing alone would end a session between two turns of work. `claude stop`
+keeps the conversation, so the next pass resumes the same session from the same
+transcript. Only what this rail resumed, named in its state file, and only once.
+
+WHAT IT REFUSES, RATHER THAN WARNS ABOUT. A handle whose record carries no
+session id: there is nothing to resume, and searching for one is three chances to
+resume a stranger. A recorded working directory this account cannot enter: a
+session started somewhere else is a session in the wrong place. A bus directory
+other than the one /etc/orchestrate.conf names: this program starts processes,
+and a bus nobody declared is not the board it may act on.
+
+THE HOLD IS THE SIGN-OUT CASE. A resume that exits non-zero, or whose process is
+not alive thirty seconds later, writes a hold carrying the exit code and the last
+line of stderr, and sends one line to the `human` handle. No handle of this
+account is resumed again until `--clear-hold` clears it. A harness signed out
+refuses every resume, and a rail that kept trying would start a login attempt
+every two minutes and say nothing anybody reads. The hold is a file, so the
+sign-out alarm can read the same answer later.
+
+Nudging and stopping go on under a hold. Neither is the act that was failing.
+
+AN ACTING PASS PRUNES ITS OWN STATE DIRECTORY. A handle's file that nothing has
+written to in thirty days is removed, unless it carries a hold or names a session
+this rail resumed and has not stopped. Both of those say something is outstanding,
+and outstanding does not expire.
+
+  session-continuity --check           print what a pass would do; do nothing
+  session-continuity --once            one pass; this is what the timer runs
+  session-continuity --once <handle>   the same pass, acting on those handles
+                                       alone. What the board says is unchanged:
+                                       every other handle is still listed with
+                                       the action it would have taken. It is
+                                       what brings one orchestrator back without
+                                       waking every one an account holds
+  session-continuity --law             print the boot sentence and prove it
+                                       carries no interpolation
+  session-continuity --clear-hold <h>  clear that handle's hold
+
+  --idle-stop-minutes <n>              how long a session this rail resumed may
+                                       sit quiet before a pass ends it. It is
+                                       there to drive a proof; the units pass
+                                       none and take the default
+
+EXIT CODES. 0 the pass ran. 1 the sentence law is broken. 2 usage. 3 a wall: the
+bus is not the declared one, session-guard is missing, the wake rail this program
+hands a twin to is missing, or the harness command line is absent.
+"""
+
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pwd
+import re
+import shutil
+import string
+import subprocess
+import sys
+import time
+
+# ------------------------------------------------------------- THE SENTENCE
+#
+# NO format field, and no other way to build delivered text. The wake rail
+# beside this program allows itself one field, the bus directory, because its
+# sentence names the bus to read. This one names nothing: the session it reaches
+# finds its own bus the way it found it before.
+BOOT_SENTENCE = (
+    "The continuity rail resumed you because mail waits for you. "
+    "Run the orchestrate skill's resume operation, then read your inbox."
+)
+
+# %-style and str.format are the two ways a Python string interpolates. The law
+# check below proves the sentence carries neither.
+PERCENT_FIELD = re.compile(r"%[^%]")
+
+# What a model id looks like, which is anything the harness accepts after
+# --model. The point of the test is what it excludes: the harness's own
+# `<synthetic>` placeholder, and an empty field.
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# The bracketed reference the agent listing appends to a name it shows twice. A
+# handle records the listing's whole string as its address, and the harness's
+# session record carries the name without it, so a comparison of the two has to
+# take the reference off first.
+LISTING_REF = re.compile(r"\s*\[[0-9a-f]{4,}\]$")
+
+CONF = os.environ.get("ORCHESTRATE_CONF", "/etc/orchestrate.conf")
+BIN_DIR = "/opt/commonclaw/bin"
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROLE = "orchestrator"
+# How long the resumed process gets to appear in the harness's session records.
+# A background session writes its record as it starts; thirty seconds is the
+# measured start plus room, and it is the whole cost of a pass that resumed.
+ALIVE_AFTER_SECS = 30
+# A `claude --bg` call returns as soon as the session is started. A call still
+# running after this long has not returned at all, which is its own failure.
+SPAWN_TIMEOUT_SECS = 120
+# How long a session this rail resumed may sit quiet before the rail ends it.
+# `--idle-stop-minutes` moves it for a proof; the units pass none.
+IDLE_STOP_MINUTES = 15
+
+
+def law_fields():
+    return {f for _, f, _, _ in string.Formatter().parse(BOOT_SENTENCE) if f is not None}
+
+
+def lawful():
+    return not law_fields() and not PERCENT_FIELD.search(BOOT_SENTENCE)
+
+
+def log(msg):
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+# --------------------------------------------------------------- the settings
+#
+# The bus and the fallback model come from the orchestrate settings seam's
+# machine layer, which is the file every tool here already reads. This program
+# adds no conf of its own: one more file would be one more place the bus is
+# named, and two names for one bus is the fault this rail is most able to cause.
+def conf_value(key):
+    pattern = re.compile(r"^[ \t]*%s[ \t]*[:=][ \t]*(.*)$" % re.escape(key))
+    try:
+        with open(CONF, "r", encoding="utf-8") as fh:
+            for line in fh:
+                m = pattern.match(line)
+                if not m:
+                    continue
+                raw = m.group(1).split("#", 1)[0].strip()
+                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+                    raw = raw[1:-1]
+                return raw or None
+    except OSError:
+        return None
+    return None
+
+
+def beside(name):
+    """A sibling of this program, or the copy the claw installs.
+
+    The four rails land in one directory on a claw, so a sibling is the ordinary
+    answer. A program read out of a source tree has no siblings, and there the
+    installed copy is the one that agrees with the running rail.
+    """
+    local = os.path.join(HERE, name)
+    if os.path.exists(local):
+        return local
+    return os.path.join(BIN_DIR, name)
+
+
+def state_dir():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "commonclaw", "continuity")
+
+
+def harness():
+    """The agent command line, or "" when this account has none.
+
+    It is installed per account, under a home directory, so a unit's minimal
+    PATH does not find it and the home path is the fallback.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    guess = os.path.expanduser("~/.local/bin/claude")
+    return guess if os.access(guess, os.X_OK) else ""
+
+
+# ---------------------------------------------------------------- the readings
+def load_module(path, name):
+    """A program beside this one, loaded as a module, or (None, why).
+
+    Without bytecode: this file runs from a skill tree and from the machine's bin
+    directory, and a cache written into either is a file nobody shipped.
+    """
+    if not os.path.isfile(path):
+        return None, "no %s at %s" % (name, path)
+    sys.dont_write_bytecode = True
+    try:
+        loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+    except Exception as exc:  # a broken sibling is reported, never half-used
+        return None, "%s at %s did not load: %s: %s" % (name, path, type(exc).__name__, exc)
+    return mod, ""
+
+
+def unread_count(bus_dir, handle):
+    """How many messages sit past the handle's cursor, and the newest one's id."""
+    inbox = os.path.join(bus_dir, "inbox", "%s.jsonl" % handle)
+    try:
+        with open(inbox, "rb") as fh:
+            lines = [b for b in fh.read().splitlines() if b.strip()]
+    except OSError:
+        return 0, None
+    cursor = 0
+    try:
+        with open(os.path.join(bus_dir, "cursors", "%s.cursor" % handle), "r") as fh:
+            cursor = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        cursor = 0
+    if len(lines) <= cursor:
+        return 0, None
+    newest = None
+    try:
+        newest = json.loads(lines[-1].decode("utf-8", "replace")).get("id")
+    except ValueError:
+        newest = None
+    return len(lines) - cursor, newest
+
+
+def saved_sessions(listing):
+    """The sessions that carry their own saved options: the background rows.
+
+    None when the listing could not be read, which is not the same answer as an
+    empty one. One says nothing is saved, the other says nothing is known.
+    """
+    if listing is None:
+        return None
+    return {sid for sid, row in listing.items() if row.get("kind") == "background"}
+
+
+def listed_sessions(cmd):
+    """Every session the harness lists, by session id, or None when it cannot be read.
+
+    One subprocess a pass, and two questions come out of it: which sessions carry
+    saved options, and which of the ones this rail resumed are idle now.
+    """
+    try:
+        proc = subprocess.run([cmd, "agents", "--json", "--all"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", "replace") or "null")
+    except ValueError:
+        return None
+    rows = data if isinstance(data, list) else (data or {}).get("agents")
+    if not isinstance(rows, list):
+        return None
+    return {r["sessionId"]: r for r in rows
+            if isinstance(r, dict) and isinstance(r.get("sessionId"), str) and r["sessionId"]}
+
+
+def transcript_path(session):
+    """The transcript file for one session id, or "".
+
+    The project directory is named for the directory a session started in, which
+    is not always the one the handle recorded, so the file is found by its own
+    name. The session id is unique, so the search cannot land on a stranger.
+    """
+    root = os.path.expanduser("~/.claude/projects")
+    try:
+        for project in sorted(os.listdir(root)):
+            candidate = os.path.join(root, project, "%s.jsonl" % session)
+            if os.path.isfile(candidate):
+                return candidate
+    except OSError:
+        return ""
+    return ""
+
+
+def transcript_model(session):
+    """The model the transcript's last assistant turn records, or "".
+
+    A resumed session that came back on another model is a charter running
+    against dispositions it was not written for. The transcript is the only
+    record of which one it was, and its path is not derivable from the handle:
+    the project directory is named for the directory the session started in,
+    which is not always the one the handle recorded. So the file is found by its
+    own name, which is the session id and is unique.
+
+    A TURN THE HARNESS WROTE FOR ITSELF NAMES NO MODEL. It records the word
+    `<synthetic>` in the model field, and a resume asking for that exits with a
+    usage error. Read on this machine 2026-09-25: four of six resumable
+    orchestrator transcripts ended on such a turn. So a value not shaped like a
+    model id is passed over, and the newest one that is shaped like one answers.
+    """
+    path = transcript_path(session)
+    if not path:
+        return "", ""
+    model = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                msg = rec.get("message") if isinstance(rec, dict) else None
+                if not (isinstance(msg, dict) and msg.get("role") == "assistant"):
+                    continue
+                if MODEL_ID.match(str(msg.get("model") or "")):
+                    model = str(msg["model"])
+    except OSError:
+        return "", path
+    return model, path
+
+
+# ---------------------------------------------------------------------- state
+def state_path(handle):
+    return os.path.join(state_dir(), "%s.json" % re.sub(r"[^A-Za-z0-9_.-]", "_", handle))
+
+
+def read_state(handle):
+    try:
+        with open(state_path(handle), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(handle, patch):
+    data = read_state(handle)
+    data.update(patch)
+    data["handle"] = handle
+    path = state_path(handle)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log("could not write %s: %s" % (path, exc))
+    return data
+
+
+def holds():
+    """Every hold this account carries, as (handle, hold) pairs.
+
+    A hold is per handle and it stops every handle, because what a hold usually
+    means is that the harness itself refuses. Trying the next handle would find
+    the same refusal and write the same line.
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(state_dir()))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(state_dir(), name), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("hold"), dict):
+            out.append((data.get("handle") or name[:-5], data["hold"]))
+    return out
+
+
+def prune_state(older_than=30 * 86400):
+    """Drop state for a handle nothing has written to in a month.
+
+    A handle that is gone leaves its file behind forever otherwise, the way the
+    wake rail's dedupe state did before it pruned. Every wake, resume and stop
+    rewrites the file, so the modification time is the handle's own activity and
+    thirty days is far outside any window a pass reads.
+
+    TWO FILES SURVIVE WHATEVER THEIR AGE. A file carrying a hold is the one
+    record that this account is stopped, and it is cleared by a person running
+    --clear-hold, which may be a long time after the hold was written. A file
+    naming a resumed_session is a session this rail started and has not stopped,
+    and removing it would leave that session running with nothing left that
+    knows to end it. Age is the wrong reading for both: each says something is
+    outstanding, and outstanding does not expire.
+
+    Returns the handles removed, so a pass can say what it dropped.
+    """
+    cutoff = time.time() - older_than
+    dropped = []
+    try:
+        names = sorted(os.listdir(state_dir()))
+    except OSError:
+        return dropped
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(state_dir(), name)
+        try:
+            if os.path.getmtime(path) >= cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if isinstance(data.get("hold"), dict) or data.get("resumed_session"):
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            continue
+        dropped.append(data.get("handle") or name[:-5])
+    return dropped
+
+
+# ------------------------------------------------------------------- the acts
+def tell_human(bus_dir, handle, reason):
+    """One line to the `human` handle, and nothing else anywhere on the bus.
+
+    The wake rail writes to no bus at all, because a rail that filed its own
+    failures into an inbox would raise unread mail and nudge itself forever. This
+    program writes to one handle that the rail skips by name and that nobody
+    drains. So the line reaches the person who has to sign in, and it starts no
+    loop.
+
+    The body carries the handle and the reason. It never carries the harness's
+    own output, which is where a token or a path a person did not choose to share
+    would appear.
+    """
+    bus = beside("bus")
+    if not os.access(bus, os.X_OK):
+        log("no bus command at %s, so the hold on %s reached nobody" % (bus, handle))
+        return False
+    env = dict(os.environ, SESSION_BUS_DIR=bus_dir)
+    body = "%s could not be resumed: %s. No handle of this account is resumed until the hold is cleared." % (
+        handle, reason)
+    try:
+        proc = subprocess.run(
+            [bus, "send", "session-continuity", "human",
+             "continuity rail: %s is held" % handle, body],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log("could not tell human about %s: %s: %s" % (handle, type(exc).__name__, exc))
+        return False
+    if proc.returncode != 0:
+        log("bus send about %s exited %d" % (handle, proc.returncode))
+        return False
+    return True
+
+
+def nudge(rail, adapter_dir, bus_dir, handle, rec, pid):
+    """Hand one handle to the wake rail's adapter, with the rail's own sentence.
+
+    The sentence is taken from the rail rather than written here. Two copies of
+    one law drift, and the rail's `--law` would then prove nothing about what a
+    session actually received.
+
+    The session id is left out of the payload on purpose. A twin found by name is
+    the case where the app moved the conversation to a new id, so the adapter's
+    equality test against the bus record would refuse the very session that is
+    live. What identifies the target here is its own pid and its own socket.
+    """
+    adapter = os.path.join(adapter_dir, "claude")
+    if not os.access(adapter, os.X_OK):
+        return {"outcome": "failed", "reason": "no adapter at %s" % adapter}
+    payload = {
+        "handle": handle, "bus_dir": bus_dir, "session": "", "pid": pid,
+        "owner": rec.get("owner") or "", "address": rec.get("address") or "",
+        "pane": rec.get("pane") or "", "cwd": rec.get("cwd") or "",
+        "unread": 0, "text": rail.nudge_text(bus_dir),
+    }
+    try:
+        proc = subprocess.run(
+            [adapter, "deliver"], input=json.dumps(payload).encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"outcome": "failed", "reason": "%s: %s" % (type(exc).__name__, exc)}
+    try:
+        return json.loads(proc.stdout.decode("utf-8", "replace").strip() or "{}")
+    except ValueError:
+        return {"outcome": "failed", "reason": "the adapter spoke something other than JSON"}
+
+
+def resume(guard, cmd, handle, rec, model, bare):
+    """Start the recorded session again, then read whether it is here.
+
+    TWO FORMS, AND THE WRONG ONE MAKES A COPY. A session the harness has already
+    run in the background carries its own saved options, and flags passed to a
+    resume of it start a copy under a new session id. So a saved session is
+    resumed bare and wakes with the name, model and permission flag it already
+    has. A session with no saved options takes the flags, which is what sets
+    those three the first time.
+
+    The reading afterwards is the same one the twin check makes: a live process
+    carrying this session id. The harness's own records answer it, so nothing
+    here trusts the exit code of a command that returns before the session is up,
+    and a resume that made a copy reads as a failure rather than a success.
+    """
+    session = rec["session"]
+    argv = [cmd, "--bg", "--resume", session]
+    if not bare:
+        argv += ["--name", handle, "--model", model, "--dangerously-skip-permissions"]
+    argv.append(BOOT_SENTENCE)
+    try:
+        proc = subprocess.run(
+            argv, cwd=rec["cwd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=SPAWN_TIMEOUT_SECS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, "the harness did not return: %s: %s" % (type(exc).__name__, exc)
+    if proc.returncode != 0:
+        tail = [l for l in proc.stderr.decode("utf-8", "replace").splitlines() if l.strip()]
+        return False, "the harness exited %d: %s" % (
+            proc.returncode, tail[-1].strip() if tail else "it wrote nothing to stderr")
+    time.sleep(ALIVE_AFTER_SECS)
+    if guard.generations(session):
+        return True, "a process carries session %s" % session[:8]
+    return False, "the harness exited 0 and no process carried the session %ds later" % ALIVE_AFTER_SECS
+
+
+# ------------------------------------------------------------------ the stop
+def stop_pass(cmd, listing, idle_stop_minutes, act):
+    """End the sessions this rail resumed that have gone quiet.
+
+    A resumed session does not exit here. Measured 2026-09-25: one sat idle for 29
+    minutes holding 351 MB and was still there. So the rail ends what it started,
+    and an orchestrator's resting state stays what the design says it is, a
+    registration and a workpaper with no process.
+
+    ONLY WHAT THIS RAIL RESUMED, AND ONLY ONCE. The state file names the session
+    each resume started, and a stop clears that name. Nothing else on the board is
+    touched: a session somebody else started is somebody else's.
+
+    QUIET MEANS TWO READINGS, NOT ONE. The harness's listing says idle, and the
+    transcript has not grown for the threshold. The listing alone would end a
+    session between two turns of work it is in the middle of.
+
+    `claude stop` keeps the conversation, so the next pass resumes the same
+    session from the same transcript. Nothing is destroyed.
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(state_dir()))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        data = read_state(name[:-5])
+        session = data.get("resumed_session")
+        if not isinstance(session, str) or not session:
+            continue
+        handle = data.get("handle") or name[:-5]
+        item = {"handle": handle, "session": session}
+        row = (listing or {}).get(session)
+        if listing is None:
+            item["outcome"], item["detail"] = "waiting", "the harness's listing could not be read"
+            out.append(item)
+            continue
+        if row is None or not row.get("pid"):
+            item["outcome"] = "ended"
+            item["detail"] = "it had already ended, so there was nothing to stop"
+            if act:
+                write_state(handle, {"resumed_session": None, "stopped_at": now_iso(),
+                                     "stop_detail": item["detail"]})
+            out.append(item)
+            continue
+        if row.get("status") != "idle":
+            item["outcome"], item["detail"] = "working", "the listing reads %s" % row.get("status")
+            out.append(item)
+            continue
+        path = transcript_path(session)
+        quiet = None
+        try:
+            quiet = (time.time() - os.path.getmtime(path)) / 60.0 if path else None
+        except OSError:
+            quiet = None
+        if quiet is None:
+            item["outcome"] = "waiting"
+            item["detail"] = "no transcript for it, so nothing says how long it has been quiet"
+            out.append(item)
+            continue
+        item["quiet_minutes"] = round(quiet, 1)
+        if quiet < idle_stop_minutes:
+            item["outcome"] = "waiting"
+            item["detail"] = ("quiet %.1f of the %d minutes" % (quiet, idle_stop_minutes))
+            out.append(item)
+            continue
+        if not act:
+            item["outcome"], item["detail"] = "would stop", "quiet %.1f minutes" % quiet
+            out.append(item)
+            continue
+        # THE JOB ID, NOT THE SESSION ID. The listing carries both, and only the
+        # short `id` addresses a job: `claude stop <session id>` answers "No job
+        # matching". Measured 2026-09-25 against a session whose two fields
+        # differ only in length, so a reader cannot tell them apart by eye.
+        job = row.get("id") or session
+        try:
+            proc = subprocess.run([cmd, "stop", job], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, timeout=60)
+            ok = proc.returncode == 0
+            why = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            ok, why = False, ["%s: %s" % (type(exc).__name__, exc)]
+        item["job"] = job
+        item["outcome"] = "stopped" if ok else "failed"
+        item["detail"] = ("quiet %.1f minutes, the conversation is kept" % quiet if ok
+                          else (why[-1] if why else "the harness gave no reason"))
+        if ok:
+            write_state(handle, {"resumed_session": None, "stopped_at": now_iso(),
+                                 "stop_detail": item["detail"]})
+        log("%s: stop %s -- %s" % (handle, item["outcome"], item["detail"]))
+        out.append(item)
+    return out
+
+
+# ------------------------------------------------------------------- the pass
+def survey(guard, listing, bus_dir, me, only=()):
+    """One row per orchestrator handle this account holds, with what a pass owes it.
+
+    Every such handle is listed, including the quiet ones, because `--check` is
+    read to learn what the rail covers and a handle left out of it reads exactly
+    like a handle the rail does not know about.
+
+    `only` narrows what a pass acts on, and nothing else. The rows outside it are
+    still listed and still carry the action they would have taken, so the reading
+    is of the whole board whatever the pass touches.
+    """
+    rows = []
+    try:
+        with open(os.path.join(bus_dir, "handles.json"), "r", encoding="utf-8") as fh:
+            handles = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return rows, "cannot read the board at %s: %s" % (bus_dir, exc)
+    if not isinstance(handles, dict):
+        return rows, "the board at %s is not a JSON object" % bus_dir
+
+    live = guard.live_records()
+    saved = saved_sessions(listing)
+    for handle, rec in sorted(handles.items()):
+        if not isinstance(rec, dict) or rec.get("role") != ROLE or rec.get("owner") != me:
+            continue
+        unread, newest = unread_count(bus_dir, handle)
+        row = {"handle": handle, "session": rec.get("session") or "", "unread": unread,
+               "newest_id": newest, "address": rec.get("address") or "",
+               "cwd": rec.get("cwd") or ""}
+        rows.append(row)
+        if unread <= 0:
+            row["action"], row["reason"] = "idle", "no mail, nothing to do"
+            continue
+        if not row["session"]:
+            row["action"] = "refused"
+            row["reason"] = "the record carries no session id, so there is nothing to resume"
+            continue
+        if not (os.path.isdir(row["cwd"]) and os.access(row["cwd"], os.X_OK)):
+            row["action"] = "refused"
+            row["reason"] = ("the recorded directory %s is not one this account can enter"
+                             % (row["cwd"] or "<none>"))
+            continue
+        carriers = guard.generations(row["session"], live)
+        wanted = {handle, row["address"], LISTING_REF.sub("", row["address"])} - {""}
+        named = [r for r in live
+                 if r["name"] in wanted and r["session"] != row["session"]]
+        if carriers:
+            top = carriers[-1]
+            row["action"] = "nudge"
+            row["pid"] = top["pid"]
+            row["reason"] = ("session %s already runs in pid %d, so the session is here"
+                             % (row["session"][:8], top["pid"]))
+            continue
+        if named:
+            top = named[-1]
+            row["action"] = "nudge"
+            row["pid"] = top["pid"]
+            row["reason"] = ("pid %d carries the name '%s' under session %s, so the "
+                             "conversation moved and the session is here"
+                             % (top["pid"], top["name"], top["session"][:8]))
+            continue
+        # WHICH RESUME FORM. A listing that could not be read decides nothing,
+        # and a flagged resume of a saved session is the one outcome nothing
+        # later can undo, so an unreadable listing is refused.
+        if saved is None:
+            row["action"] = "refused"
+            row["reason"] = ("the harness's session listing could not be read, so nothing "
+                             "says which resume form this session takes")
+            continue
+        row["bare"] = row["session"] in saved
+        row["action"] = "resume"
+        row["reason"] = "no process carries the session and no live session carries its name"
+        if row["bare"]:
+            row["model_source"] = "the session's saved options"
+            continue
+        model, path = transcript_model(row["session"])
+        row["model"] = model or (conf_value("ORCHESTRATE_DELEGATE_MODEL") or "")
+        row["model_source"] = "the transcript" if model else CONF
+        row["transcript"] = path
+        if not row["model"]:
+            row["action"] = "refused"
+            row["reason"] = ("no model: this session carries no saved options, the transcript "
+                             "records none and %s names no ORCHESTRATE_DELEGATE_MODEL" % CONF)
+    return rows, ""
+
+
+def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minutes=IDLE_STOP_MINUTES,
+             act=True):
+    listing = listed_sessions(cmd)
+    rows, why = survey(guard, listing, bus_dir, me, only)
+    result = {"bus_dir": bus_dir, "user": me, "only": sorted(only),
+              "idle_stop_minutes": idle_stop_minutes,
+              "held": [h for h, _ in holds()], "rows": rows,
+              "stops": stop_pass(cmd, listing, idle_stop_minutes, act)}
+    if why:
+        result["blocking"] = [why]
+        return result, 3
+    if not act:
+        return result, 0
+    for row in rows:
+        if row["action"] not in ("resume", "nudge"):
+            continue
+        handle = row["handle"]
+        if only and handle not in only:
+            row["outcome"] = "skipped"
+            row["detail"] = "this pass was scoped to %s" % ", ".join(sorted(only))
+            continue
+        if row["action"] == "nudge":
+            got = nudge(rail, adapter_dir, bus_dir, handle, {"owner": me,
+                        "address": row["address"], "cwd": row["cwd"]}, row["pid"])
+            row["outcome"] = got.get("outcome", "failed")
+            row["detail"] = got.get("reason") or got.get("detail") or ""
+            write_state(handle, {"last_wake": now_iso(), "last_wake_outcome": row["outcome"],
+                                 "last_wake_detail": row["detail"]})
+            log("%s: nudged pid %d -- %s %s" % (handle, row["pid"], row["outcome"], row["detail"]))
+            continue
+        if result["held"]:
+            row["action"], row["outcome"] = "held", "skipped"
+            row["detail"] = ("this account is held by %s, and no handle is resumed until "
+                             "--clear-hold clears it" % ", ".join(result["held"]))
+            log("%s: %s" % (handle, row["detail"]))
+            continue
+        ok, detail = resume(guard, cmd, handle, row, row.get("model") or "", row["bare"])
+        row["outcome"] = "resumed" if ok else "failed"
+        row["detail"] = detail
+        patch = {"last_resume": now_iso(), "last_resume_outcome": row["outcome"],
+                 "last_resume_detail": detail, "last_resume_model": row.get("model") or "",
+                 "last_resume_bare": row["bare"]}
+        if ok:
+            patch["hold"] = None
+            # What this rail started is what this rail ends. The stop pass reads
+            # this name, and a stop clears it.
+            patch["resumed_session"] = row["session"]
+            patch["stopped_at"] = None
+        else:
+            patch["hold"] = {"at": now_iso(), "reason": detail, "model": row["model"]}
+            patch["hold_told_human"] = tell_human(bus_dir, handle, detail)
+            result["held"].append(handle)
+        write_state(handle, patch)
+        log("%s: resume %s -- %s" % (handle, row["outcome"], detail))
+    return result, 0
+
+
+# ------------------------------------------------------------------ the modes
+def cmd_law():
+    fields = sorted(law_fields())
+    percent = PERCENT_FIELD.search(BOOT_SENTENCE)
+    print(json.dumps({"sentence": BOOT_SENTENCE, "format_fields": fields,
+                      "percent_fields": percent.group(0) if percent else None,
+                      "lawful": lawful()}, indent=2))
+    if not lawful():
+        log("THE SENTENCE LAW IS BROKEN: the boot sentence interpolates %s, and the ruling "
+            "allows nothing at all." % (fields or [percent.group(0)]))
+        return 1
+    return 0
+
+
+def cmd_clear_hold(handle):
+    data = read_state(handle)
+    if not data:
+        log("no state for '%s' at %s" % (handle, state_path(handle)))
+        return 0
+    had = data.get("hold")
+    write_state(handle, {"hold": None, "hold_cleared_at": now_iso()})
+    print(json.dumps({"handle": handle, "cleared": bool(had),
+                      "was": had, "state": state_path(handle)}, indent=2))
+    return 0
+
+
+def main(argv):
+    args = list(argv)
+    if not args or args[0] in ("-h", "--help"):
+        sys.stderr.write(__doc__)
+        return 2
+    mode = args[0]
+    if mode == "--law":
+        return cmd_law() if len(args) == 1 else 2
+    if mode == "--clear-hold":
+        return cmd_clear_hold(args[1]) if len(args) == 2 else 2
+    idle_stop = IDLE_STOP_MINUTES
+    if "--idle-stop-minutes" in args[1:]:
+        i = args.index("--idle-stop-minutes")
+        if len(args) <= i + 1 or not args[i + 1].isdigit():
+            sys.stderr.write("--idle-stop-minutes takes a whole number of minutes\n")
+            return 2
+        idle_stop = int(args[i + 1])
+        del args[i:i + 2]
+    only = set(args[1:])
+    if mode not in ("--check", "--once") or (mode == "--check" and only) \
+            or any(a.startswith("-") for a in only):
+        sys.stderr.write("usage: session-continuity [--check | --once [<handle> ...]] "
+                         "[--idle-stop-minutes <n>] | --law | --clear-hold <handle>\n")
+        return 2
+
+    # The law is proved before anything is delivered, every run. A build that
+    # broke it must not reach a session at all.
+    if not lawful():
+        log("refusing to run: the boot sentence interpolates. See --law.")
+        return 1
+
+    me = pwd.getpwuid(os.geteuid()).pw_name
+    bus_dir = conf_value("ORCHESTRATE_SHARED_BUS") or ""
+    guard, guard_why = load_module(beside("session-guard"), "session-guard")
+    rail, rail_why = load_module(beside("bus-nudge"), "bus-nudge")
+    adapter_dir = beside("bus-nudge-adapters")
+    cmd = harness()
+
+    # EVERY WALL IS NAMED, AND A MISSING NUDGE IS ONE OF THEM. The twin check's
+    # safe branch is a nudge. Without the rail beside it this program would find
+    # a twin and have nowhere to send it, and the only move left would be the
+    # resume the check just refused.
+    blocking = []
+    if not bus_dir:
+        blocking.append("%s names no ORCHESTRATE_SHARED_BUS, so this machine declares no "
+                        "bus and this program acts on none" % CONF)
+    elif not os.path.isfile(os.path.join(bus_dir, "handles.json")):
+        blocking.append("%s names %s as the bus and there is no board there"
+                        % (CONF, bus_dir))
+    if guard is None:
+        blocking.append(guard_why + ". It says which processes carry a session, which is "
+                        "half the twin check")
+    if rail is None:
+        blocking.append(rail_why + ". Its sentence is the one a twin is nudged with")
+    elif not callable(getattr(rail, "nudge_text", None)):
+        blocking.append("the wake rail at %s has no nudge_text()" % beside("bus-nudge"))
+    if not os.access(os.path.join(adapter_dir, "claude"), os.X_OK):
+        blocking.append("no wake-rail adapter at %s/claude, so a twin could not be nudged"
+                        % adapter_dir)
+    if not cmd:
+        blocking.append("no 'claude' command for this account, so no session can be resumed")
+
+    if mode == "--check":
+        out = {"user": me, "conf": CONF, "bus_dir": bus_dir, "state_dir": state_dir(),
+               "session_guard": beside("session-guard"), "wake_rail": beside("bus-nudge"),
+               "adapter_dir": adapter_dir, "harness": cmd,
+               "fallback_model": conf_value("ORCHESTRATE_DELEGATE_MODEL") or "",
+               "sentence": BOOT_SENTENCE, "alive_after_secs": ALIVE_AFTER_SECS,
+               "idle_stop_minutes": idle_stop,
+               "holds": [{"handle": h, "hold": v} for h, v in holds()],
+               "ready": not blocking, "blocking": blocking}
+        if not blocking:
+            checked, _ = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me,
+                                  idle_stop_minutes=idle_stop, act=False)
+            out["rows"] = checked["rows"]
+            out["stops"] = checked["stops"]
+            if checked.get("blocking"):
+                out["ready"], out["blocking"] = False, checked["blocking"]
+        print(json.dumps(out, indent=2))
+        return 0 if out["ready"] else 3
+
+    if blocking:
+        for line in blocking:
+            log("refusing to run: %s" % line)
+        return 3
+
+    # BEFORE THE PASS READS THE STATE DIRECTORY, and only on a pass that acts.
+    # --check returns above this line, so a reading changes nothing on disk.
+    dropped = prune_state()
+    if dropped:
+        log("pruned state for %s: nothing has written to it in thirty days"
+            % ", ".join(dropped))
+
+    result, code = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only, idle_stop)
+    result["pruned"] = dropped
+    acted = [r for r in result["rows"] if r.get("outcome") not in (None, "skipped")]
+    # UNDER THE JOURNAL, ONE LINE A PASS, AND THE WHOLE RESULT ONLY WHEN IT ACTED.
+    #
+    # The sweeper beside this program writes nothing at all on a quiet pass,
+    # because a result block every five minutes per account is the journal volume
+    # the wake rail was fixed for. This rail starts sessions, and silence about
+    # that is worth more than the bytes: a stopped instance and a quiet board
+    # read the same, which is the failure wake-rail.md names about the rail
+    # itself. So a pass says what it saw and what it decided in one short line,
+    # and the block that names every handle is kept for a pass that acted.
+    #
+    # The cost is stated rather than assumed: one line every two minutes is about
+    # seven hundred a day per account, against the forty-three thousand a day the
+    # loop this rail sits beside was fixed for.
+    if os.environ.get("JOURNAL_STREAM"):
+        said = ["%s %s" % (r["handle"], r.get("outcome") or r["action"])
+                for r in result["rows"] if r["action"] != "idle"]
+        said += ["%s %s" % (t["handle"], t["outcome"]) for t in result["stops"]]
+        log("%d orchestrator handle(s), %d with mail, %s" % (
+            len(result["rows"]),
+            len([r for r in result["rows"] if r["unread"] > 0]),
+            ", ".join(said) or "nothing to do"))
+        if acted or [t for t in result["stops"] if t["outcome"] in ("stopped", "failed")]:
+            print(json.dumps(result))
+    else:
+        print(json.dumps(result, indent=2))
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

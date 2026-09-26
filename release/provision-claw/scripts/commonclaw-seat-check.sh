@@ -100,8 +100,40 @@ checked=0      # roster mode: pairs either declared seated or observed live
 CORES="claude codex"
 
 is_unix_name() { case "$1" in [a-z_]*) : ;; *) return 1 ;; esac; case "$1" in *[!a-z0-9_-]*) return 1 ;; esac; }
-emit() { logger -t commonclaw-seat-check -p user.warning -- "$1"; printf 'WARN %s\n' "$1"; rc=1; }
-note() { logger -t commonclaw-seat-check -p user.notice  -- "$1"; printf 'NOTE %s\n' "$1"; }
+# IS THIS RUN'S STANDARD OUTPUT THE JOURNAL SYSTEMD GAVE IT? systemd writes the
+# device and the inode of that stream into JOURNAL_STREAM. The variable is
+# inherited by anything a unit starts, so the reading is on the stream.
+#
+# THE COPY BELOW GOES TO STANDARD OUTPUT, not to standard error, because cron
+# mails what a job prints and cron is this check's usual caller. Under cron
+# there is no JOURNAL_STREAM, this answers no, and the mail is unchanged. Under
+# a unit the logger line is already in the journal and the printed copy is the
+# same line a second time, under this file's basename rather than the tag.
+#
+# THE STREAM IS READ ON FD 3, AND FD 3 IS OPENED OUTSIDE THE SUBSTITUTION. A
+# command substitution replaces fd 1 for everything inside it, so a 3>&1 written
+# in there would copy the substitution's own pipe and this would answer no every
+# time. The redirection below is on the group, where fd 1 is still this script's
+# own. The mail check reads fd 2 and can write its 3>&2 inside, because a
+# substitution leaves fd 2 alone.
+#
+# The 2>/dev/null is on the stat and reaches only the stat's own error.
+stdout_is_journal() {
+  [ -n "${JOURNAL_STREAM:-}" ] || return 1
+  local here
+  { here="$(stat -Lc '%d:%i' /proc/self/fd/3 2>/dev/null)"; } 3>&1
+  [ -n "$here" ] && [ "$JOURNAL_STREAM" = "$here" ]
+}
+
+emit() {
+  logger -t commonclaw-seat-check -p user.warning -- "$1"
+  stdout_is_journal || printf 'WARN %s\n' "$1"
+  rc=1
+}
+note() {
+  logger -t commonclaw-seat-check -p user.notice  -- "$1"
+  stdout_is_journal || printf 'NOTE %s\n' "$1"
+}
 
 # ---------------------------------------------------------------- the roster
 #

@@ -85,9 +85,13 @@ fi
 export RESTIC_REPOSITORY="s3:${S3_ENDPOINT}/${B2_BUCKET}/${BOX_HOSTNAME}"
 
 PRUNE_STAMP="${STATE}/last-prune"
-# Below the tick spacing subtracted from a day. At 24 the stamp is written a
-# minute after the tick, the same tick tomorrow measures just under 24 hours and
-# skips, and the reclaim walks forward one tick per day. 20 holds it on one tick.
+# Between one day minus the tick spacing and one day, which with ticks six hours
+# apart is between 18 and 24. At 24 the stamp is written a minute after the tick,
+# the same tick tomorrow measures just under 24 hours and skips, and the reclaim
+# walks forward one tick per day. Under 18 the tick six hours before a full day
+# is already past the interval, and the reclaim fires every 18 hours instead of
+# once a day. 20 holds it on one tick, with two hours of margin below and about
+# four above. `reference/backup-rail.md` cites this line for the value.
 #
 # A CONSTANT, and deliberately not read from the environment. A value that can be
 # raised from outside is a quiet path to a reclaim that never fires, which is the
@@ -97,7 +101,35 @@ PRUNE_STAMP="${STATE}/last-prune"
 # never in an environment nobody records.
 PRUNE_INTERVAL_HOURS=20
 
-log() { logger -t commonclaw-backup -p "user.$1" -- "$2"; printf '[%s] %s\n' "$1" "$2"; }
+# IS THIS RUN'S STANDARD OUTPUT THE JOURNAL SYSTEMD GAVE IT? systemd writes the
+# device and the inode of that stream into JOURNAL_STREAM. The variable is
+# inherited by anything a unit starts, so the reading is on the stream. A run
+# an operator started by hand answers no, and that operator still gets the line.
+#
+# THE STREAM IS READ ON FD 3, a copy of this script's standard output taken
+# before the stat's own error is sent away. A 2>/dev/null placed on the reading
+# command would send that command's own fd 2 to /dev/null first.
+stdout_is_journal() {
+  [ -n "${JOURNAL_STREAM:-}" ] || return 1
+  local here
+  { here="$(stat -Lc '%d:%i' /proc/self/fd/3 2>/dev/null)"; } 3>&1
+  [ -n "$here" ] && [ "$JOURNAL_STREAM" = "$here" ]
+}
+
+# ONE LINE PER EVENT. Under the backup unit the logger line is already in the
+# journal, and the copy on standard output is the same line a second time. It
+# arrives under a different identifier, because the unit sets none and journald
+# falls back to this file's basename, so a reader filtering on the tag sees one
+# line and a reader reading the unit sees both. The logger line is the one to
+# keep: it carries the level as the journal's own priority, and it carries the
+# tag. Four ticks a day on every claw made this the largest of the duplicates.
+#
+# `targets` prints above this and never through it, so the one reader outside
+# this script is untouched by the guard.
+log() {
+  logger -t commonclaw-backup -p "user.$1" -- "$2"
+  stdout_is_journal || printf '[%s] %s\n' "$1" "$2"
+}
 
 # --- invariant 1 ------------------------------------------------------------
 consistency_pass() {

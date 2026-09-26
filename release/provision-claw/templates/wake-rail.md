@@ -129,6 +129,40 @@ grace period and where it came from.
 Disabling the timer switches the sweeper off, and a later install leaves it
 off. The rail's `ENABLED` setting does not reach it.
 
+## The continuity rail
+
+The rail above reaches only sessions still running. An orchestrator is a
+registration and a workpaper, and its process is not part of it, so the session
+mail waits for has often gone. `session-continuity` starts it again, every two
+minutes as the account, under `session-continuity@<account>.timer`.
+
+A pass resumes each orchestrator handle this account owns that has unread mail,
+from its recorded session id and directory, with one fixed sentence: the rail
+resumed you, read your inbox. `--law` proves the sentence carries no
+interpolation, and the program refuses to run when that fails.
+
+**Two resume forms, and the harness's listing says which.** A session the
+harness has run in the background carries saved options, and flags passed to a
+resume of one start a copy under a new session id. A session with a background
+row is resumed bare; one with no row takes the flags, which set its name, model
+and permission flag. An unreadable listing is refused.
+
+**The twin check comes before every resume.** Nothing is resumed while a live
+process carries the handle's session id, or while a live session carries the
+handle's name. Either one means the session is here, and it gets the wake rail's
+nudge instead.
+
+**The rail ends what it started.** A resumed session does not exit by itself, so
+a pass stops one this rail resumed once the listing reads it idle and its
+transcript has not grown for fifteen minutes. `claude stop` keeps the
+conversation, and the next message resumes it from the same transcript.
+
+**A resume that fails writes a hold.** No handle of that account is resumed
+until `--clear-hold <handle>` clears it, and one line goes to the `human` bus
+handle naming the handle and the reason. A signed-out harness refuses every
+resume, and a rail that kept asking would tell nobody. The hold is a file under
+the account's own state directory.
+
 ## What fails silently here
 
 - **A reconnect that changes the session id escapes all three.** The guard, the
@@ -152,5 +186,9 @@ off. The rail's `ENABLED` setting does not reach it.
   own bus and nothing else, which reads exactly like a quiet shared one. The
   install says so when it finds that file already there without the entry, and
   `bus-nudge --check` reports the bus list it resolved.
+- **A held account looks like a quiet one.** Once the continuity rail holds, no
+  orchestrator of that account comes back and nothing else says so. The line on
+  the `human` handle is the notice, and `session-continuity --check` names the
+  hold.
 - **Nothing watches this rail.** The same hole the notifier names about itself.
   Silence means healthy, and it also means the instance is off.

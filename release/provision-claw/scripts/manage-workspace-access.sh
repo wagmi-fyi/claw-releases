@@ -42,6 +42,17 @@
 # login. This is the usual reason a fresh grant looks like it did nothing, and
 # the conventions file says what ends them.
 #
+# THEIR SERVICE MANAGER IS THE ONE PROCESS THIS DOOR ENDS ITSELF, and only when
+# its group set differs from the one the account now holds. Work a person
+# schedules runs under that manager with no session behind it, so a manager
+# left on its old groups runs that work at the old access forever, and nobody
+# is logged in to notice. The reading is the process's own, from /proc, because
+# a running thing is the only place its group set can be read.
+#
+# THE RESTART ENDS THAT PERSON'S OWN SERVICES. Their timers restart with the
+# manager and their next run is on time. Anything else they had running under
+# it stops, and the note says so.
+#
 # REVOKING THE LAST MEMBER IS ALLOWED AND WARNED, NEVER REFUSED. An empty
 # workspace is a state, not an error: a firm between people on a domain of work
 # still owns that work, the directory keeps its manifest and its backups, and a
@@ -67,6 +78,14 @@ MODE=""; PERSON=""; WORKSPACE=""; DRY_RUN=0
 WORKSPACE_ROOT="/srv/workspaces"
 ADMIN_LOG="/etc/commonclaw/admin-log.md"
 MEMBERS_GROUP="claw-members"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The one reading of a running process's group set. A missing sibling fails the
+# run rather than being skipped.
+# shellcheck source=unit-groups.sh
+[ -r "${SCRIPT_DIR}/unit-groups.sh" ] \
+  || { printf 'no unit-groups.sh beside this script\n' >&2; exit 1; }
+. "${SCRIPT_DIR}/unit-groups.sh"
 
 usage() {
   awk 'NR==1 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0" >&2
@@ -278,6 +297,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     say "  would remove ${PERSON} from ${WS_GROUP}"
     say "  would drop ${PERSON}'s git safe-directory claim on ${WS_DIR}"
   fi
+  say "  would restart ${PERSON}'s service manager only if its group set differs from the account's"
   say "  would append one row to ${ADMIN_LOG}"
   warn "dry run: nothing was changed"
   finish
@@ -304,6 +324,27 @@ else
 fi
 
 MEMBERS_AFTER="$(members_of "$WS_GROUP")"
+
+# -------------------------------------------------------- their own manager
+#
+# Only on a difference. A manager already holding the account's current set is
+# left alone, so a re-run of a grant that already took ends nobody's work.
+
+MANAGER_UNIT="user@$(id -u "$PERSON" 2>/dev/null || echo 0).service"
+drift_rc=0; unit_group_drift "$MANAGER_UNIT" "$PERSON" || drift_rc=$?
+case "$drift_rc" in
+  0)
+    say "  ${PERSON}'s service manager holds a different group set from the account. Restarting ${MANAGER_UNIT}."
+    if systemctl restart "$MANAGER_UNIT" >/dev/null 2>&1; then
+      warn "${MANAGER_UNIT} was restarted, so anything ${PERSON} had running under it stopped. Their timers came back with it and their next run is on time."
+    else
+      bad "could not restart ${MANAGER_UNIT} -- ${PERSON}'s scheduled work keeps running on its old groups, with nobody logged in to notice"
+    fi ;;
+  1)
+    say "  ${PERSON}'s service manager already holds the account's group set. Nothing restarted." ;;
+  *)
+    warn "${PERSON} has no running service manager, so nothing carried the old groups. Their next one starts with the current set." ;;
+esac
 
 # ---------------------------------------------------------------- the record
 
@@ -360,6 +401,16 @@ fi
 case $'\n'"${claims}"$'\n' in
   *$'\n'"*"$'\n'*) bad "${PERSON} declares the bare star, exempting them from the git guard everywhere on this claw" ;;
   *) ok "${PERSON} holds no blanket safe-directory star" ;;
+esac
+
+# Their manager, read back after the restart. This is the reading that says the
+# change reached the process that runs their scheduled work, rather than only
+# the group record. A person with no manager running is reported as such.
+drift_rc=0; unit_group_drift "$MANAGER_UNIT" "$PERSON" || drift_rc=$?
+case "$drift_rc" in
+  1) ok "${PERSON}'s service manager holds the account's group set, so work it runs carries this change" ;;
+  0) bad "${PERSON}'s service manager still holds a different group set -- their scheduled work runs on the old access" ;;
+  *) warn "${PERSON} has no running service manager to read. Their next one starts with the current group set." ;;
 esac
 
 # claw-members is the floor and neither mode touches it.

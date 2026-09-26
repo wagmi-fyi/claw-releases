@@ -216,7 +216,8 @@
 #                    beat reads files already on the box.
 #   24 wake rail      install-bus-nudge.sh owns the act and is called, not
 #                    reimplemented; it adopts a conf and an instance somebody
-#                    disabled. The orchestration config is written line by line:
+#                    disabled. The same door lays the continuity rail, which
+#                    resumes an orchestrator that has mail and no session. The orchestration config is written line by line:
 #                    the bus path and the substrate are facts and are asserted,
 #                    the model and the permissions flag are decisions and are
 #                    kept as the claw records them.
@@ -1533,6 +1534,10 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../payload/session-guard"
   [ -r "${PAYLOAD_DIR}/session-sweep" ] \
     || missing_payload="$missing_payload ../payload/session-sweep"
+  # The continuity rail, which reads the same guard and resumes an orchestrator
+  # whose session has gone. Same installer, same refusal.
+  [ -r "${PAYLOAD_DIR}/session-continuity" ] \
+    || missing_payload="$missing_payload ../payload/session-continuity"
   [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] \
     || missing_payload="$missing_payload ../payload/bus-nudge-adapters"
   # EACH ADAPTER BY NAME, and not just the directory. A present-but-short
@@ -1554,6 +1559,10 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/session-sweep@.service"
   [ -r "${TEMPLATE_DIR}/session-sweep@.timer" ] \
     || missing_payload="$missing_payload ../templates/session-sweep@.timer"
+  [ -r "${TEMPLATE_DIR}/session-continuity@.service" ] \
+    || missing_payload="$missing_payload ../templates/session-continuity@.service"
+  [ -r "${TEMPLATE_DIR}/session-continuity@.timer" ] \
+    || missing_payload="$missing_payload ../templates/session-continuity@.timer"
   [ -r "${TEMPLATE_DIR}/wake-rail.md" ] \
     || missing_payload="$missing_payload ../templates/wake-rail.md"
   # The operator's runbook, which the same installer lays beside the member's
@@ -2776,6 +2785,15 @@ phase_8_users() {
       bad "group ${BUS_GROUP} does not exist -- phase 7 creates it, and this run skipped it"
     fi
 
+    # LINGER, so a person's own service manager runs when they are not logged
+    # in. Without it the manager stops with their last session, and any work
+    # they scheduled under their own account stops with it. Scheduling is a
+    # member's own act through claw-ops, so the capability has to be there
+    # before they ask, and it is root's to grant. The call is idempotent: it
+    # writes one empty file per person and a second run changes nothing.
+    loginctl enable-linger "$user" >/dev/null 2>&1 \
+      || bad "could not turn linger on for ${user} -- work they schedule under their own account would stop when their last session ends"
+
     # THE CREDENTIAL PLANE: the group grant, then the loader. Neither is a
     # secret, which is why a run makes both and why an UPDATE makes them too. A
     # plane is not identity, so the rule that an update asserts the box's own
@@ -2866,6 +2884,10 @@ phase_8_users() {
       *" ${BUS_GROUP} "*) : ;;
       *) bad "$user is not in ${BUS_GROUP} -- their sessions could not post a bus message"; all_ok=0 ;;
     esac
+    # Read back from logind rather than from the fact that the call ran. A
+    # person without linger can schedule nothing that outlives their session.
+    [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" = "yes" ] \
+      || { bad "$user does not linger -- their service manager would stop with their last session, and anything they scheduled with it"; all_ok=0; }
     if [ -L "${home}/workspaces" ] && [ "$(readlink "${home}/workspaces")" = "$WORKSPACE_ROOT" ]; then :
     else bad "${home}/workspaces is not a symlink to ${WORKSPACE_ROOT}"; all_ok=0; fi
     for f in "$PERSISTENT_CORE_FILE" "$PER_TASK_CORE_FILE"; do
@@ -6212,7 +6234,7 @@ HANDLEEOF
 # ---------------------------------------------------------------- phase 24
 
 phase_24_wake_rail() {
-  head1 24 "the wake rail and the orchestration settings"
+  head1 24 "the wake rail, the continuity rail and the orchestration settings"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would run install-bus-nudge.sh for ${#PEOPLE[@]} account(s) and write ${ORCHESTRATE_CONF_FILE}"
@@ -6238,6 +6260,9 @@ phase_24_wake_rail() {
   check "the nudge program is installed" test -x "${CLAW_BIN}/bus-nudge"
   check "the delivered sentence carries no interpolation but the bus directory" \
     "${CLAW_BIN}/bus-nudge" --law
+  check "the continuity program is installed" test -x "${CLAW_BIN}/session-continuity"
+  check "the boot sentence it delivers carries no interpolation at all" \
+    "${CLAW_BIN}/session-continuity" --law
 
   # ---- the orchestration settings ----
   #
@@ -6256,13 +6281,19 @@ phase_24_wake_rail() {
   # roster's law applied line by line rather than file by file, because the same
   # file holds both kinds.
   #
-  # WHAT THIS WRITER DID IS SAID BY THIS WRITER. The file is re-rendered whole on
-  # every run, so the installer above cannot speak for its final state. Measured
-  # 2026-09-17, w257 and w258: both rides printed that the file was left exactly
-  # as it is, and both moved its digest. On one of them the run added
-  # ORCHESTRATE_BUS_DIR and said nothing.
+  # WHAT THIS WRITER DID IS SAID BY THIS WRITER. The installer above cannot speak
+  # for this file's final state. Measured 2026-09-17, w257 and w258: both rides
+  # printed that the file was left exactly as it is, and both moved its digest.
+  # On one of them the run added ORCHESTRATE_BUS_DIR and said nothing.
+  #
+  # THE FILE IS RENDERED FIRST AND WRITTEN ONLY WHEN IT DIFFERS. Rendering whole
+  # and writing whole made the two sentences below true of the content and false
+  # of the file: the digest, the inode and the size held, and the modification
+  # time moved on every apply. Measured on three boxes, 2026-09-21, w269 and
+  # w273. An operator reading a modification time to find when a decision last
+  # changed was reading the date of the last apply.
   local cur_model="$DELEGATE_MODEL" cur_skip="$DELEGATE_SKIP_PERMISSIONS" kept=""
-  local before="" added=""
+  local before="" added="" want=""
   if [ -r "$ORCHESTRATE_CONF_FILE" ]; then
     before="$(cat "$ORCHESTRATE_CONF_FILE")"
     local v
@@ -6272,7 +6303,7 @@ phase_24_wake_rail() {
     [ -n "$v" ] && { cur_skip="$v"; kept="${kept:+${kept} and }the permissions flag"; }
   fi
 
-  cat > "$ORCHESTRATE_CONF_FILE" <<ORCHEOF
+  want="$(cat <<ORCHEOF
 # The orchestrate skill's settings for this machine. Written by
 # provision-claw.sh. NO SECRETS HERE.
 #
@@ -6291,17 +6322,22 @@ ORCHESTRATE_SUBSTRATE="claude"
 ORCHESTRATE_DELEGATE_MODEL="${cur_model}"
 ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
 ORCHEOF
-  chmod 0644 "$ORCHESTRATE_CONF_FILE"; chown root:root "$ORCHESTRATE_CONF_FILE"
+)"
   [ -n "$kept" ] && say "  kept ${kept} this claw already recorded in ${ORCHESTRATE_CONF_FILE}"
   local k
   for k in ORCHESTRATE_SHARED_BUS ORCHESTRATE_BUS_DIR ORCHESTRATE_SUBSTRATE; do
     printf '%s\n' "$before" | grep -q "^${k}=" || added="${added:+${added}, }${k}"
   done
-  if [ "$before" = "$(cat "$ORCHESTRATE_CONF_FILE")" ]; then
+  # Both readings strip trailing newlines, and the write puts back exactly the
+  # one the render ends on, so a file this writer wrote before today compares
+  # equal to what it renders today.
+  if [ -e "$ORCHESTRATE_CONF_FILE" ] && [ "$before" = "$want" ]; then
     say "  ${ORCHESTRATE_CONF_FILE} already read exactly this, so nothing in it moved"
   else
+    printf '%s\n' "$want" > "$ORCHESTRATE_CONF_FILE"
     say "  wrote ${ORCHESTRATE_CONF_FILE}${added:+, adding ${added}}"
   fi
+  chmod 0644 "$ORCHESTRATE_CONF_FILE"; chown root:root "$ORCHESTRATE_CONF_FILE"
 
   check "the orchestration config is 0644 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$ORCHESTRATE_CONF_FILE')\" = '644 root:root' ]"

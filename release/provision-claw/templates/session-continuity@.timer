@@ -1,0 +1,19 @@
+# Installed VERBATIM, never rendered. See session-continuity@.service.
+#
+# Every two minutes, off the minute. That is how long a message can wait for an
+# orchestrator whose session has gone.
+#
+# A pass that resumes several handles can outrun the beat, because it waits on
+# each resumed session. systemd merges the next start into the running one, so
+# the beat becomes the end of the last pass and nothing piles up.
+[Unit]
+Description=Session continuity for %i, every two minutes
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*-*-* *:0/2:00
+RandomizedDelaySec=20
+Unit=session-continuity@%i.service
+
+[Install]
+WantedBy=timers.target

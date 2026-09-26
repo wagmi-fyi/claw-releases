@@ -21,7 +21,12 @@
 #
 #   unit_health         one line per finding on stdout. 0 clean, 1 something
 #                       is wrong.
-#   ./unit-health.sh    the same, for an operator with one command to type.
+#   /opt/commonclaw/provision-claw/scripts/unit-health.sh
+#                       the same, for an operator. That whole path is what a
+#                       person types: this file lands there on a claw and the
+#                       directory is on nobody's PATH. Every document that
+#                       tells somebody to run it names the path in full, for
+#                       the same reason.
 #
 # THE OVERRIDE BELOW EXISTS FOR CONTROLS, the way OP_BIN does in
 # install-heartbeat-url.sh. A rig cannot make a real unit loop on a live box

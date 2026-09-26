@@ -53,6 +53,15 @@
 # which process is newest. A person switches the sweeper off by disabling its
 # timer, and a re-run leaves it off, the way it leaves a disabled watcher off.
 #
+# AND SO DOES THE CONTINUITY RAIL. 'session-continuity' resumes an orchestrator
+# whose session has gone and whose inbox has mail, under its own timer,
+# session-continuity@<account>.timer. The wake rail refuses a gone session by its
+# own law, so this is the half that brings one back. It takes the same answer
+# from 'session-guard' about which processes carry a session, and it takes the
+# rail's own sentence and adapter when it finds the session already live. Four
+# programs, one installer, one reading of who is where. Its timer is its switch,
+# the way the sweeper's is.
+#
 # EXIT CODES. 0 the rail is standing. 1 something this script owns did not
 # take. 2 usage.
 #
@@ -75,6 +84,8 @@ ORCHESTRATE_CONF="/etc/orchestrate.conf"
 ENABLED_RECORD="/var/lib/commonclaw/bus-nudge-enabled"
 # The same record for the sweeper's timer, one file per account.
 SWEEP_RECORD="/var/lib/commonclaw/session-sweep-enabled"
+# And for the continuity rail's timer.
+CONTINUITY_RECORD="/var/lib/commonclaw/session-continuity-enabled"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAYLOAD_DIR="${HERE}/../payload"
 TEMPLATE_DIR="${HERE}/../templates"
@@ -113,6 +124,8 @@ if [ "$MODE" = uninstall ]; then
     ok "bus-nudge@${a} stopped and disabled"
     systemctl disable --now "session-sweep@${a}.timer" >/dev/null 2>&1
     ok "session-sweep@${a}.timer stopped and disabled"
+    systemctl disable --now "session-continuity@${a}.timer" >/dev/null 2>&1
+    ok "session-continuity@${a}.timer stopped and disabled"
   done
   systemctl daemon-reload
   printf '{"mode":"uninstall","accounts":["%s"],"note":"the program, the conf and the managed-settings opt-in were left in place: each is shared and removing one is its own decision"}\n' \
@@ -124,7 +137,7 @@ DRY=""; [ "$MODE" = dry-run ] && DRY="would "
 pair=""; src=""; dst=""
 
 # ------------------------------------------------------ the program + adapters
-for f in bus-nudge session-guard session-sweep; do
+for f in bus-nudge session-guard session-sweep session-continuity; do
   [ -r "${PAYLOAD_DIR}/${f}" ] || { bad "no ${PAYLOAD_DIR}/${f}. The assembler takes it from the public skills repository at the pin, so run this from an assembled stage"; }
 done
 [ -d "${PAYLOAD_DIR}/bus-nudge-adapters" ] || bad "no ${PAYLOAD_DIR}/bus-nudge-adapters — the core refuses to deliver without one, and the assembler vendors it beside the program"
@@ -145,7 +158,8 @@ done
 # The digest covers the program and every adapter, because the program loads an
 # adapter at delivery and a corrected adapter is as invisible as a corrected
 # core. It covers session-guard for the same reason: the watcher loads it once,
-# at start. The sweeper is left out, because each pass starts it fresh.
+# at start. The sweeper and the continuity rail are left out, because each pass
+# of either one starts fresh.
 rail_digest() {
   {
     [ -r "${BIN_DIR}/bus-nudge" ] && sha256sum "${BIN_DIR}/bus-nudge"
@@ -162,6 +176,7 @@ if [ "$MODE" != dry-run ]; then
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/bus-nudge" "${BIN_DIR}/bus-nudge"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-guard" "${BIN_DIR}/session-guard"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-sweep" "${BIN_DIR}/session-sweep"
+  install -m 0755 -o root -g root "${PAYLOAD_DIR}/session-continuity" "${BIN_DIR}/session-continuity"
   for f in "${PAYLOAD_DIR}"/bus-nudge-adapters/*; do
     install -m 0755 -o root -g root "$f" "${BIN_DIR}/bus-nudge-adapters/$(basename "$f")"
   done
@@ -182,6 +197,10 @@ if [ "$MODE" != dry-run ]; then
     bash -c "${BIN_DIR}/bus-nudge --law >/dev/null"
   check "${BIN_DIR}/session-sweep loads the session-guard beside it" \
     bash -c "${BIN_DIR}/session-sweep --check >/dev/null"
+  # THE BOOT SENTENCE CARRIES NO INTERPOLATION AT ALL, which is a stricter law
+  # than the rail's and is proved the same way, by a command.
+  check "the boot sentence the continuity rail delivers carries no interpolation" \
+    bash -c "${BIN_DIR}/session-continuity --law >/dev/null"
 else
   ok "${DRY}install ${BIN_DIR}/bus-nudge, its adapters, session-guard and session-sweep"
 fi
@@ -368,8 +387,9 @@ if [ "$MODE" != dry-run ] && command -v jq >/dev/null 2>&1; then
     bash -c "[ -n \"\$('${BIN_DIR}/bus-nudge' --check 2>/dev/null | jq -r '.shared_bus // empty')\" ]"
 fi
 
-# ----------------------------------------------------------- the four units
-for u in bus-nudge@.service bus-nudge@.timer session-sweep@.service session-sweep@.timer; do
+# ------------------------------------------------------------- the six units
+for u in bus-nudge@.service bus-nudge@.timer session-sweep@.service session-sweep@.timer \
+         session-continuity@.service session-continuity@.timer; do
   [ -r "${TEMPLATE_DIR}/${u}" ] || { bad "no ${TEMPLATE_DIR}/${u}"; continue; }
   if [ "$MODE" = dry-run ]; then ok "${DRY}install ${UNIT_DIR}/${u}"; continue; fi
   if [ -e "${UNIT_DIR}/${u}" ] && ! cmp -s "${TEMPLATE_DIR}/${u}" "${UNIT_DIR}/${u}"; then
@@ -381,15 +401,35 @@ done
 
 # ------------------------------------------------------- one instance per head
 STARTED=()
-state=""; restarts=""; was_active=""; sw_word=""
+state=""; restarts=""; was_active=""; sw_word=""; ct_word=""
 for a in "${ACCOUNTS[@]}"; do
   if [ "$MODE" = dry-run ]; then
     ok "${DRY}enable and start bus-nudge@${a}"
     ok "${DRY}enable session-sweep@${a}.timer"
+    ok "${DRY}enable session-continuity@${a}.timer"
     continue
   fi
 
-  # THE SWEEPER'S TIMER FIRST, because it is its own switch. The watcher's
+  # THE CONTINUITY RAIL'S TIMER, on the sweeper's law and for the same reason:
+  # it is its own switch, and the watcher's checks below end this iteration
+  # early. Masked, or disabled after this installer enabled it, stays off.
+  ct_word="$(systemctl is-enabled "session-continuity@${a}.timer" 2>/dev/null || true)"
+  if [ "$ct_word" = masked ]; then
+    warn "session-continuity@${a}.timer is masked and was left off"
+  elif [ "$ct_word" = disabled ] && [ -e "${CONTINUITY_RECORD}/${a}" ]; then
+    warn "session-continuity@${a}.timer is deliberately disabled and was left off"
+  else
+    systemctl enable --now "session-continuity@${a}.timer" >/dev/null 2>&1
+    check "session-continuity@${a}.timer is enabled" \
+      bash -c "systemctl is-enabled 'session-continuity@${a}.timer' 2>/dev/null | grep -qx enabled"
+    if [ "$(systemctl is-enabled "session-continuity@${a}.timer" 2>/dev/null || true)" = enabled ]; then
+      install -d -m 0755 -o root -g root "$CONTINUITY_RECORD" \
+        && : > "${CONTINUITY_RECORD}/${a}" \
+        || bad "could not record that session-continuity@${a}.timer was enabled, so a later disable of it may be undone"
+    fi
+  fi
+
+  # THE SWEEPER'S TIMER NEXT, because it is its own switch. The watcher's
   # checks below end this iteration early when a person turned the watcher
   # off, and that choice says nothing about the sweeper. The law is the
   # watcher's: masked, or disabled after this installer enabled it, stays off.

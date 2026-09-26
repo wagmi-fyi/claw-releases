@@ -13,7 +13,7 @@
 #   --no-agents-cred    make a person who resolves no credentials, deliberately
 #   --dry-run           print the plan, change nothing
 #
-# WHAT IT MAKES. The seven things provisioning gives a person who was in the keys
+# WHAT IT MAKES. The eight things provisioning gives a person who was in the keys
 # file at build time, so somebody arriving later gets the same claw:
 #   the unix account, with a home and a shell
 #   the home at 0750, .ssh at 0700, authorized_keys at 0600 carrying their key
@@ -24,6 +24,8 @@
 #   the agents credential plane: membership of the credential group, plus the
 #     loader and the hook that starts it, so their sessions resolve op://
 #   their git identity, so their first commit is theirs
+#   linger, so their own service manager runs when they are not logged in and
+#     work they schedule under their account keeps running
 #
 # THE SIXTH THING IS A GROUP GRANT AND A LOADER, and neither is a secret, so
 # this door does both and holds no value at any point. The claw's agents token
@@ -490,6 +492,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   say "  would set their git identity to ${FULL_NAME} <${EMAIL}>, and refuse a guessed one"
   say "  would add ${PERSON} to ${MEMBERS_GROUP}, which owns ${CLAW_BRIEFING} and nothing else"
   say "  would add ${PERSON} to ${BUS_GROUP}, which owns the claw's session bus and nothing else"
+  say "  would turn linger on for ${PERSON}, so their own service manager runs when they are not logged in"
   if [ "$AGENTS_CRED" -eq 0 ]; then
     say "  would add ${PERSON} to NO credential group: --no-agents-cred was passed, so this person resolves nothing by decision"
   else
@@ -578,6 +581,15 @@ gpasswd -a "$PERSON" "$MEMBERS_GROUP" >/dev/null
 # is what lets a session post there. Without it they reach no bus until the next
 # provisioning run.
 gpasswd -a "$PERSON" "$BUS_GROUP" >/dev/null
+
+# LINGER, so their own service manager runs when they are not logged in.
+# Without it the manager stops with their last session, and any work they
+# scheduled under their own account stops with it. Scheduling is a member's own
+# act through claw-ops, so the capability has to be there before they ask, and
+# it is root's to grant. Phase 8 makes the same call for the same reason. The
+# call is idempotent: it writes one empty file and a second run changes nothing.
+loginctl enable-linger "$PERSON" >/dev/null 2>&1 \
+  || warn "could not turn linger on for ${PERSON}; the read-back below is the verdict"
 
 # ------------------------------------------------ the credential group grant
 #
@@ -810,6 +822,14 @@ case "$groups_text" in
   *" ${BUS_GROUP} "*) ok "${PERSON} is in ${BUS_GROUP}, so every session they start after this posts on the claw's session bus" ;;
   *) bad "${PERSON} is not in ${BUS_GROUP} -- their sessions would join no bus" ;;
 esac
+
+# Read back from logind rather than from the fact that the call ran. A person
+# without linger can schedule nothing that outlives their session.
+if [ "$(loginctl show-user "$PERSON" -p Linger --value 2>/dev/null || true)" = "yes" ]; then
+  ok "${PERSON} lingers, so their own service manager runs when they are not logged in and work they schedule keeps running"
+else
+  bad "${PERSON} does not linger -- their service manager would stop with their last session, and anything they scheduled with it"
+fi
 
 # The join above adds a group to somebody. These say what that group is worth,
 # because a group everybody is in would carry whatever it reached to everybody.

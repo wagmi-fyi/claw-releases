@@ -98,6 +98,11 @@ second half catches a service that crashes and restarts forever. A unit with a
 restart policy never settles into a failed state, so a check reading failed units
 alone would call that claw healthy.
 
+To take the same reading between runs, run
+`/opt/commonclaw/provision-claw/scripts/unit-health.sh`. It is not on anybody's
+PATH, so the whole path is what you type. It exits 0 when both halves are clean
+and prints one line per finding when they are not.
+
 **The two stage trees.** `/root/fleet-stage` holds the payload the claw runs now,
 and `/root/fleet-stage.previous` holds the last one that applied cleanly, which
 is the way back. Each carries its own `release.json` naming its version.
