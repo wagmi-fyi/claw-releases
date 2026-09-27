@@ -51,6 +51,15 @@ session with no row takes the flags, which set those three the first time. A
 listing that cannot be read is refused, because a flagged resume of the wrong
 case is the one outcome nothing later can undo.
 
+THE APP'S CONVERSATION WINS. A copy fed by this rail runs turns the app never
+shows. So at the moment it would resume a handle's session, on the mail road and
+on the gone compaction road, the rail reads the conversation's family: every
+transcript that starts with the same first line. When any member's first line
+was written by the desktop app, the recorded session is resumed only if it holds
+an app line of its own, or has no family. Otherwise the row reads `refused`, and
+the app's conversation re-registering the handle ends it. A conversation born on
+the command line resumes as before. `--check` shows the reading for every row.
+
 THE TWIN CHECK, BOTH HALVES, BEFORE ANY RESUME.
 
   1. No live process on this machine carries the handle's session id. Read from
@@ -488,10 +497,15 @@ def saved_sessions(listing):
 
     None when the listing could not be read, which is not the same answer as an
     empty one. One says nothing is saved, the other says nothing is known.
+
+    A session is saved when any of its rows is a background row. listed_sessions()
+    keeps one row per session and marks it `background_row` when another row of
+    the same session was the background one.
     """
     if listing is None:
         return None
-    return {sid for sid, row in listing.items() if row.get("kind") == "background"}
+    return {sid for sid, row in listing.items()
+            if row.get("kind") == "background" or row.get("background_row")}
 
 
 def listed_sessions(cmd):
@@ -499,6 +513,14 @@ def listed_sessions(cmd):
 
     One subprocess a pass, and two questions come out of it: which sessions carry
     saved options, and which of the ones this rail resumed are idle now.
+
+    ONE SESSION CAN HAVE TWO ROWS, AND THE LAST ONE IS KEPT. The app opening a
+    session that has a background job adds an interactive row after the
+    background one. Read 2026-09-27 on session 0be4ddbb. Keyed by session id, the
+    interactive row hid the background row. When the app's process ended between
+    the listing and the twin check, the rail would take the flagged form for a session
+    with saved options, and that form starts a copy. So the background rows are
+    read over all rows first, and the kept row carries `background_row`.
     """
     try:
         proc = subprocess.run([cmd, "agents", "--json", "--all"], stdout=subprocess.PIPE,
@@ -514,8 +536,13 @@ def listed_sessions(cmd):
     rows = data if isinstance(data, list) else (data or {}).get("agents")
     if not isinstance(rows, list):
         return None
-    return {r["sessionId"]: r for r in rows
-            if isinstance(r, dict) and isinstance(r.get("sessionId"), str) and r["sessionId"]}
+    rows = [r for r in rows
+            if isinstance(r, dict) and isinstance(r.get("sessionId"), str) and r["sessionId"]]
+    background = {r["sessionId"] for r in rows if r.get("kind") == "background"}
+    out = {r["sessionId"]: r for r in rows}
+    for sid in background:
+        out[sid]["background_row"] = True
+    return out
 
 
 def transcript_path(session):
@@ -534,6 +561,119 @@ def transcript_path(session):
     except OSError:
         return ""
     return ""
+
+
+# ------------------------------------------------------- the app's conversation
+#
+# RULE A: THE RAIL FOLLOWS THE CLIENT THAT STARTED THE CONVERSATION. Q196, ruled
+# 2026-09-27. A conversation the desktop app shows is resumed only under the
+# session id the app writes into. A conversation born on the command line is
+# resumed as before, so a command-line orchestrator is never cut off.
+APP_ENTRYPOINT = "claude-desktop"
+
+
+def transcript_lines(path, first_only=False):
+    """(uuid, entrypoint) for each line that carries a uuid. [] when unreadable."""
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"uuid"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not (isinstance(rec, dict) and rec.get("uuid")):
+                    continue
+                out.append((str(rec["uuid"]), str(rec.get("entrypoint") or "")))
+                if first_only:
+                    break
+    except OSError:
+        return []
+    return out
+
+
+def conversation_reading(session):
+    """Rule A's reading of one recorded session: resume or refused, and why.
+
+    THE FAMILY. Every transcript under the account's projects folder whose first
+    uuid line carries the recorded session's first uuid. The app's move to a new
+    id and the command line's copy both start with the original's first line.
+
+    THE ORIGIN IS READ FROM THE WHOLE FAMILY. A copy made by the command line
+    rewrites `entrypoint` on every line it copies. Measured 2026-09-27: session
+    3273f5c5 read `cli` on all 310 lines it shared with 0be4ddbb, where 0be4ddbb
+    read `claude-desktop`. The command line never writes the app's entrypoint, so
+    the app's entrypoint on any member's first line says the app holds this
+    conversation. Otherwise the recorded transcript's own first entrypoint
+    answers.
+
+    THE APP'S CONVERSATION WINS. With the app's origin, the recorded session is
+    resumed only when it holds a line from the app whose uuid no other member
+    carries, or when it has no family. Any other origin, or none recorded,
+    resumes as before.
+
+    It reads every transcript's first uuid line and the family's members whole,
+    so it runs only where a resume is being decided.
+    """
+    reading = {"origin": "", "family": [], "own_app_lines": 0,
+               "verdict": "resume", "reason": ""}
+    path = transcript_path(session)
+    if not path:
+        reading["reason"] = "no transcript for the session, so nothing records its origin"
+        return reading
+    lines = transcript_lines(path)
+    if not lines:
+        reading["reason"] = "the transcript carries no line with a uuid"
+        return reading
+    first, first_entry = lines[0]
+    root = os.path.expanduser("~/.claude/projects")
+    family = []
+    try:
+        projects = sorted(os.listdir(root))
+    except OSError:
+        projects = []
+    for project in projects:
+        folder = os.path.join(root, project)
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            candidate = os.path.join(folder, name)
+            if not name.endswith(".jsonl") or os.path.realpath(candidate) == os.path.realpath(path):
+                continue
+            head = transcript_lines(candidate, first_only=True)
+            if head and head[0][0] == first:
+                family.append((name[:-len(".jsonl")], candidate, head[0][1]))
+    reading["family"] = [sid for sid, _, _ in family]
+    origin = first_entry or next((e for _, e in lines if e), "")
+    if first_entry == APP_ENTRYPOINT or any(e == APP_ENTRYPOINT for _, _, e in family):
+        origin = APP_ENTRYPOINT
+    reading["origin"] = origin or "none recorded"
+    if origin != APP_ENTRYPOINT:
+        reading["reason"] = "the conversation began on %s, so it resumes as before" % (
+            origin or "a client that recorded no entrypoint")
+        return reading
+    if not family:
+        reading["reason"] = "the app's conversation, with no other session sharing its start"
+        return reading
+    others = set()
+    for _, candidate, _ in family:
+        others.update(u for u, _ in transcript_lines(candidate))
+    own = sum(1 for u, e in lines if e == APP_ENTRYPOINT and u not in others)
+    reading["own_app_lines"] = own
+    if own:
+        reading["reason"] = ("the app's conversation: %d app lines are this session's own" % own)
+        return reading
+    reading["verdict"] = "refused"
+    reading["reason"] = (
+        "session %s records a copy of a conversation the desktop app shows: it holds no "
+        "line the app wrote that %s does not also carry. The refusal ends when the app's "
+        "conversation re-registers the handle"
+        % (session[:8], ", ".join(sid[:8] for sid in reading["family"])))
+    return reading
 
 
 def transcript_model(session):
@@ -1164,7 +1304,7 @@ def stop_pass(cmd, listing, idle_stop_minutes, act):
 
 
 # ------------------------------------------------------------------- the pass
-def survey(guard, listing, bus_dir, me, only=()):
+def survey(guard, listing, bus_dir, me, only=(), read_all=False):
     """One row per orchestrator handle this account holds, with what a pass owes it.
 
     Every such handle is listed, including the quiet ones, because `--check` is
@@ -1174,6 +1314,9 @@ def survey(guard, listing, bus_dir, me, only=()):
     `only` narrows what a pass acts on, and nothing else. The rows outside it are
     still listed and still carry the action they would have taken, so the reading
     is of the whole board whatever the pass touches.
+
+    `read_all` reads rule A for every row with a session. `--check` passes it. An
+    acting pass reads rule A only for a row it would resume.
     """
     rows = []
     try:
@@ -1210,6 +1353,10 @@ def survey(guard, listing, bus_dir, me, only=()):
         elif named:
             row["live_pid"] = named[-1]["pid"]
             row["live_session"] = named[-1]["session"]
+        # --check READS RULE A FOR EVERY ROW, so a person sees what a resume would
+        # meet. An acting pass reads it only where it would resume.
+        if read_all and row["session"]:
+            row["rule_a"] = conversation_reading(row["session"])
         if unread <= 0:
             row["action"], row["reason"] = "idle", "no mail, nothing to do"
             continue
@@ -1236,6 +1383,11 @@ def survey(guard, listing, bus_dir, me, only=()):
             row["reason"] = ("pid %d carries the name '%s' under session %s, so the "
                              "conversation moved and the session is here"
                              % (top["pid"], top["name"], top["session"][:8]))
+            continue
+        if "rule_a" not in row:
+            row["rule_a"] = conversation_reading(row["session"])
+        if row["rule_a"]["verdict"] == "refused":
+            row["action"], row["reason"] = "refused", row["rule_a"]["reason"]
             continue
         # WHICH RESUME FORM. A listing that could not be read decides nothing,
         # and a flagged resume of a saved session is the one outcome nothing
@@ -1608,6 +1760,15 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             continue
 
         # ---- gone: a resume with the phrase as its prompt ----
+        reading = conversation_reading(session)
+        item["rule_a"] = reading
+        if reading["verdict"] == "refused":
+            item["outcome"], item["detail"] = "refused", reading["reason"]
+            out.append(item)
+            keep.append(rec)
+            if act:
+                log("%s: post-compaction refused -- %s" % (handle, item["detail"]))
+            continue
         if saved is None:
             item["outcome"] = "waiting"
             item["detail"] = ("the harness's session listing could not be read, so nothing says "
@@ -1698,7 +1859,7 @@ def hold_patch(bus_dir, handle, detail, model):
 def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minutes=IDLE_STOP_MINUTES,
              activity_hours=ACTIVITY_HOURS, act=True):
     listing = listed_sessions(cmd)
-    rows, why = survey(guard, listing, bus_dir, me, only)
+    rows, why = survey(guard, listing, bus_dir, me, only, read_all=not act)
     window, window_source = compaction_window()
     result = {"bus_dir": bus_dir, "user": me, "only": sorted(only),
               "idle_stop_minutes": idle_stop_minutes, "activity_hours": activity_hours,

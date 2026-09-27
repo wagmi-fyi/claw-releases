@@ -20,6 +20,10 @@ until it is cleared. After a compaction it sends a live orchestrator the resume
 phrase, which the orchestrate skill's resume hook turns into the skill's front page. A gone one
 is resumed the same way as for mail, with the phrase as its first turn.
 
+The rail refuses to resume a handle that records a copy of a conversation the
+desktop app shows. Open the app's conversation and re-register the handle from
+it to end the refusal.
+
 ## The readings
 
 One row per orchestrator handle this account holds: the last wake and its outcome,
