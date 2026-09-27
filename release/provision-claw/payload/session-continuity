@@ -20,7 +20,7 @@ run is governed by.
 
 WHAT IT DELIVERS. Two fixed sentences, RESUME_TURN and FORCED_WRITE_TURN below,
 each carrying no interpolation at all. One re-invokes the orchestrate skill's
-resume operation. The other orders the postures write. Everything the session
+resume operation, and the skill supplies it. The other orders the postures write. Everything the session
 then does comes from the bus, from the skill and from its own workpaper. `--law`
 re-derives the field set from each string at runtime and the program refuses to
 run when either carries a field, so the claim is a command anybody can run rather
@@ -33,8 +33,8 @@ turn as its prompt. The same text written into a live session's socket arrives
 as words, and the model then decides whether to invoke anything. One trial of
 four answered such an order from memory with no invocation at all, which is the
 failure this rail exists to stop. So a live session takes the turn with a hook on
-its own side: claw-resume-hook matches RESUME_TURN exactly and puts the
-orchestrate front page in front of the model before its first token. Q184.
+its own side: the orchestrate skill's resume-hook matches RESUME_TURN exactly and
+puts the skill's front page in front of the model before its first token. Q184.
 
 A RESUME IS NOT A FORK, AND ONE RESUME FORM MAKES IT ONE. `--resume` continues
 one session id and one transcript. A session the harness has already run in the
@@ -139,6 +139,9 @@ an orchestrator handle picks the road by whether the session is here:
         the same rule as the mail road. A resume aimed at a live session forks,
         which is why this road is only for a session that is gone.
 
+Both roads are refused while the phrase cannot be read from the skill, and the
+record is kept for the pass that can.
+
 The record is consumed by the act. Thirty minutes later the stamp check reads the
 workpaper, because the resume operation records itself there, and a workpaper
 that did not move is one line to the `human` handle.
@@ -203,13 +206,24 @@ import time
 # sentence names the bus to read. Neither of these names anything: the session
 # each reaches finds its own bus the way it found it before.
 #
-# RESUME_TURN IS A SLASH COMMAND ON PURPOSE. Measured 2026-09-26: a turn a
-# stopped session is resumed with expands into the skill, with the body in front
-# of the model before its first token. A sentence in prose, on that same road, was
+# RESUME_TURN IS THE ORCHESTRATE SKILL'S PHRASE, AND THIS PROGRAM READS IT FROM
+# THE SKILL. Q191, ruled 2026-09-26: the skill owns the resume hook, and the
+# phrase is the seam between the hook and this rail. `resume-hook --phrase`
+# prints it. It is read once at start, with one trailing newline taken off, and
+# this file keeps no copy. A copy would drift from what the hook matches, and
+# nothing would say so.
+#
+# THE PHRASE IS A SLASH COMMAND ON PURPOSE. Measured 2026-09-26: a turn a stopped
+# session is resumed with expands into the skill, with the body in front of the
+# model before its first token. A sentence in prose, on that same road, was
 # answered with "What would you like me to do?". So the words are the invocation
-# and nothing else. The claw's resume hook matches these exact bytes on a live
-# session, and the controls prove the two are the same.
-RESUME_TURN = "/orchestrate full resume operation please"
+# and nothing else.
+#
+# WITHOUT THE SKILL THERE IS NO PHRASE, AND BOTH RESUME ROADS REFUSE. The wake
+# nudge and the forced write do not need it and go on.
+RESUME_HOOK = "/etc/claude-code/.claude/skills/orchestrate/scripts/resume-hook"
+RESUME_TURN = None
+RESUME_TURN_WHY = "the resume phrase has not been read"
 
 # FORCED_WRITE_TURN NAMES BOTH HALVES OF THE WRITE. The postures are what a
 # compaction drops; the skills in use are what a resume has to re-invoke. A turn
@@ -220,10 +234,47 @@ FORCED_WRITE_TURN = (
     "workpaper, then continue."
 )
 
-# Every fixed sentence this program can deliver. `--law` proves each one, so a
-# sentence added later without a law reading is a sentence this tuple refuses to
-# leave out.
-SENTENCES = (("RESUME_TURN", RESUME_TURN), ("FORCED_WRITE_TURN", FORCED_WRITE_TURN))
+
+
+def sentences():
+    """Every fixed sentence this program can deliver now. `--law` proves each one.
+
+    The resume phrase is in the list once it has been read from the skill.
+    """
+    out = [("FORCED_WRITE_TURN", FORCED_WRITE_TURN)]
+    if RESUME_TURN is not None:
+        out.insert(0, ("RESUME_TURN", RESUME_TURN))
+    return out
+
+
+def read_resume_turn():
+    """The resume phrase as the skill's hook prints it, or (None, why)."""
+    if not os.access(RESUME_HOOK, os.X_OK):
+        return None, "no orchestrate skill in the machine tier: there is no %s" % RESUME_HOOK
+    try:
+        proc = subprocess.run([RESUME_HOOK, "--phrase"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, "%s --phrase did not run: %s: %s" % (RESUME_HOOK, type(exc).__name__, exc)
+    if proc.returncode != 0:
+        return None, "%s --phrase exited %d" % (RESUME_HOOK, proc.returncode)
+    text = proc.stdout.decode("utf-8", "replace")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text.strip() or "\n" in text:
+        return None, "%s --phrase printed no single line" % RESUME_HOOK
+    return text, ""
+
+
+def load_resume_turn():
+    """Read the phrase once, at start, into RESUME_TURN."""
+    global RESUME_TURN, RESUME_TURN_WHY
+    RESUME_TURN, RESUME_TURN_WHY = read_resume_turn()
+    return RESUME_TURN
+
+
+def no_phrase_detail():
+    return "%s, so there is no resume phrase to send" % RESUME_TURN_WHY
 
 # %-style and str.format are the two ways a Python string interpolates. The law
 # check below proves neither sentence carries either.
@@ -307,7 +358,7 @@ def law_fields(text):
 def sentence_law():
     """Every fixed sentence, with the fields it carries. Empty sets mean lawful."""
     out = []
-    for name, text in SENTENCES:
+    for name, text in sentences():
         fields = sorted(law_fields(text))
         percent = PERCENT_FIELD.search(text)
         out.append({"name": name, "sentence": text, "format_fields": fields,
@@ -532,6 +583,13 @@ def transcript_tokens(path):
     plus what this turn wrote into it. A turn carrying neither says nothing, and
     the newest turn that carries them answers. No session can read its own
     fullness, so this file is the only place the number exists.
+
+    A TURN NO MODEL SENT SAYS NOTHING EITHER. The harness writes its own
+    assistant turns under the model `<synthetic>`, with both fields at zero.
+    Read as a window, one of them re-armed the token arm and the next real turn
+    fired it again. Measured 2026-09-26: a synthetic turn at 14:55:57 read 0,
+    the real turn at 15:04:05 read 309,444, and the forced write went a second
+    time with the same reason.
     """
     if not path:
         return None
@@ -548,6 +606,8 @@ def transcript_tokens(path):
                     continue
                 msg = rec.get("message") if isinstance(rec, dict) else None
                 if not (isinstance(msg, dict) and msg.get("role") == "assistant"):
+                    continue
+                if not MODEL_ID.match(str(msg.get("model") or "")):
                     continue
                 usage = msg.get("usage")
                 if not isinstance(usage, dict):
@@ -1235,9 +1295,14 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
 
     TWO ARMS, AND EITHER ONE IS ENOUGH. The cadence arm counts the handle's own
     activity. The token arm reads the transcript's last turn against half the
-    automatic compaction window, and fires once per crossing: a pass that reads
-    below the threshold re-arms it, which is what a compaction does. Without that
-    re-arm every pass past the threshold would deliver the same turn.
+    automatic compaction window, and fires once per crossing per session: a pass
+    that reads below the threshold re-arms it, which is what a compaction does.
+    Without that re-arm every pass past the threshold would deliver the same turn.
+
+    THE ARM IS KEYED ON THE SESSION ID, NOT ON THE PROCESS. The app gives a
+    conversation a new process and keeps its id, and that is the same crossing.
+    A conversation under a new session id is a new transcript and a new crossing,
+    so it re-arms.
 
     THE STAMP IS READ ON A LATER PASS, NOT IN THIS ONE. The turn has to reach the
     session, the session has to take a turn, and the write has to land. So the
@@ -1289,6 +1354,11 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
         item["token_threshold"] = threshold
         armed = data.get("token_arm_armed")
         armed = True if armed is None else bool(armed)
+        fired_in = data.get("token_arm_session")
+        if not armed and fired_in and fired_in != session:
+            armed = True
+            if act:
+                write_state(handle, {"token_arm_armed": True, "token_arm_session": None})
         if threshold and isinstance(tokens, int) and tokens < threshold and not armed:
             armed = True
             if act:
@@ -1331,6 +1401,7 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
             # reading below the threshold before it may fire again.
             patch["activity"] = {"size": size, "at": time.time(), "seconds": 0.0}
             patch["token_arm_armed"] = False
+            patch["token_arm_session"] = session
             patch["stamp_at_write"] = file_stamp(book) if book else None
             patch["stamp_told_human"] = False
         write_state(handle, patch)
@@ -1420,7 +1491,8 @@ def stamp_pass(bus_dir, rows, act):
                         "operation records itself in the workpaper, so either it did not run or "
                         "the rail reads the wrong file. Run 'session-continuity --set-workpaper "
                         "%s <path>' where the path is what is wrong."
-                        % (handle, RESUME_TURN, int(waited), reason.rstrip("."), handle))
+                        % (handle, RESUME_TURN or "the resume phrase", int(waited),
+                           reason.rstrip("."), handle))
             told = tell_human(bus_dir, handle, reason, subject=subject, body=body)
             write_state(handle, {told_key: True, result_key: "missed",
                                  told_key + "_ok": told})
@@ -1435,9 +1507,9 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
     TWO ROADS, CHOSEN BY WHETHER THE SESSION IS HERE. Q184, ruled 2026-09-26.
 
       live  RESUME_TURN is written into the session through the wake rail's
-            adapter, the road a nudge takes. The claw's resume hook matches the
-            phrase on the receiving side and puts the orchestrate front page in
-            front of the model before its first token. Nothing is stopped, so a
+            adapter, the road a nudge takes. The orchestrate skill's resume hook
+            matches the phrase on the receiving side and puts the skill's front
+            page in front of the model before its first token. Nothing is stopped, so a
             desktop session with no job id takes this road like any other.
       gone  the session is resumed with RESUME_TURN as its prompt, which the
             harness expands into the skill. The form is the mail road's: bare
@@ -1502,6 +1574,14 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             continue
         pid = row.get("live_pid")
         item["road"] = "live" if pid else "gone"
+        if RESUME_TURN is None:
+            item["outcome"] = "refused"
+            item["detail"] = no_phrase_detail()
+            out.append(item)
+            keep.append(rec)
+            if act:
+                log("%s: post-compaction refused -- %s" % (handle, item["detail"]))
+            continue
 
         # ---- live: the phrase through the adapter ----
         if pid:
@@ -1672,6 +1752,10 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
                              "--clear-hold clears it" % ", ".join(result["held"]))
             log("%s: %s" % (handle, row["detail"]))
             continue
+        if RESUME_TURN is None:
+            row["outcome"], row["detail"] = "refused", no_phrase_detail()
+            log("%s: resume refused -- %s" % (handle, row["detail"]))
+            continue
         ok, detail = resume(guard, cmd, handle, row, row.get("model") or "", row["bare"])
         row["outcome"] = "resumed" if ok else "failed"
         row["detail"] = detail
@@ -1695,7 +1779,13 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
 # ------------------------------------------------------------------ the modes
 def cmd_law():
     readings = sentence_law()
-    print(json.dumps({"sentences": readings, "lawful": lawful()}, indent=2))
+    phrase = {"hook": RESUME_HOOK, "read": RESUME_TURN is not None,
+              "why": "" if RESUME_TURN is not None else no_phrase_detail()}
+    print(json.dumps({"sentences": readings, "lawful": lawful(), "resume_phrase": phrase},
+                     indent=2))
+    if RESUME_TURN is None:
+        log("the resume phrase is not read: %s. The live and the gone resume roads refuse "
+            "until the orchestrate skill is in the machine tier." % no_phrase_detail())
     for r in readings:
         if r["lawful"]:
             continue
@@ -1740,6 +1830,8 @@ def main(argv):
         sys.stderr.write(__doc__)
         return 2
     mode = args[0]
+    if mode in ("--law", "--check", "--once"):
+        load_resume_turn()
     if mode == "--law":
         return cmd_law() if len(args) == 1 else 2
     if mode == "--clear-hold":
@@ -1815,6 +1907,8 @@ def main(argv):
                "adapter_dir": adapter_dir, "harness": cmd,
                "fallback_model": conf_value("ORCHESTRATE_DELEGATE_MODEL") or "",
                "sentences": sentence_law(), "alive_after_secs": ALIVE_AFTER_SECS,
+               "resume_phrase": {"hook": RESUME_HOOK, "read": RESUME_TURN is not None,
+                                 "why": "" if RESUME_TURN is not None else no_phrase_detail()},
                "idle_stop_minutes": idle_stop, "activity_hours": activity_hours,
                "stamp_grace_minutes": STAMP_GRACE_MINUTES,
                "compaction_records": records_path(), "record_ttl_hours": RECORD_TTL_HOURS,

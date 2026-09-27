@@ -327,19 +327,58 @@ STEP="take the apply lock"
 #
 # THE PROVISIONING RUN DOES NOT INHERIT THE LOCK. Its invocation below closes
 # fd 9, so a process it leaves running cannot hold the lock after this run ends.
+#
+# THE REFUSAL NAMES A PROCESS THAT HAS THE LOCK FILE OPEN. The holder writes its
+# pid and start into the file under the lock, below. The file keeps that line
+# after the holder has ended, and a holder that is not this script writes
+# nothing there. Measured on staging 2026-09-26: a tick named the ride's pid
+# after the ride had gone. So the line is believed only while its pid has the
+# file open. Otherwise every other process with the file open is named.
+#
+# /proc/locks DOES NOT ANSWER THIS. It records the pid that took the lock, and
+# here that is the `flock` command, which exits at once. Measured 2026-09-27:
+# the table named a pid that no longer existed while a shell held the lock.
+lock_open_by() { # lock_open_by <pid> <file> ; the process has the file open
+  local f
+  for f in /proc/"$1"/fd/*; do
+    [ "$(readlink "$f" 2>/dev/null)" = "$2" ] && return 0
+  done 2>/dev/null
+  return 1
+}
+lock_holder() { # lock_holder <lock file> ; one phrase naming the holder, or nothing
+  local line pid p comm who=""
+  line="$(head -n 1 "$1" 2>/dev/null | cut -c1-120)"
+  pid="${line#pid }"; pid="${pid%% *}"
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) if lock_open_by "$pid" "$1"; then printf '%s' "$line"; return 0; fi ;;
+  esac
+  for p in /proc/[0-9]*; do
+    p="${p#/proc/}"
+    { [ "$p" = "$$" ] || [ "$p" = "$BASHPID" ]; } && continue
+    lock_open_by "$p" "$1" || continue
+    comm="$(cat "/proc/${p}/comm" 2>/dev/null || true)"
+    who="${who:+${who}, }pid ${p}${comm:+ (${comm})}"
+  done
+  if [ -n "$who" ]; then
+    printf '%s, which wrote nothing to it%s' "$who" "${line:+. Its line, ${line}, is left from a run that has ended}"
+  else
+    printf '%s' "$line"
+  fi
+}
 if [ "$CHECK_ONLY" -eq 0 ]; then
   command -v flock >/dev/null 2>&1 \
     || die "no flock" "flock is not on this claw, so this run cannot prove it is the only one applying. Refusing. This claw is unchanged and nothing was fetched"
   exec 9<>"$APPLY_LOCK" \
     || die "lock unavailable" "could not open ${APPLY_LOCK}. This claw is unchanged and nothing was fetched"
   if ! flock -n 9; then
-    lock_holder="$(head -n 1 "$APPLY_LOCK" 2>/dev/null | cut -c1-120)"
+    lock_holder="$(lock_holder "$APPLY_LOCK")"
     if [ -n "${INVOCATION_ID:-}" ] || [ ! -t 0 ]; then
       VERDICT="deferred behind another run"
-      log info "another run of this script holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}), so this scheduled run read nothing, changed nothing and exits 0. The next tick reads the pointer again"
+      log info "another process holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}), so this scheduled run read nothing, changed nothing and exits 0. The next tick reads the pointer again"
       exit 0
     fi
-    die "another run holds the apply" "another run of this script holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}). This run read nothing and changed nothing. Run it again when that run has ended"
+    die "another run holds the apply" "another process holds ${APPLY_LOCK} (${lock_holder:-it recorded nothing}). This run read nothing and changed nothing. Run it again when that process has ended"
   fi
   printf 'pid %s since %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APPLY_LOCK"
 fi

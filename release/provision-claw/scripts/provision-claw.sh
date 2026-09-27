@@ -702,10 +702,20 @@ BUS_JOIN_HOOK="${CLAW_BIN}/claw-bus-join"
 COMPACT_RECORD_HOOK="${CLAW_BIN}/claw-compaction-record"
 COMPACT_ADVISORY_HOOK="${CLAW_BIN}/claw-compaction-advisory"
 # THE RESUME HOOK RUNS ON EVERY PROMPT AND ANSWERS ONE. When a prompt is exactly
-# the continuity rail's resume phrase, it puts the installed orchestrate skill's
-# front page in front of the model. Q184, ruled 2026-09-26. On every other prompt
-# it exits in about two milliseconds with nothing printed.
-RESUME_HOOK="${CLAW_BIN}/claw-resume-hook"
+# the continuity rail's resume phrase, it puts the orchestrate skill's front page
+# in front of the model. On every other prompt it exits in about two
+# milliseconds with nothing printed.
+#
+# THE SKILL OWNS IT, AND THIS RUN ONLY REGISTERS IT. Q191, ruled 2026-09-26: the
+# program ships in the public orchestrate skill, and the skill's own runbook
+# gives the registration. So phase 16 registers the copy in the machine tier by
+# its tier path, and lays no program of its own. The release does not carry the
+# skill. A tier without it gets no hook, and the phase says so.
+RESUME_HOOK="${CLAUDE_MACHINE_SKILLS}/orchestrate/scripts/resume-hook"
+# The program this run laid before the skill carried one. Phase 16 takes its
+# entry out of the managed settings and removes the file, in the apply that
+# registers the skill's.
+OLD_RESUME_HOOK="${CLAW_BIN}/claw-resume-hook"
 # THE AUTOMATIC COMPACTION WINDOW, IN TOKENS. Ruled 2026-09-26: 600,000. The
 # key is one number per person and not per model. Fable and Sonnet 5 carry a
 # 1M window, so they compact at sixty percent of it and keep room to do so. A
@@ -1549,15 +1559,13 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../payload/bus"
   [ -r "${PAYLOAD_DIR}/claw-bus-join" ] \
     || missing_payload="$missing_payload ../payload/claw-bus-join"
-  # The two compaction hooks and the resume hook, for the same reason as the
-  # join: phase 16 registers each one machine-wide, and a hook pointing at
-  # nothing fires on every session. The resume hook fires on every prompt.
+  # The two compaction hooks, for the same reason as the join: phase 16
+  # registers each one machine-wide, and a hook pointing at nothing fires on
+  # every session.
   [ -r "${PAYLOAD_DIR}/claw-compaction-record" ] \
     || missing_payload="$missing_payload ../payload/claw-compaction-record"
   [ -r "${PAYLOAD_DIR}/claw-compaction-advisory" ] \
     || missing_payload="$missing_payload ../payload/claw-compaction-advisory"
-  [ -r "${PAYLOAD_DIR}/claw-resume-hook" ] \
-    || missing_payload="$missing_payload ../payload/claw-resume-hook"
   [ -r "${TEMPLATE_DIR}/session-bus.md" ] \
     || missing_payload="$missing_payload ../templates/session-bus.md"
   # The authority plane's three pieces, and the first of them is the one that
@@ -5024,8 +5032,9 @@ phase_16_session_bus() {
     say "  would converge ${STATE_ROOT} to 0755 root:root and say whether it was adopted or moved,"
     say "  move every path under ${BUS_HOME} to group ${BUS_GROUP} with its mode kept, and count them,"
     say "  create ${BUS_HOME} 2770 root:${BUS_GROUP}, install ${BUS_CLI} + ${BUS_JOIN_HOOK},"
-    say "  install the two compaction hooks and ${RESUME_HOOK},"
-    say "  register the session-start join and the three hooks in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
+    say "  install the two compaction hooks, remove ${OLD_RESUME_HOOK},"
+    say "  register the session-start join, the two compaction hooks and ${RESUME_HOOK} where the tier carries it"
+    say "  in ${MANAGED_SETTINGS}, install ${BUS_DOC},"
     say "  read a member's own traverse and write before running the join as them,"
     say "  and read that ${MEMBERS_GROUP} owns only ${CLAW_BRIEFING} and ${CLAW_CONVENTIONS}, and ${BUS_GROUP} only the bus"
     return 0
@@ -5118,7 +5127,7 @@ phase_16_session_bus() {
   # ---- the two programs every member's session runs ----
   install -d -m 0755 -o root -g root "$CLAW_BIN"
   local p missing=""
-  for p in bus claw-bus-join claw-compaction-record claw-compaction-advisory claw-resume-hook; do
+  for p in bus claw-bus-join claw-compaction-record claw-compaction-advisory; do
     [ -r "${PAYLOAD_DIR}/${p}" ] || missing="$missing $p"
   done
   if [ -n "$missing" ]; then
@@ -5132,7 +5141,6 @@ phase_16_session_bus() {
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-bus-join" "$BUS_JOIN_HOOK"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-compaction-record" "$COMPACT_RECORD_HOOK"
   install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-compaction-advisory" "$COMPACT_ADVISORY_HOOK"
-  install -m 0755 -o root -g root "${PAYLOAD_DIR}/claw-resume-hook" "$RESUME_HOOK"
   check "${BUS_CLI} is 0755 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$BUS_CLI')\" = '755 root:root' ]"
   check "${BUS_JOIN_HOOK} is 0755 root:root" \
@@ -5141,8 +5149,6 @@ phase_16_session_bus() {
     bash -c "[ \"\$(stat -c '%a %U:%G' '$COMPACT_RECORD_HOOK')\" = '755 root:root' ]"
   check "${COMPACT_ADVISORY_HOOK} is 0755 root:root" \
     bash -c "[ \"\$(stat -c '%a %U:%G' '$COMPACT_ADVISORY_HOOK')\" = '755 root:root' ]"
-  check "${RESUME_HOOK} is 0755 root:root" \
-    bash -c "[ \"\$(stat -c '%a %U:%G' '$RESUME_HOOK')\" = '755 root:root' ]"
 
   # ---- the join, registered where the harness reads it ----
   #
@@ -5150,8 +5156,17 @@ phase_16_session_bus() {
   # firm may have put other things in it. Two keys are ours; the rest is
   # somebody else's decision and survives this run untouched.
   install -d -m 0755 -o root -g root "$(dirname "$MANAGED_SETTINGS")"
-  local existing='{}' merged
+  local existing='{}' merged res=""
   [ -s "$MANAGED_SETTINGS" ] && existing="$(cat "$MANAGED_SETTINGS")"
+  # THE RESUME HOOK IS REGISTERED ONLY WHERE THE TIER CARRIES IT. Its path is the
+  # tier's, not the resolved one, so a skill relinked later is still the one that
+  # runs. A tier without it registers nothing: a hook pointing at nothing would
+  # fail on every prompt of every session.
+  if [ -x "$RESUME_HOOK" ]; then
+    res="$RESUME_HOOK"
+  else
+    warn "the machine tier has no orchestrate skill, so no resume hook is registered. Put the skill in ${CLAUDE_MACHINE_SKILLS} and apply again"
+  fi
   # FIVE THINGS OF OURS IN THIS FILE NOW, AND THE MERGE IS STILL BY VALUE.
   # Each entry is replaced by name and everything else in the file survives. The
   # advisory carries the `compact` matcher because its line is true only after a
@@ -5160,6 +5175,10 @@ phase_16_session_bus() {
   # harness puts in the model's context. The resume hook sits under
   # UserPromptSubmit with no matcher, because that event takes none. The hook
   # reads the prompt itself.
+  #
+  # THE OLD RESUME HOOK LEAVES IN THE SAME WRITE THAT BRINGS THE SKILL'S. Both
+  # print the same page, so a file that held both would give every resume the
+  # page twice. One merge takes the old entry out and puts the new one in.
   #
   # THE COMPACTION WINDOW IS NOT WRITTEN HERE, AND THE MEASUREMENT IS WHY.
   # `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is documented to override the setting, and
@@ -5172,7 +5191,7 @@ phase_16_session_bus() {
   if ! merged="$(printf '%s' "$existing" | jq \
         --arg dir "$BUS_HOME" --arg hook "$BUS_JOIN_HOOK" \
         --arg rec "$COMPACT_RECORD_HOOK" --arg adv "$COMPACT_ADVISORY_HOOK" \
-        --arg res "$RESUME_HOOK" '
+        --arg res "$res" --arg old "$OLD_RESUME_HOOK" --arg tierres "$RESUME_HOOK" '
         .env = ((.env // {}) + {SESSION_BUS_DIR: $dir})
         | .hooks = ((.hooks // {}) + {SessionStart:
             (((.hooks.SessionStart // []) | map(select(
@@ -5185,11 +5204,19 @@ phase_16_session_bus() {
              + [{hooks: [{type: "command", command: $rec}]}])})
         | .hooks = (.hooks + {UserPromptSubmit:
             (((.hooks.UserPromptSubmit // []) | map(select(
-                 [.hooks[]?.command] | index($res) | not)))
-             + [{hooks: [{type: "command", command: $res}]}])})' 2>/dev/null)"; then
+                 [.hooks[]?.command] | (index($tierres) or index($old)) | not)))
+             + (if $res == "" then [] else [{hooks: [{type: "command", command: $res}]}] end))})' 2>/dev/null)"; then
     bad "${MANAGED_SETTINGS} is not readable as JSON, so the session-start join, the two compaction hooks and the resume hook were NOT registered. Sessions will not auto-join. Fix the file by hand."
   else
-    printf '%s\n' "$merged" > "$MANAGED_SETTINGS"
+    # WRITTEN ONLY WHEN THE BYTES DIFFER, AND BY RENAME. A second apply leaves
+    # the file still. A session that reads it during the write reads the old file
+    # or the new one whole, never a half.
+    if [ "$(printf '%s\n' "$merged")" != "$(cat "$MANAGED_SETTINGS" 2>/dev/null)" ] \
+       || [ ! -f "$MANAGED_SETTINGS" ]; then
+      printf '%s\n' "$merged" > "${MANAGED_SETTINGS}.new"
+      chmod 0644 "${MANAGED_SETTINGS}.new"; chown root:root "${MANAGED_SETTINGS}.new"
+      mv -f "${MANAGED_SETTINGS}.new" "$MANAGED_SETTINGS"
+    fi
     chmod 0644 "$MANAGED_SETTINGS"; chown root:root "$MANAGED_SETTINGS"
     check "${MANAGED_SETTINGS} sets SESSION_BUS_DIR to ${BUS_HOME}" \
       bash -c "[ \"\$(jq -r '.env.SESSION_BUS_DIR // empty' '$MANAGED_SETTINGS')\" = '$BUS_HOME' ]"
@@ -5199,10 +5226,20 @@ phase_16_session_bus() {
       bash -c "[ \"\$(jq '[.hooks.SessionStart[]? | select(.matcher == \"compact\") | .hooks[]? | select(.command == \"$COMPACT_ADVISORY_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
     check "${MANAGED_SETTINGS} runs ${COMPACT_RECORD_HOOK} on PostCompact, once" \
       bash -c "[ \"\$(jq '[.hooks.PostCompact[]?.hooks[]? | select(.command == \"$COMPACT_RECORD_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
-    check "${MANAGED_SETTINGS} runs ${RESUME_HOOK} on UserPromptSubmit, once" \
-      bash -c "[ \"\$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command == \"$RESUME_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    if [ -n "$res" ]; then
+      check "${MANAGED_SETTINGS} runs ${RESUME_HOOK} on UserPromptSubmit, once" \
+        bash -c "[ \"\$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command == \"$RESUME_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '1' ]"
+    fi
+    check "${MANAGED_SETTINGS} no longer runs ${OLD_RESUME_HOOK}" \
+      bash -c "[ \"\$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command == \"$OLD_RESUME_HOOK\")] | length' '$MANAGED_SETTINGS')\" = '0' ]"
     check "${MANAGED_SETTINGS} is 0644 root:root -- a member who could edit it could redirect every session's bus" \
       bash -c "[ \"\$(stat -c '%a %U:%G' '$MANAGED_SETTINGS')\" = '644 root:root' ]"
+    # The old program goes once nothing registers it.
+    if [ -e "$OLD_RESUME_HOOK" ]; then
+      rm -f "$OLD_RESUME_HOOK"
+      say "  removed ${OLD_RESUME_HOOK}: the orchestrate skill carries the resume hook now"
+    fi
+    check "${OLD_RESUME_HOOK} is gone" bash -c "[ ! -e '$OLD_RESUME_HOOK' ]"
   fi
 
   # ---- the member's own copy of what this is ----

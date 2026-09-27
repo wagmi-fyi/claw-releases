@@ -138,7 +138,7 @@ minutes as the account, under `session-continuity@<account>.timer`. It also keep
 a live orchestrator writing down what it holds, and re-grounds a compacted one.
 
 A pass resumes each orchestrator handle this account owns that has unread mail,
-from its recorded session id and directory, with one fixed turn:
+from its recorded session id and directory, with the skill's resume phrase:
 `/orchestrate full resume operation please`. A turn a resumed session starts with
 expands into the skill. Written into a live session they arrive as words, so a
 hook there loads the skill. `--law` proves each fixed sentence interpolates
@@ -203,10 +203,15 @@ until `--clear-hold <handle>` clears it. A line goes to `human`.
 
 ## The resume hook's limit
 
-The hook loads the orchestrate skill's front page when it is 9,500 characters or
-fewer. A longer page, or none, is not loaded. The session gets one line in its
-place that names the page and says to run the resume operation by hand. The same
-line goes to the journal: `journalctl -t claw-resume-hook`.
+The resume hook is the orchestrate skill's own program. Provisioning registers
+it where the machine's skills tier carries that skill. A claw without the skill
+has no hook, and the apply says so. The continuity rail reads the phrase from
+the hook, so without the skill it sends no phrase and resumes no session.
+
+The hook loads the skill's front page when it is 9,500 characters or fewer. A
+longer page, or none, is not loaded. The session gets one line in its place
+that names the page and says to run the resume operation by hand. The same line
+goes to the journal: `journalctl -t orchestrate-resume-hook`.
 
 ## The bus gc
 

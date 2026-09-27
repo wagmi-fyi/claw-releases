@@ -9,13 +9,15 @@ process exists; its own `--help` is the description of record.
 ## How it works
 
 A handle registered with the orchestrator role is enrolled; nothing is set up per
-handle. Each pass reads the bus. A handle with mail and a live session gets the wake
+handle. A re-registration that keeps a handle fresh passes the role the handle
+should have, because `bus init` overwrites the role and the orchestrator role is
+what enrols a handle. Each pass reads the bus. A handle with mail and a live session gets the wake
 rail's nudge. One whose session has gone is resumed in the background under its
 owner, with a fixed sentence telling it to invoke orchestrate's resume operation. A
 session it resumed is stopped after fifteen quiet minutes, and the conversation is
 kept. A resume that fails writes a hold, and no handle of the account is resumed
 until it is cleared. After a compaction it sends a live orchestrator the resume
-phrase, which the claw's resume hook turns into the skill's front page. A gone one
+phrase, which the orchestrate skill's resume hook turns into the skill's front page. A gone one
 is resumed the same way as for mail, with the phrase as its first turn.
 
 ## The readings

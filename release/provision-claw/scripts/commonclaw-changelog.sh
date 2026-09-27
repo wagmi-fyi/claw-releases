@@ -155,6 +155,18 @@ HEADEOF
   printf 'commonclaw-changelog: seeded the header at %s\n' "$CHANGELOG" >&2
 fi
 
+# ONE ENTRY IS ONE `## ` LINE. The notes carry `##` headings of their own, and
+# written as they are they sat level with the entries: on the hub a count of
+# `^## ` lines read 61 where the entries were 59. So every heading in the notes
+# goes down one level as it is written. Lines inside a fenced block are not
+# headings and are left alone.
+demote_headings() { # demote_headings < notes ; the notes with each heading one level down
+  awk '
+    /^ ? ? ?(```|~~~)/ { fence = !fence; print; next }
+    !fence && /^##?#?#?#?( |$)/ { print "#" $0; next }
+    { print }'
+}
+
 # ONE APPEND, ONE CALL. Nobody reads this file and writes it back, so two writers
 # in the same second cannot lose each other's entry. Same shape the member-plane
 # log uses in onboard-person.sh.
@@ -163,7 +175,7 @@ fi
   printf '**Revision:** %s\n' "$REVISION"
   printf '**Class:** %s\n\n' "$CLASS"
   printf '**What changed**\n\n'
-  cat "$NOTES_FILE"
+  demote_headings < "$NOTES_FILE"
   printf '\n'
 } >> "$CHANGELOG"
 
