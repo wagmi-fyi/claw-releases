@@ -1,14 +1,15 @@
-- **The continuity rail keeps to the conversation the app shows.** When a
-  handle records a copy of a conversation the desktop app shows, the rail
-  refuses to resume that copy. `session-continuity --check` names the reason.
-  Open the app's conversation and re-register the handle there to end it. A
-  conversation started on the command line resumes as before.
+- **The continuity rail follows a conversation the app has moved.** When the
+  desktop app moves an orchestrator's conversation to a new session, the rail
+  wakes the newest session. When it cannot tell which session is newest, it
+  resumes nothing for that handle, and `session-continuity --check` names the
+  reason. Re-register the handle from the app's conversation, and the rail
+  resumes it again.
 
 ## Changes with no visible effect
 
-The rail reads whether a session keeps its own saved options from every row
-the harness lists for that session. An open app window no longer hides that
-row.
+`session-continuity --check` shows, for each conversation the app started, the
+session the handle records, the newest session the rail links it to, what
+linked them, and the verdict.
 
 ## What somebody has to do
 

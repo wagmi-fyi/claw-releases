@@ -24,6 +24,11 @@ The rail refuses to resume a handle that records a copy of a conversation the
 desktop app shows. Open the app's conversation and re-register the handle from
 it to end the refusal.
 
+When the desktop app has moved a conversation to a new session, the rail wakes
+the newest session of that conversation. When it cannot tell which session is
+newest, it resumes nothing for that handle and `session-continuity --check`
+says why. Re-registering the handle from the app's conversation ends that.
+
 ## The readings
 
 One row per orchestrator handle this account holds: the last wake and its outcome,

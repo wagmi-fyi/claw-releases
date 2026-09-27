@@ -60,6 +60,17 @@ an app line of its own, or has no family. Otherwise the row reads `refused`, and
 the app's conversation re-registering the handle ends it. A conversation born on
 the command line resumes as before. `--check` shows the reading for every row.
 
+THE RAIL NEVER RESUMES A STALE ID. The app moves a conversation to a new session
+id, and the handle records the old one until the new session registers again.
+So before a resume of the app's conversation, the rail follows the moves from
+the recorded session to the newest. A move sits in the same projects folder,
+starts with the old session's last title, and carries message ids copied from
+it. A newer session that is live gets the nudge; one that is not is resumed in
+the recorded session's place, and it registers the handle. A link the rail
+cannot read cleanly refuses the row and names the case: no title, the title in
+another folder, a fork, an overlap, or a move the app did not write. `--check`
+shows the reading as `rule_c` on every row of the app's conversations.
+
 THE TWIN CHECK, BOTH HALVES, BEFORE ANY RESUME.
 
   1. No live process on this machine carries the handle's session id. Read from
@@ -673,6 +684,210 @@ def conversation_reading(session):
         "line the app wrote that %s does not also carry. The refusal ends when the app's "
         "conversation re-registers the handle"
         % (session[:8], ", ".join(sid[:8] for sid in reading["family"])))
+    return reading
+
+
+# ------------------------------------------------- the app's moved conversation
+#
+# RULE C: THE RAIL NEVER RESUMES A STALE ID. The app moves a conversation to a
+# new session id, and the handle records the old one until the new session
+# registers again. A resume of the old id starts a session the person cannot see,
+# and its resume operation then registers the handle to itself. So before it
+# resumes, the rail finds the newest session of the conversation the handle
+# records, and resumes that one, or nudges it when it is live.
+#
+# THE LINK, MEASURED 2026-09-27 OVER 23 MOVES ON THE HUB (w314 piece 1). The
+# moved session sits in the same projects folder, its first title is the old
+# session's last title, it carries message ids copied from the old session, and
+# the app wrote its first line. The title never links alone: one projects folder
+# held two conversations under one title 9 times, and they share no message id.
+#
+# THE LINK RESTS ON THE DESKTOP APP, AND NOBODY HERE CONTROLS IT. A moved session
+# copies message ids from the one before it and carries its title. A version of
+# the app that moves a conversation and copies no id makes the move invisible to
+# this rule, and the rail goes back to resuming the old id. Re-measure it with
+# `python3 _workpapers/w314/measure-moves.py <bus dir>` from the source root. It
+# is clean when, under "1. pairs the clock calls a move", the count for "carries
+# message ids" equals the count for "title is its line 0" (23 of 24 each).
+#
+# THE RAIL WRITES THE TITLE THIS RULE READS. Its flagged resume retitles the
+# conversation to the handle's name (w315 drove it). Two conversations that come
+# to share that title still cannot pair, because a pairing also needs copied
+# message ids. The w314 control proves it: a rail that pairs without the ids
+# resumes the stranger.
+TITLE_TYPE = "custom-title"
+
+
+# ONE READING OF A TRANSCRIPT A PROCESS. `--check` reads rule C for every row,
+# and each row reads every transcript that changed after its session began.
+# Read afresh per row, that took 41 seconds over twelve handles on the hub. So a
+# reading is kept for the life of the process, keyed by the file's size and
+# modification time, and a file that changed is read again.
+FACTS = {}
+
+
+def transcript_facts(path, whole=True):
+    """What rule C reads from one transcript, or None when it cannot be read.
+
+    The titles in order, and the first line time. With `whole`, also the last
+    line time, the entrypoint of the first line that carries a uuid, and every
+    message id. A transcript in another projects folder is read for its titles
+    alone, and only its title lines and its first timed line are parsed.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_size, st.st_mtime)
+    for want in ((True, False) if not whole else (True,)):
+        if (key, want) in FACTS:
+            return FACTS[(key, want)]
+    facts = {"titles": [], "first_at": "", "last_at": "", "entry": "", "uuids": set()}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                title_line = TITLE_TYPE in line
+                if not (whole or title_line or not facts["first_at"]):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if title_line and rec.get("type") == TITLE_TYPE \
+                        and isinstance(rec.get("customTitle"), str):
+                    facts["titles"].append(rec["customTitle"])
+                stamp = rec.get("timestamp")
+                if isinstance(stamp, str) and stamp:
+                    facts["first_at"] = facts["first_at"] or stamp
+                    facts["last_at"] = stamp
+                if whole and rec.get("uuid"):
+                    if not facts["uuids"]:
+                        facts["entry"] = str(rec.get("entrypoint") or "")
+                    facts["uuids"].add(str(rec["uuid"]))
+    except OSError:
+        return None
+    FACTS[(key, whole)] = facts
+    return facts
+
+
+def stamp_epoch(stamp):
+    try:
+        return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def moved_reading(session):
+    """Rule C's reading of one recorded session: which session of its conversation is newest.
+
+    `verdict` is `resume` when the recorded session is the newest, `newer
+    session` when a move follows it, and `refused` when the link is ambiguous.
+    `case` names what made it ambiguous. `path` is every session from the
+    recorded one to the newest, and `pairing` says what linked each move.
+
+    It reads every transcript that changed after the recorded session began, so
+    it runs only where a resume is being decided.
+    """
+    reading = {"recorded": session, "newest": session, "path": [session], "pairing": [],
+               "verdict": "resume", "case": "", "reason": ""}
+    path = transcript_path(session)
+    if not path:
+        reading["reason"] = "no transcript for the session, so nothing records a move"
+        return reading
+    mine = transcript_facts(path)
+    if mine is None or not mine["uuids"]:
+        reading["reason"] = "the transcript carries no line with a uuid"
+        return reading
+    folder = os.path.dirname(path)
+    since = stamp_epoch(mine["first_at"])
+    root = os.path.expanduser("~/.claude/projects")
+    later = {}
+    try:
+        projects = sorted(os.listdir(root))
+    except OSError:
+        projects = []
+    for project in projects:
+        where = os.path.join(root, project)
+        try:
+            names = sorted(os.listdir(where))
+        except OSError:
+            continue
+        for name in names:
+            candidate = os.path.join(where, name)
+            if not name.endswith(".jsonl") or os.path.realpath(candidate) == os.path.realpath(path):
+                continue
+            try:
+                if since is not None and os.path.getmtime(candidate) < since:
+                    continue
+            except OSError:
+                continue
+            facts = transcript_facts(candidate, whole=where == folder)
+            if facts and facts["first_at"] and facts["first_at"] > mine["first_at"]:
+                later[name[:-len(".jsonl")]] = dict(facts, folder=where)
+    here = {sid: f for sid, f in later.items() if f["folder"] == folder}
+
+    def refuse(case, why):
+        reading["verdict"], reading["case"] = "refused", case
+        reading["reason"] = ("rule C, %s: %s. The rail resumes nothing for this handle until the "
+                             "app's conversation re-registers it" % (case, why))
+        return reading
+
+    title = mine["titles"][-1] if mine["titles"] else ""
+    if not title:
+        carriers = sorted(sid for sid, f in here.items() if f["uuids"] & mine["uuids"])
+        if carriers:
+            return refuse("no title", "session %s carries no title, and %s in its folder carries "
+                          "its lines" % (session[:8], ", ".join(s[:8] for s in carriers)))
+        reading["reason"] = ("no title, and no later session in its folder carries its lines, "
+                             "so nothing moved it")
+        return reading
+    elsewhere = sorted(sid for sid, f in later.items() if f["folder"] != folder and title in f["titles"])
+    if elsewhere:
+        return refuse("title in another folder", "%s in another projects folder carries the "
+                      "title '%s'" % (", ".join(s[:8] for s in elsewhere), title))
+    # ONE MOVE AT A TIME, AND EACH MOVE CARRIES LINES OF THE ONE BEFORE IT. A move
+    # copies part of the session it left, so after the first step a move must hold
+    # a line the step before did not already carry. Two sessions that each copied
+    # the recorded one, and not each other, are then a fork, not a line of moves.
+    current, facts, linked, before = session, mine, set(), set()
+    while True:
+        last = facts["titles"][-1] if facts["titles"] else ""
+        moves = sorted((sid for sid, f in here.items()
+                        if sid not in reading["path"] and f["titles"] and f["titles"][0] == last
+                        and f["first_at"] > facts["first_at"]
+                        and (f["uuids"] & facts["uuids"]) - before),
+                       key=lambda sid: here[sid]["first_at"])
+        linked.update(moves)
+        if not moves:
+            break
+        nxt = here[moves[0]]
+        if nxt["entry"] != APP_ENTRYPOINT:
+            return refuse("not the app's", "session %s links to %s by title, folder and message "
+                          "ids, and its first line was written by %s" % (
+                              moves[0][:8], current[:8], nxt["entry"] or "a client that recorded none"))
+        if facts["last_at"] > nxt["first_at"]:
+            return refuse("overlap", "session %s wrote at %s, after the move to %s began at %s" % (
+                current[:8], facts["last_at"], moves[0][:8], nxt["first_at"]))
+        reading["pairing"].append({
+            "from": current, "to": moves[0], "title": last, "folder": os.path.basename(folder),
+            "shared_ids": len(nxt["uuids"] & facts["uuids"])})
+        reading["path"].append(moves[0])
+        before = facts["uuids"]
+        current, facts = moves[0], nxt
+    stray = sorted(linked - set(reading["path"]))
+    if stray:
+        return refuse("fork", "%s and %s both link to the conversation and are not one line of "
+                      "moves" % (", ".join(s[:8] for s in stray), reading["path"][-1][:8]))
+    if current == session:
+        reading["reason"] = "no later session in its folder starts with its title and carries its lines"
+        return reading
+    reading["newest"], reading["verdict"] = current, "newer session"
+    reading["reason"] = ("the app moved the conversation: %s, each move linked by title '%s' in "
+                         "folder %s and copied message ids" % (
+                             " to ".join(s[:8] for s in reading["path"]), title,
+                             os.path.basename(folder)))
     return reading
 
 
@@ -1357,6 +1572,8 @@ def survey(guard, listing, bus_dir, me, only=(), read_all=False):
         # meet. An acting pass reads it only where it would resume.
         if read_all and row["session"]:
             row["rule_a"] = conversation_reading(row["session"])
+            if row["rule_a"]["origin"] == APP_ENTRYPOINT:
+                row["rule_c"] = moved_reading(row["session"])
         if unread <= 0:
             row["action"], row["reason"] = "idle", "no mail, nothing to do"
             continue
@@ -1389,6 +1606,32 @@ def survey(guard, listing, bus_dir, me, only=(), read_all=False):
         if row["rule_a"]["verdict"] == "refused":
             row["action"], row["reason"] = "refused", row["rule_a"]["reason"]
             continue
+        # RULE C, FOR THE APP'S CONVERSATIONS. The app never moves a conversation
+        # the command line started, so those resume as before.
+        target = row["session"]
+        if row["rule_a"]["origin"] == APP_ENTRYPOINT:
+            if "rule_c" not in row:
+                row["rule_c"] = moved_reading(row["session"])
+            moved = row["rule_c"]
+            if moved["verdict"] == "refused":
+                row["action"], row["reason"] = "refused", moved["reason"]
+                continue
+            if moved["verdict"] == "newer session":
+                target = moved["newest"]
+                here_now = guard.generations(target, live)
+                if here_now:
+                    row["action"] = "nudge"
+                    row["pid"] = here_now[-1]["pid"]
+                    row["reason"] = ("the app moved the conversation to session %s, and pid %d "
+                                     "carries it" % (target[:8], row["pid"]))
+                    continue
+                # The newest session answers rule A on its own, as the recorded
+                # one did: a copy is refused wherever it sits in the line.
+                newest_a = conversation_reading(target)
+                if newest_a["verdict"] == "refused":
+                    row["action"], row["reason"] = "refused", newest_a["reason"]
+                    continue
+        row["resume_session"] = target
         # WHICH RESUME FORM. A listing that could not be read decides nothing,
         # and a flagged resume of a saved session is the one outcome nothing
         # later can undo, so an unreadable listing is refused.
@@ -1397,13 +1640,16 @@ def survey(guard, listing, bus_dir, me, only=(), read_all=False):
             row["reason"] = ("the harness's session listing could not be read, so nothing "
                              "says which resume form this session takes")
             continue
-        row["bare"] = row["session"] in saved
+        row["bare"] = target in saved
         row["action"] = "resume"
         row["reason"] = "no process carries the session and no live session carries its name"
+        if target != row["session"]:
+            row["reason"] = ("the app moved the conversation to session %s, and no process carries "
+                             "it, so the rail resumes that one" % target[:8])
         if row["bare"]:
             row["model_source"] = "the session's saved options"
             continue
-        model, path = transcript_model(row["session"])
+        model, path = transcript_model(target)
         row["model"] = model or (conf_value("ORCHESTRATE_DELEGATE_MODEL") or "")
         row["model_source"] = "the transcript" if model else CONF
         row["transcript"] = path
@@ -1769,6 +2015,54 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             if act:
                 log("%s: post-compaction refused -- %s" % (handle, item["detail"]))
             continue
+        # RULE C ON THE GONE ROAD. A newer session of the app's conversation
+        # takes the phrase: through the adapter when it is live, by a resume
+        # when it is not. The recorded session is never resumed past it.
+        if reading["origin"] == APP_ENTRYPOINT:
+            moved = moved_reading(session)
+            item["rule_c"] = moved
+            newest_a = (conversation_reading(moved["newest"])
+                        if moved["verdict"] == "newer session" else None)
+            why = (moved["reason"] if moved["verdict"] == "refused" else
+                   newest_a["reason"] if newest_a and newest_a["verdict"] == "refused" else "")
+            if why:
+                item["outcome"], item["detail"] = "refused", why
+                out.append(item)
+                keep.append(rec)
+                if act:
+                    log("%s: post-compaction refused -- %s" % (handle, why))
+                continue
+            if moved["verdict"] == "newer session":
+                session = moved["newest"]
+                item["resume_session"] = session[:8]
+                here_now = guard.generations(session)
+                if here_now:
+                    item["road"] = "live"
+                    pid = here_now[-1]["pid"]
+                    if not act:
+                        item["outcome"] = "would deliver"
+                        item["detail"] = ("the app moved the conversation to session %s, and pid %d "
+                                          "carries it, so the phrase goes to it" % (session[:8], pid))
+                        out.append(item)
+                        keep.append(rec)
+                        continue
+                    got = nudge(rail, adapter_dir, bus_dir, handle,
+                                {"owner": "", "address": row.get("address") or "", "cwd": cwd},
+                                pid, text=RESUME_TURN)
+                    item["outcome"] = got.get("outcome", "failed")
+                    item["detail"] = got.get("reason") or got.get("detail") or ""
+                    out.append(item)
+                    patch = {"last_post_compact": now_iso(),
+                             "last_post_compact_outcome": item["outcome"],
+                             "last_post_compact_detail": item["detail"],
+                             "last_post_compact_road": "live"}
+                    if item["outcome"] == "delivered":
+                        patch.update(post_compact_stamp(read_state(handle), cwd))
+                    else:
+                        keep.append(rec)
+                    write_state(handle, patch)
+                    log("%s: post-compaction phrase %s -- %s" % (handle, item["outcome"], item["detail"]))
+                    continue
         if saved is None:
             item["outcome"] = "waiting"
             item["detail"] = ("the harness's session listing could not be read, so nothing says "
@@ -1917,17 +2211,21 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
             row["outcome"], row["detail"] = "refused", no_phrase_detail()
             log("%s: resume refused -- %s" % (handle, row["detail"]))
             continue
-        ok, detail = resume(guard, cmd, handle, row, row.get("model") or "", row["bare"])
+        # Rule C may name a newer session than the one the handle records, and
+        # that is the one resumed. It registers the handle from inside.
+        target = row.get("resume_session") or row["session"]
+        ok, detail = resume(guard, cmd, handle, {"session": target, "cwd": row["cwd"]},
+                            row.get("model") or "", row["bare"])
         row["outcome"] = "resumed" if ok else "failed"
         row["detail"] = detail
         patch = {"last_resume": now_iso(), "last_resume_outcome": row["outcome"],
                  "last_resume_detail": detail, "last_resume_model": row.get("model") or "",
-                 "last_resume_bare": row["bare"]}
+                 "last_resume_bare": row["bare"], "last_resume_session": target}
         if ok:
             patch["hold"] = None
             # What this rail started is what this rail ends. The stop pass reads
             # this name, and a stop clears it.
-            patch["resumed_session"] = row["session"]
+            patch["resumed_session"] = target
             patch["stopped_at"] = None
         else:
             patch.update(hold_patch(bus_dir, handle, detail, row.get("model") or ""))
