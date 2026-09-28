@@ -123,7 +123,7 @@ FORCED_WRITE_TURN through the wake rail's adapter when either arm reads due.
                    for a day credits none of it. Each pass adds the gap since the
                    last reading, and no more than ACTIVITY_CREDIT_CAP_SECS of it,
                    which is why an off rail cannot bank hours.
-  the token arm    the transcript's last turn reads past half the automatic
+  the token arm    the transcript's last turn reads past 90% of the automatic
                    compaction window: the one a person set, or else the
                    harness's default for the session's model, and off for a
                    model with no known default. It fires once per crossing: the arm re-arms
@@ -354,6 +354,11 @@ MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json"
 # The name the harness reads the window from, and the settings key beside it.
 WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 WINDOW_KEY = "autoCompactWindow"
+# THE TOKEN ARM FIRES AT THIS FRACTION OF THE WINDOW. Ruled 2026-09-28: 90
+# percent, where it was half. The write then comes close to the compaction it
+# prepares for. It leaves 65,000 tokens of room at the 650,000 window
+# provisioning seeds, and 100,000 at a 1M model's default.
+TOKEN_ARM_FRACTION = 0.9
 # THE HARNESS'S OWN DEFAULT, PER MODEL, WHEN NOTHING DECLARES A WINDOW. The
 # documented context window of each model family, matched on the start of the
 # model id the transcript records. Ruled 2026-09-26: 200K for Haiku 4.5 and the
@@ -696,25 +701,40 @@ def conversation_reading(session):
 # resumes, the rail finds the newest session of the conversation the handle
 # records, and resumes that one, or nudges it when it is live.
 #
-# THE LINK, MEASURED 2026-09-27 OVER 23 MOVES ON THE HUB (w314 piece 1). The
-# moved session sits in the same projects folder, its first title is the old
-# session's last title, it carries message ids copied from the old session, and
-# the app wrote its first line. The title never links alone: one projects folder
-# held two conversations under one title 9 times, and they share no message id.
+# THE LINK IS THE MESSAGE IDS A MOVE COPIES, MEASURED 2026-09-27 ON THE HUB
+# (w314 piece 1, w319 piece 1). The moved session sits in the same projects
+# folder, the app wrote its first line, it began after the old session's last
+# line, and it opens with lines copied from the old session, message ids and
+# all. A message id is random and written once, so two sessions share one only
+# when one copied the other. So one shared id is the floor, and no higher count
+# is asked for. The 40 moves the rule links on the hub copied 138 to 4381 ids,
+# and a tenant claw's two copied 185 and 1483. Two conversations in one folder that share
+# no id never link, whatever their titles: one folder held two conversations
+# under one title 9 times.
 #
-# THE LINK RESTS ON THE DESKTOP APP, AND NOBODY HERE CONTROLS IT. A moved session
-# copies message ids from the one before it and carries its title. A version of
+# THE TITLE IS A FURTHER CHECK, WHERE ONE EXISTS. The app does not title a
+# conversation by itself. It wrote no title on 51 of its 98 sessions on the hub,
+# and on none of its 4 on a tenant claw. Of the hub's 47 titled sessions, 29 got the title
+# from a move and 16 had it set in the app. 2 got it from a resume that passed
+# the handle's name with --name, as the rail's flagged resume does (w315 drove
+# it). Once a title exists, every move starts with it: 26 of 26 on the hub. So
+# where the session a move left carries a title, the move must start with it,
+# or the rail refuses. On the hub the walk with the title and the walk on ids
+# alone read the same on all 47 titled sessions. The title never links without
+# ids.
+#
+# THE LINK RESTS ON THE DESKTOP APP, AND NOBODY HERE CONTROLS IT. A version of
 # the app that moves a conversation and copies no id makes the move invisible to
 # this rule, and the rail goes back to resuming the old id. Re-measure it with
-# `python3 _workpapers/w314/measure-moves.py <bus dir>` from the source root. It
-# is clean when, under "1. pairs the clock calls a move", the count for "carries
-# message ids" equals the count for "title is its line 0" (23 of 24 each).
-#
-# THE RAIL WRITES THE TITLE THIS RULE READS. Its flagged resume retitles the
-# conversation to the handle's name (w315 drove it). Two conversations that come
-# to share that title still cannot pair, because a pairing also needs copied
-# message ids. The w314 control proves it: a rail that pairs without the ids
-# resumes the stranger.
+# `python3 _workpapers/w314/measure-moves.py <bus dir>` from the source root.
+# Under "1. pairs the clock calls a move" it is clean when:
+#   - for titled pairs, the count for "carries message ids" equals the count for
+#     "title is its line 0" (23 of 24 each on the hub);
+#   - for untitled pairs, the count for "opens with one block copied from the
+#     first" equals the count "sharing message ids" (27 of 27 on the hub, 2 of 2
+#     on that claw).
+# A fall in "sharing message ids" against the clock's own count is the sign the
+# app has stopped copying them: 27 of 34 on the hub, 2 of 2 on that claw.
 TITLE_TYPE = "custom-title"
 
 
@@ -835,15 +855,8 @@ def moved_reading(session):
         return reading
 
     title = mine["titles"][-1] if mine["titles"] else ""
-    if not title:
-        carriers = sorted(sid for sid, f in here.items() if f["uuids"] & mine["uuids"])
-        if carriers:
-            return refuse("no title", "session %s carries no title, and %s in its folder carries "
-                          "its lines" % (session[:8], ", ".join(s[:8] for s in carriers)))
-        reading["reason"] = ("no title, and no later session in its folder carries its lines, "
-                             "so nothing moved it")
-        return reading
-    elsewhere = sorted(sid for sid, f in later.items() if f["folder"] != folder and title in f["titles"])
+    elsewhere = sorted(sid for sid, f in later.items()
+                       if title and f["folder"] != folder and title in f["titles"])
     if elsewhere:
         return refuse("title in another folder", "%s in another projects folder carries the "
                       "title '%s'" % (", ".join(s[:8] for s in elsewhere), title))
@@ -851,12 +864,15 @@ def moved_reading(session):
     # copies part of the session it left, so after the first step a move must hold
     # a line the step before did not already carry. Two sessions that each copied
     # the recorded one, and not each other, are then a fork, not a line of moves.
+    # The first step takes any shared id, so a short branch whose own lines no
+    # later session carries steps to its sibling. That is one history (w319).
+    # The copied ids link a move. A title, where the session it left carries one,
+    # must be the move's first title, or the link refuses.
     current, facts, linked, before = session, mine, set(), set()
     while True:
         last = facts["titles"][-1] if facts["titles"] else ""
         moves = sorted((sid for sid, f in here.items()
-                        if sid not in reading["path"] and f["titles"] and f["titles"][0] == last
-                        and f["first_at"] > facts["first_at"]
+                        if sid not in reading["path"] and f["first_at"] > facts["first_at"]
                         and (f["uuids"] & facts["uuids"]) - before),
                        key=lambda sid: here[sid]["first_at"])
         linked.update(moves)
@@ -864,14 +880,20 @@ def moved_reading(session):
             break
         nxt = here[moves[0]]
         if nxt["entry"] != APP_ENTRYPOINT:
-            return refuse("not the app's", "session %s links to %s by title, folder and message "
-                          "ids, and its first line was written by %s" % (
+            return refuse("not the app's", "session %s links to %s by folder and message ids, and "
+                          "its first line was written by %s" % (
                               moves[0][:8], current[:8], nxt["entry"] or "a client that recorded none"))
         if facts["last_at"] > nxt["first_at"]:
             return refuse("overlap", "session %s wrote at %s, after the move to %s began at %s" % (
                 current[:8], facts["last_at"], moves[0][:8], nxt["first_at"]))
+        if last and nxt["titles"][:1] != [last]:
+            return refuse("title differs", "session %s carries the title '%s', and %s, which "
+                          "carries its lines, %s" % (
+                              current[:8], last, moves[0][:8],
+                              "starts with another title" if nxt["titles"] else "carries none"))
         reading["pairing"].append({
-            "from": current, "to": moves[0], "title": last, "folder": os.path.basename(folder),
+            "from": current, "to": moves[0], "link": "title and ids" if last else "ids",
+            "title": last, "folder": os.path.basename(folder),
             "shared_ids": len(nxt["uuids"] & facts["uuids"])})
         reading["path"].append(moves[0])
         before = facts["uuids"]
@@ -881,13 +903,19 @@ def moved_reading(session):
         return refuse("fork", "%s and %s both link to the conversation and are not one line of "
                       "moves" % (", ".join(s[:8] for s in stray), reading["path"][-1][:8]))
     if current == session:
-        reading["reason"] = "no later session in its folder starts with its title and carries its lines"
+        reading["reason"] = ("%sno later session in its folder carries its lines, so nothing "
+                             "moved it" % ("" if title else "no title, and "))
         return reading
     reading["newest"], reading["verdict"] = current, "newer session"
-    reading["reason"] = ("the app moved the conversation: %s, each move linked by title '%s' in "
-                         "folder %s and copied message ids" % (
-                             " to ".join(s[:8] for s in reading["path"]), title,
-                             os.path.basename(folder)))
+    links = {p["link"] for p in reading["pairing"]}
+    where = os.path.basename(folder)
+    reading["reason"] = "the app moved the conversation: %s, each move linked by %s" % (
+        " to ".join(s[:8] for s in reading["path"]),
+        "title '%s' in folder %s and copied message ids" % (title, where)
+        if links == {"title and ids"} else
+        "copied message ids in folder %s" % where if links == {"ids"} else
+        "copied message ids in folder %s, and by the title where the session it left carries "
+        "one" % where)
     return reading
 
 
@@ -1041,6 +1069,11 @@ def compaction_window():
                 return value, ("%s, env.%s, which this harness does not honour"
                                % (path, WINDOW_ENV))
     return None, "nothing declares one, so each session is read against its model's default"
+
+
+def token_threshold(window):
+    """The token count at which the token arm fires for a window, or None."""
+    return int(window * TOKEN_ARM_FRACTION) if window else None
 
 
 def model_window(model):
@@ -1692,9 +1725,10 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
     """Order the postures write where a live orchestrator is due one, then read the stamp.
 
     TWO ARMS, AND EITHER ONE IS ENOUGH. The cadence arm counts the handle's own
-    activity. The token arm reads the transcript's last turn against half the
-    automatic compaction window, and fires once per crossing per session: a pass
-    that reads below the threshold re-arms it, which is what a compaction does.
+    activity. The token arm reads the transcript's last turn against
+    TOKEN_ARM_FRACTION of the automatic compaction window, and fires once per
+    crossing per session: a pass that reads below the threshold re-arms it,
+    which is what a compaction does.
     Without that re-arm every pass past the threshold would deliver the same turn.
 
     THE ARM IS KEYED ON THE SESSION ID, NOT ON THE PROCESS. The app gives a
@@ -1748,7 +1782,7 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
         if not row_window:
             row_window, item["window_source"] = model_window(transcript_model(session)[0])
         item["window"] = row_window
-        threshold = int(row_window / 2) if row_window else None
+        threshold = token_threshold(row_window)
         item["token_threshold"] = threshold
         armed = data.get("token_arm_armed")
         armed = True if armed is None else bool(armed)
@@ -1766,8 +1800,8 @@ def forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours, window, 
         if banked >= activity_hours * 3600:
             due = "%.1f hours of activity since the last forced write" % (banked / 3600.0)
         elif threshold and isinstance(tokens, int) and tokens >= threshold and armed:
-            due = ("the last turn read %d tokens, past half the %d-token window"
-                   % (tokens, row_window))
+            due = ("the last turn read %d tokens, past %d%% of the %d-token window"
+                   % (tokens, round(TOKEN_ARM_FRACTION * 100), row_window))
         if not due:
             item["outcome"] = "idle"
             item["detail"] = ("nothing due: %.1f of %d activity hours, %s"
@@ -2372,7 +2406,7 @@ def main(argv):
                "stamp_grace_minutes": STAMP_GRACE_MINUTES,
                "compaction_records": records_path(), "record_ttl_hours": RECORD_TTL_HOURS,
                "window": window, "window_source": window_source,
-               "token_threshold": int(window / 2) if window else None,
+               "token_threshold": token_threshold(window),
                "holds": [{"handle": h, "hold": v} for h, v in holds()],
                "ready": not blocking, "blocking": blocking}
         if not blocking:

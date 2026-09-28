@@ -1,15 +1,26 @@
-- **The continuity rail follows a conversation the app has moved.** When the
-  desktop app moves an orchestrator's conversation to a new session, the rail
-  wakes the newest session. When it cannot tell which session is newest, it
-  resumes nothing for that handle, and `session-continuity --check` names the
-  reason. Re-register the handle from the app's conversation, and the rail
-  resumes it again.
+- **The continuity rail follows a moved conversation that has no title.** When
+  the desktop app moves an orchestrator's conversation that nobody has named,
+  the rail now wakes the newest session, as it already did for a named one.
+  Before this release it resumed nothing for that handle and told a person the
+  conversation had no title.
+- **The checkpoint prompt now comes close to compaction.** The continuity rail
+  tells a live orchestrator to write its workpaper when its last turn passes 90%
+  of the automatic compaction window. Before this release it did so at half.
+  At a window of 650,000 tokens the prompt comes at 585,000.
+- **The automatic compaction window is now 650,000 tokens.** A person with no
+  window set gets 650,000. A person at the old default of 600,000 moves to
+  650,000 with the rest of their settings kept. Any other number a person set
+  stays as it is. The setting is `autoCompactWindow` in
+  `~/.claude/settings.json`.
 
 ## Changes with no visible effect
 
-`session-continuity --check` shows, for each conversation the app started, the
-session the handle records, the newest session the rail links it to, what
-linked them, and the verdict.
+The rail links a moved conversation by the message ids the move copied.
+`session-continuity --check` names each link `ids`, or `title and ids` where
+the conversation carries a title. A named conversation whose move does not
+start with its name is refused, and the reason says so. The fraction the
+checkpoint prompt fires at is one number in the rail, and `--check` shows the
+threshold it gives for each window.
 
 ## What somebody has to do
 

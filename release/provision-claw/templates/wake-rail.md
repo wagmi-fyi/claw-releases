@@ -154,7 +154,7 @@ the session is here, and it is nudged instead.
 
 **The forced write.** A live orchestrator is told to write its postures and its
 skills in use to the workpaper after two hours of its own activity, or once its
-last turn passes half the automatic compaction window. Activity is the transcript
+last turn passes 90% of the automatic compaction window. Activity is the transcript
 growing, so a quiet session owes nothing. The rail then reads whether that file
 moved; unmoved after thirty minutes is a line in the human's queue.
 `--set-workpaper` names it where the search cannot.

@@ -716,13 +716,17 @@ RESUME_HOOK="${CLAUDE_MACHINE_SKILLS}/orchestrate/scripts/resume-hook"
 # entry out of the managed settings and removes the file, in the apply that
 # registers the skill's.
 OLD_RESUME_HOOK="${CLAW_BIN}/claw-resume-hook"
-# THE AUTOMATIC COMPACTION WINDOW, IN TOKENS. Ruled 2026-09-26: 600,000. The
+# THE AUTOMATIC COMPACTION WINDOW, IN TOKENS. Ruled 2026-09-28: 650,000. The
 # key is one number per person and not per model. Fable and Sonnet 5 carry a
-# 1M window, so they compact at sixty percent of it and keep room to do so. A
+# 1M window, so they compact at 65 percent of it and keep room to do so. A
 # 200,000-token model such as Haiku 4.5 never reaches the number and compacts
 # where the harness decides. The continuity rail forces the postures write at
-# half of whatever window a person carries.
-AUTOCOMPACT_WINDOW="600000"
+# 90 percent of whatever window a person carries.
+AUTOCOMPACT_WINDOW="650000"
+# The value this run seeded before 2026-09-28. Provisioning wrote it, so phase 10
+# moves a person who carries exactly this number to the one above. It keeps any
+# other number whole.
+AUTOCOMPACT_WINDOW_OLD_SEED="600000"
 # The settings key, which is what the harness reads. Phase 10 seeds it into each
 # person's own settings file, which is the scope the measurement proves. The
 # environment form of the same value does nothing on 2.1.266, and the block that
@@ -3585,11 +3589,16 @@ phase_10_claude() {
 # and an untested key in the file every session's bus join depends on is not
 # worth the reach.
 #
-# SEEDED INTO AN ABSENCE, NEVER REWRITTEN. The file is the person's own. A window
-# they chose is their ruling about their own sessions, and a release that flipped
-# it back with nothing saying so is the fault the seat roster's law exists for.
+# SEEDED INTO AN ABSENCE, AND OTHERWISE REWRITTEN ONLY FROM THE OLD SEED. The
+# file is the person's own. A window they chose is their ruling about their own
+# sessions, and a release that flipped it back with nothing saying so is the
+# fault the seat roster's law exists for. One number is the exception:
+# AUTOCOMPACT_WINDOW_OLD_SEED, which this run wrote. Ruled 2026-09-28: the
+# default moves, and a person at the old default moves with it. The move keeps
+# every other key in the file and the file's mode. Each person's line says which
+# case the run took.
 seed_autocompact_window() {
-  local user home settings current seeded=0 kept=0
+  local user home settings current mode seeded=0 moved=0 kept=0
   if ! command -v jq >/dev/null 2>&1; then
     warn "jq is absent, so no person's compaction window was seeded. A session then compacts at its model's limit, where it has no turns left to compact in"
     return 0
@@ -3599,20 +3608,27 @@ seed_autocompact_window() {
     [ -n "$home" ] && [ -d "$home" ] || { warn "$user: no home directory, so no compaction window was seeded"; continue; }
     settings="${home}/.claude/settings.json"
     current=""
+    mode=""
     if [ -s "$settings" ]; then
       current="$(jq -r --arg k "$AUTOCOMPACT_WINDOW_KEY" '.[$k] // empty' "$settings" 2>/dev/null || true)"
+      # A number equal to the old seed, and not a string that prints the same.
+      if jq -e --arg k "$AUTOCOMPACT_WINDOW_KEY" --argjson old "$AUTOCOMPACT_WINDOW_OLD_SEED" \
+           '.[$k] == $old' "$settings" >/dev/null 2>&1; then
+        mode="$(stat -c '%a' "$settings")"
+      fi
     fi
-    if [ -n "$current" ]; then
+    if [ -n "$current" ] && [ -z "$mode" ]; then
       ok "$user: keeps the compaction window they already carry, ${current}"
       kept=$((kept+1))
       continue
     fi
     # The file may not exist, and it may hold other settings of theirs. Both are
     # one jq away, and the write lands as the person so nothing of theirs ends up
-    # owned by root.
+    # owned by root. A seed leaves the file at 0600. A move puts back the mode
+    # the file had.
     sudo -u "$user" -H bash -c '
       set -e
-      settings="$1"; key="$2"; value="$3"
+      settings="$1"; key="$2"; value="$3"; mode="${4:-0600}"
       install -d -m 0755 "$(dirname "$settings")"
       if [ -s "$settings" ]; then
         tmp="$(mktemp "${settings}.XXXXXX")"
@@ -3621,14 +3637,20 @@ seed_autocompact_window() {
       else
         jq -n --arg k "$key" --argjson v "$value" "{(\$k): \$v}" > "$settings"
       fi
-      chmod 0600 "$settings"
-    ' _ "$settings" "$AUTOCOMPACT_WINDOW_KEY" "$AUTOCOMPACT_WINDOW" 2>/dev/null \
-      || { bad "$user: the compaction window was NOT seeded at ${settings}. That session compacts at its model's limit, where a refusal wedges it"; continue; }
-    check "$user: the compaction window reads ${AUTOCOMPACT_WINDOW} at ${settings}" \
-      bash -c "[ \"\$(jq -r --arg k '$AUTOCOMPACT_WINDOW_KEY' '.[\$k] // empty' '$settings')\" = '$AUTOCOMPACT_WINDOW' ]"
-    seeded=$((seeded+1))
+      chmod "$mode" "$settings"
+    ' _ "$settings" "$AUTOCOMPACT_WINDOW_KEY" "$AUTOCOMPACT_WINDOW" ${mode:+"$mode"} 2>/dev/null \
+      || { bad "$user: the compaction window was NOT written at ${settings}. That session compacts where it did before this run"; continue; }
+    if [ -n "$mode" ]; then
+      check "$user: moves from the old default ${AUTOCOMPACT_WINDOW_OLD_SEED} to ${AUTOCOMPACT_WINDOW} at ${settings}, mode ${mode} kept" \
+        bash -c "[ \"\$(jq -r --arg k '$AUTOCOMPACT_WINDOW_KEY' '.[\$k] // empty' '$settings')\" = '$AUTOCOMPACT_WINDOW' ] && [ \"\$(stat -c '%a' '$settings')\" = '$mode' ]"
+      moved=$((moved+1))
+    else
+      check "$user: gains the compaction window ${AUTOCOMPACT_WINDOW} at ${settings}" \
+        bash -c "[ \"\$(jq -r --arg k '$AUTOCOMPACT_WINDOW_KEY' '.[\$k] // empty' '$settings')\" = '$AUTOCOMPACT_WINDOW' ]"
+      seeded=$((seeded+1))
+    fi
   done
-  say "  compaction window: ${seeded} seeded, ${kept} left as the person set it"
+  say "  compaction window: ${seeded} seeded, ${moved} moved from the old default, ${kept} left as the person set it"
 }
 
 # ---------------------------------------------------------------- phase 11
