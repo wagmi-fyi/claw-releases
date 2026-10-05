@@ -131,6 +131,7 @@ class_title() {
     claw-note)     printf 'note' ;;
     mail-late)     printf 'mail not handled' ;;
     harness-signin) printf 'harness sign-in' ;;
+    continuity-hold) printf 'orchestrator held' ;;
     *) return 1 ;;
   esac
 }
@@ -144,6 +145,7 @@ class_default_level() {
     claw-note)     printf 'info' ;;
     mail-late)     printf 'warn' ;;
     harness-signin) printf 'err' ;;
+    continuity-hold) printf 'warn' ;;
     *) return 1 ;;
   esac
 }

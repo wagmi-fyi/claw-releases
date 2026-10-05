@@ -107,7 +107,8 @@
 # granted prefix, and grants the ones GRANTED_SCRIPTS names; phase 21 installs
 # commonclaw-memory-check.sh from beside this file and its unit and timer from
 # ../templates; phase 22 installs commonclaw-notify.sh; phase 23 installs
-# commonclaw-stall-check.sh with its conf and two units from ../templates; and
+# commonclaw-stall-check.sh with its conf and two units from ../templates, and
+# commonclaw-hold-check.sh with its two units; and
 # phase 24 runs install-bus-nudge.sh, which reads ../payload and ../templates
 # for itself; and phase 25 runs install-email-gatekeeper.sh, which reads
 # ../payload/email-gatekeeper and ../templates for itself; and phase 26 runs
@@ -471,6 +472,9 @@ NOTIFY_ENV="${ETC_ROOT}/notify.env"
 # through the notifier, so it resolves no credential of its own.
 STALL_CHECK="/usr/local/sbin/commonclaw-stall-check.sh"
 STALL_CONF="${ETC_ROOT}/stall-check.conf"
+# The hold check. No conf of its own: it reads the continuity rail's state files
+# and takes its one address from the mail service's conf.
+HOLD_CHECK="/usr/local/sbin/commonclaw-hold-check.sh"
 
 # The orchestration settings this machine rules on.
 #
@@ -1519,7 +1523,8 @@ phase_1_preflight() {
            commonclaw-changelog.sh version-compare.sh tree-digest.sh \
            core-version.sh person.sh commonclaw-update.sh agents-plane.sh \
            commonclaw-memory-check.sh commonclaw-notify.sh \
-           commonclaw-stall-check.sh install-bus-nudge.sh unit-groups.sh \
+           commonclaw-stall-check.sh commonclaw-hold-check.sh \
+           install-bus-nudge.sh unit-groups.sh \
            check-git-conventions.sh install-heartbeat-url.sh unit-health.sh; do
     [ -r "${SCRIPT_DIR}/${s}" ] || missing_payload="$missing_payload $s"
   done
@@ -1601,6 +1606,11 @@ phase_1_preflight() {
     || missing_payload="$missing_payload ../templates/commonclaw-stall-check.timer"
   [ -r "${TEMPLATE_DIR}/commonclaw-stall-check.conf" ] \
     || missing_payload="$missing_payload ../templates/commonclaw-stall-check.conf"
+  # The hold check's two units, for the same reason.
+  [ -r "${TEMPLATE_DIR}/commonclaw-hold-check.service" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-hold-check.service"
+  [ -r "${TEMPLATE_DIR}/commonclaw-hold-check.timer" ] \
+    || missing_payload="$missing_payload ../templates/commonclaw-hold-check.timer"
   # The wake rail's own siblings. `install-bus-nudge.sh` is named in the script
   # list above; these are what it reads, and it is called from a phase here, so a
   # missing one turns a phase into a refusal rather than a silent skip.
@@ -6460,7 +6470,7 @@ NOTIFYENVEOF
   # which is the failure it was written after, and it is kept for that.
   #
   # The claim that each row is read for its TITLE needs its own control, and this
-  # is it: eight classes, eight distinct titles, pulled out of the rendered text.
+  # is it: nine classes, nine distinct titles, pulled out of the rendered text.
   # `|| true` ON THE ASSIGNMENT, and it is the whole reason this phase can run
   # on a claw nobody has wired yet. The notifier exits 3 when no webhook
   # resolves, which this phase treats as a supported state eleven lines below.
@@ -6476,7 +6486,7 @@ NOTIFYENVEOF
   # before it exits 3, so the titles are captured either way and this control
   # still measures the table on a claw with no webhook.
   local titles distinct
-  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late harness-signin; do
+  titles="$(for p in seat-expiry seat-fault backup-health update-health memory-pressure claw-note mail-late harness-signin continuity-hold; do
     NOTIFY_NOW=FIXED NOTIFY_STATE_DIR="${ctl}/state" \
       "$NOTIFY_BIN" --dry-run --class "$p" --summary "provisioning control" 2>/dev/null \
       | sed -n 's/^  "text": "[^·]*· \(.*\) · .*/\1/p'
@@ -6484,15 +6494,15 @@ NOTIFYENVEOF
   # grep -c PRINTS 0 and EXITS 1 on no match, so the fallback is an assignment
   # rather than an appended second line.
   distinct="$(printf '%s\n' "$titles" | sort -u | grep -c . )" || distinct=0
-  if [ "$distinct" -eq 8 ]; then
-    ok "the eight classes render eight distinct titles, so the class table is read row by row"
+  if [ "$distinct" -eq 9 ]; then
+    ok "the nine classes render nine distinct titles, so the class table is read row by row"
   elif [ "$distinct" -eq 0 ]; then
     # Zero is a different finding from two-sharing-a-heading, and naming it as
     # the sharing case sends a reader to the class table when the notifier
     # printed nothing at all.
-    bad "the eight classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
+    bad "the nine classes produced no renders to compare, so nothing was measured about the class table: the notifier printed no payload this control could read"
   else
-    bad "the classes render ${distinct} distinct title(s), not eight: two of them share a heading and a finding lands under the wrong topic"
+    bad "the classes render ${distinct} distinct title(s), not nine: two of them share a heading and a finding lands under the wrong topic"
   fi
 
   # A class nobody put in the table is a usage error, not a generic heading.
@@ -6526,6 +6536,7 @@ phase_23_stall_check() {
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would install commonclaw-stall-check.sh to ${STALL_CHECK}, seed ${STALL_CONF},"
     say "  install the unit and timer, and enable the timer"
+    say "  would install commonclaw-hold-check.sh to ${HOLD_CHECK} with its unit and timer, and enable the timer"
     return 0
   fi
 
@@ -6602,6 +6613,58 @@ HANDLEEOF
   # disabled is the silence this unit exists to end.
   systemctl enable --now commonclaw-stall-check.timer >/dev/null 2>&1 || true
   check "the stall-check timer is active" systemctl is-active --quiet commonclaw-stall-check.timer
+
+  phase_23_hold_check
+}
+
+# THE HOLD CHECK, the stall check's sibling. The same root unit shape, because
+# the continuity rail runs as each account and the alert channel resolves only
+# under the machine's credential. Its header says what it reads and sends.
+phase_23_hold_check() {
+  install_adopting "${SCRIPT_DIR}/commonclaw-hold-check.sh" "$HOLD_CHECK" "the hold check"
+  install_adopting "${TEMPLATE_DIR}/commonclaw-hold-check.service" \
+    /etc/systemd/system/commonclaw-hold-check.service "the hold-check unit" 0644
+  install_adopting "${TEMPLATE_DIR}/commonclaw-hold-check.timer" \
+    /etc/systemd/system/commonclaw-hold-check.timer "the hold-check timer" 0644
+  systemctl daemon-reload
+
+  check "the hold check is installed and executable" test -x "$HOLD_CHECK"
+  check "the hold check parses" bash -n "$HOLD_CHECK"
+  check "the hold-check service registered" systemctl cat commonclaw-hold-check.service
+  check "the hold-check timer registered"   systemctl cat commonclaw-hold-check.timer
+  check "systemd accepts the hold-check unit as written" \
+    systemd-analyze verify /etc/systemd/system/commonclaw-hold-check.service
+
+  # ---- the phase control, two fixtures and two verdicts that must differ ----
+  #
+  # One state file holds a handle's own hold, and the other the same handle with
+  # its hold healed. --state sends nothing, and the delivered record is a
+  # fixture, so this reaches no channel and no address.
+  local ctl acct found_hot found_cold
+  ctl="$(mktemp -d)"
+  acct="$(id -un)"
+  install -d -m 0700 "${ctl}/state" "${ctl}/delivered"
+  printf '{"handle":"control-orch","hold":{"scope":"handle","id":"control0","class":"untrusted","cwd":"/srv/control"}}\n' \
+    > "${ctl}/state/control-orch.json"
+  found_hot="$(HOLD_CHECK_ACCOUNTS="${acct}=${ctl}/state" HOLD_CHECK_DELIVERED_DIR="${ctl}/delivered" \
+    HOLD_CHECK_MAIL_CONF="${ctl}/no-conf" HOLD_CHECK_LOG_TAG=commonclaw-hold-check-control \
+    "$HOLD_CHECK" --state 2>/dev/null || true)"
+  printf '{"handle":"control-orch","hold":null}\n' > "${ctl}/state/control-orch.json"
+  found_cold="$(HOLD_CHECK_ACCOUNTS="${acct}=${ctl}/state" HOLD_CHECK_DELIVERED_DIR="${ctl}/delivered" \
+    HOLD_CHECK_MAIL_CONF="${ctl}/no-conf" HOLD_CHECK_LOG_TAG=commonclaw-hold-check-control \
+    "$HOLD_CHECK" --state 2>/dev/null || true)"
+  case "$found_hot" in
+    *"control-orch (${acct}): untrusted, due"*) ok "the hold check finds a handle's own hold and reads it as due" ;;
+    *) bad "the hold check found nothing against a fixture holding one handle, so it cannot report a hold at all" ;;
+  esac
+  case "$found_cold" in
+    *control-orch*) bad "the hold check reported a handle whose hold has healed, so it reports regardless of what it read" ;;
+    *) ok "the hold check stays silent when the hold has healed" ;;
+  esac
+  rm -rf "$ctl"
+
+  systemctl enable --now commonclaw-hold-check.timer >/dev/null 2>&1 || true
+  check "the hold-check timer is active" systemctl is-active --quiet commonclaw-hold-check.timer
 }
 
 # ---------------------------------------------------------------- phase 24

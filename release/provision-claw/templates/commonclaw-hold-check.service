@@ -1,0 +1,18 @@
+[Unit]
+Description=Firm-VM hold check: tell a person when the continuity rail holds an orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The webhook reference resolves under the machine service account. systemd
+# decrypts the credential, so this unit never touches the encrypted file itself
+# and the notifier's second token path answers. A root unit with no User=, for
+# the reason the script's header gives.
+LoadCredentialEncrypted=op-service-account:/etc/commonclaw/credentials/op-service-account.cred
+ExecStart=/usr/local/sbin/commonclaw-hold-check.sh
+# No Restart=. A beat that could not deliver waits for the next beat, ten
+# minutes later.
+TimeoutStartSec=5min
+Nice=10
+IOSchedulingClass=idle

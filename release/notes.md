@@ -1,31 +1,27 @@
-- **The continuity rail holds only the orchestrator that failed to resume.**
-  When the harness refuses one orchestrator, for example because its folder is
-  not trusted, the rail stops resuming that one and goes on resuming the
-  others. It tries the held one again once an hour, and a resume that works
-  clears the hold. Before this release one refusal stopped every orchestrator
-  of the account until somebody cleared it by hand. A signed-out harness still
-  stops the whole account.
-- **A hold now says what to do.** The message names the orchestrator and the
-  harness's reason. It ends with the step that fixes it. For a folder the
-  harness does not trust, it names the folder and says to run the agent there
-  once and accept the prompt.
-- **A hold can reach a handle somebody reads.** Set `ORCHESTRATE_HOLD_NOTIFY`
-  in `/etc/orchestrate.conf` to a bus handle, and each hold's message goes
-  there as well as to `human`. Left unset, it goes to `human` alone.
+- **A held orchestrator now reaches a person.** When the continuity rail cannot
+  resume one orchestrator, for example because its folder is not trusted, the
+  claw's alert channel gets one line about it. The line names the orchestrator,
+  the reason and the step that fixes it. A retry that fails again sends nothing
+  new. A hold that clears and comes back later sends again.
+- **A hold can also go to one address by mail.** Set `HOLD_ALERT_TO` in
+  `/etc/commonclaw/email-gatekeeper.conf` to one address, and each hold sends one
+  mail there through the claw's mail service. It ships empty, and empty means
+  the channel only. It is apart from `MAIL_ALERT_TO`, so a hold need not reach
+  everybody the mail alarm reaches.
 
 ## Changes with no visible effect
 
-`session-continuity --check` shows each hold's scope, `account` or `handle`,
-and when a handle's hold is next tried. A hold written by an earlier release is
-read by its sign-in word: `signed-out` holds the account, and anything else
-holds the handle. The claw-ops continuity readout reports the two scopes as
-separate findings. A hold's message drops any path other than the
-orchestrator's own folder, and any value long enough to be a token. A
-provisioning run keeps the `ORCHESTRATE_HOLD_NOTIFY` line where a claw sets it
-and never writes one.
+A new root timer, `commonclaw-hold-check.timer`, runs every ten minutes. It
+reads each account's holds and sends nothing when there is none. A signed-out
+account sends nothing new from it, because the hourly sign-in alarm already
+covers that case. The alert channel has a new message class, `continuity-hold`.
+A provisioning run appends `HOLD_ALERT_TO`, empty, to a mail service conf that
+lacks it, and keeps the value where a claw sets one. The rail's hold now
+records an id, a reason class and the orchestrator's folder, and a hold an
+earlier release wrote is still read.
 
 ## What somebody has to do
 
-Most claws need nothing from a person. This release changes no groups and moves
-no core. A claw that wants hold messages read by an orchestrator sets
-`ORCHESTRATE_HOLD_NOTIFY` by hand.
+Nothing, on most claws. A claw that wants holds by mail sets `HOLD_ALERT_TO` by
+hand. The channel line needs the alert channel to be wired, as every other
+alarm does.

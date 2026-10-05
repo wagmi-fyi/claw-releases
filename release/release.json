@@ -1,7 +1,7 @@
 {
   "release_schema": "commonclaw-release-v1",
-  "version": "1.10.5",
-  "revision": "7103e79b081ebcf3e4c4b76bef4fb890829a5841",
+  "version": "1.10.6",
+  "revision": "3840244e00c6ffe89ae461d6b9f0707871d0c9a9",
   "class": "fix",
   "disruption": "quiet",
   "codex_floor": "0.147.0",

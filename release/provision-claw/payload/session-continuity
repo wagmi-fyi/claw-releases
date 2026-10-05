@@ -124,6 +124,17 @@ names one. It names the held handle, the harness's refusal in its own words, and
 the one step that fixes it. A handle's hold that fails again for the same reason
 sends nothing new.
 
+A PERSON HEARS OF A HANDLE'S HOLD FROM ROOT, NOT FROM HERE. Nobody reads
+`human`. The hold check, commonclaw-hold-check.sh under a root timer, reads each
+account's holds from this program's state files and sends one line per hold to
+the claw's alert channel and one mail to HOLD_ALERT_TO. It runs as root because
+the channel resolves only under the machine's credential, which this account
+cannot read. So a hold records three fields for it: `id`, new for each hold and
+kept by every retry, `class`, `untrusted` or `refused`, and `cwd`, the handle's
+folder. The hold check reads those and never the harness's words. An account
+hold sends nothing there, because the hourly sign-in alarm already says the same
+thing to the same people.
+
 Nudging and stopping go on under a hold. Neither is the act that was failing.
 
 THE FORCED WRITE, ON A CADENCE AND AT A TOKEN THRESHOLD. A live orchestrator gets
@@ -230,6 +241,7 @@ import string
 import subprocess
 import sys
 import time
+import uuid
 
 # ------------------------------------------------------------ THE SENTENCES
 #
@@ -2321,6 +2333,11 @@ def hold_patch(bus_dir, handle, detail, model, cwd):
 
     A RETRY THAT FAILS THE SAME WAY SAYS NOTHING NEW. The line went out with the
     first failure. A new line goes when the scope or the reason changed.
+
+    THE ID IS THE HOLD, FOR THE HOLD CHECK. A retry keeps it, and a hold
+    written after a heal gets a new one, so root sends once per hold. `since`
+    cannot be the key: it is whole seconds, and a heal and a new hold can share
+    one.
     """
     signin = signin_reading()
     me = pwd.getpwuid(os.geteuid()).pw_name
@@ -2332,6 +2349,9 @@ def hold_patch(bus_dir, handle, detail, model, cwd):
     hold = {"at": now_iso(), "reason": detail, "said": reason, "model": model,
             "signin": signin, "scope": scope,
             "kind": "sign-out" if scope == "account" else "resume-failed",
+            "id": prior.get("id") or uuid.uuid4().hex[:16],
+            "class": "untrusted" if reason == UNTRUSTED else "refused",
+            "cwd": cwd or "",
             "since": prior.get("since") or prior.get("at") or now_iso(),
             "tries": int(prior.get("tries") or 0) + 1 if prior else 1}
     if scope == "handle":

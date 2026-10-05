@@ -1,0 +1,13 @@
+[Unit]
+Description=Firm-VM hold check, every ten minutes
+
+[Timer]
+# Five past and every ten minutes after. The rail retries a held orchestrator
+# once an hour, so ten minutes is a small share of the time a hold lasts. No
+# beat lands on the mail check's three past or the stall check's seven past.
+OnCalendar=*-*-* *:05/10:00
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

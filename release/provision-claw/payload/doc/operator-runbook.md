@@ -332,6 +332,15 @@ alarm's address, naming the account and the claw. It repeats daily until
 somebody runs `/login` as that account. An account that never signed in on this
 claw stays quiet.
 
+**The hold check.** The continuity rail resumes an orchestrator whose session
+has ended. When the harness refuses one, the rail holds that orchestrator and
+goes on with the others. Every ten minutes, `commonclaw-hold-check.sh` reads the
+holds and sends one line for each new one to the alarm channel. It also sends
+one mail to `HOLD_ALERT_TO` in `/etc/commonclaw/email-gatekeeper.conf`. That
+key ships empty, and empty means the channel only. The line names the
+orchestrator, the reason, and the step that fixes it. A sign-out sends nothing
+here, because the sign-in check already reports it.
+
 **The wake rail.** A session bus is files, and a message written into one
 announces itself to nobody. This rail tells a live session that it has unread
 mail, in one fixed sentence carrying no instruction. An account with no session
@@ -433,7 +442,7 @@ instead, move your entry off the claw and update again.
 | `/etc/commonclaw/notify.conf`, `notify.env` | the alarm channel's switch, and its manager reference |
 | `/etc/commonclaw/memory.env` | the dead-man ping's manager reference |
 | `/etc/commonclaw/stall-check.conf` | the stall check's threshold |
-| `/etc/commonclaw/email-gatekeeper.conf` | the mail service's settings, and who the mail alarm tells |
+| `/etc/commonclaw/email-gatekeeper.conf` | the mail service's settings, who the mail alarm tells, and who the hold check mails |
 | `/etc/commonclaw/session-bus.md` | what the bus is, for a member |
 | `/etc/commonclaw/claw-authority.md` | who may approve an operation on this claw, and how |
 | `/etc/commonclaw/workspace-conventions.md` | how work is filed here, for a member |
@@ -457,6 +466,7 @@ instead, move your entry off the claw and update again.
 | `/usr/local/sbin/commonclaw-memory-check.sh` | the memory alarm and the ping |
 | `/usr/local/sbin/commonclaw-stall-check.sh` | the stall check |
 | `/usr/local/sbin/commonclaw-mail-check.sh` | the mail alarm. `--dry-run` and `--state` |
+| `/usr/local/sbin/commonclaw-hold-check.sh` | the hold check. `--dry-run` and `--state` |
 | `/opt/commonclaw/bin/bus` | the session bus program |
 | `/opt/commonclaw/bin/bus-nudge` | the wake rail |
 | `/opt/commonclaw/bin/session-guard` | whether a session's process is the live one or a newer one replaced it |
