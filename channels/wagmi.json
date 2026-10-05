@@ -1,7 +1,7 @@
 {
   "pointer_schema": "commonclaw-channel-v1",
   "channel": "wagmi",
-  "version": "1.10.5",
-  "tag": "v1.10.5",
-  "tree_digest": "c40c53cf38011988e0bbd0e2ffaee40bfb81957a48e56cd27fba781d080b900e"
+  "version": "1.10.6",
+  "tag": "v1.10.6",
+  "tree_digest": "19450b27bc8bacb1008e9c494ba68ab3a10f1434452feadd3f9196bb025f38ad"
 }
