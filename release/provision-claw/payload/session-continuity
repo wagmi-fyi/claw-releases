@@ -98,19 +98,31 @@ session started somewhere else is a session in the wrong place. A bus directory
 other than the one /etc/orchestrate.conf names: this program starts processes,
 and a bus nobody declared is not the board it may act on.
 
-THE HOLD IS THE SIGN-OUT CASE. A resume that exits non-zero, or whose process is
+A FAILED RESUME WRITES A HOLD. A resume that exits non-zero, or whose process is
 not alive thirty seconds later, writes a hold carrying the exit code and the last
-line of stderr, and sends one line to the `human` handle. No handle of this
-account is resumed again until `--clear-hold` clears it. A harness signed out
-refuses every resume, and a rail that kept trying would start a login attempt
-every two minutes and say nothing anybody reads.
+line of stderr. The hold's scope comes from the sign-in reading.
 
-A HOLD SAYS WHETHER IT IS A SIGN-OUT. When a resume fails, the pass asks
-`commonclaw-signin-check --read` beside this program, which is the harness's
-own answer and the reading the hourly sign-in alarm takes. The hold records the
-word it got, and `kind` reads `sign-out` when the word is `signed-out`. A
-reading of a credentials file would not do: a file can be present for a login
-the server refused long ago.
+  account  the sign-in reading is `signed-out`. No handle of this account is
+           resumed until `--clear-hold` clears it. A harness signed out refuses
+           every resume, and a rail that kept trying would start a login attempt
+           every two minutes.
+  handle   any other failure. Only that handle is held, and every other handle
+           goes on being resumed. Measured 2026-09-30: one folder the harness
+           did not trust stopped every orchestrator of an account for 23 hours,
+           with the account signed in. A handle's hold is tried again once
+           HOLD_RETRY_SECS has passed. A resume that succeeds clears it.
+
+The sign-in reading is `commonclaw-signin-check --read` beside this program,
+which is the harness's own answer and the reading the hourly sign-in alarm
+takes. A reading of a credentials file would not do: a file can be present for a
+login the server refused long ago. `kind` reads `sign-out` or `resume-failed`,
+and `scope` reads `account` or `handle`. `--check` shows both for every hold.
+
+A HOLD SENDS ONE LINE, TO TWO READERS AT MOST. The line goes to the `human`
+handle, and to the handle ORCHESTRATE_HOLD_NOTIFY names in the conf, when it
+names one. It names the held handle, the harness's refusal in its own words, and
+the one step that fixes it. A handle's hold that fails again for the same reason
+sends nothing new.
 
 Nudging and stopping go on under a hold. Neither is the act that was failing.
 
@@ -182,7 +194,7 @@ RECORD_TTL_HOURS goes the same way.
                                        waking every one an account holds
   session-continuity --law             print both fixed sentences and prove
                                        neither carries interpolation
-  session-continuity --clear-hold <h>  clear that handle's hold
+  session-continuity --clear-hold <h>  clear that handle's hold, of either scope
 
   --idle-stop-minutes <n>              how long a session this rail resumed may
                                        sit quiet before a pass ends it. It is
@@ -317,6 +329,15 @@ BIN_DIR = "/opt/commonclaw/bin"
 INSTALLED = os.path.join(BIN_DIR, "session-continuity")
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROLE = "orchestrator"
+# How long a handle's own hold waits before the rail tries that handle again.
+# The fix is a person's act, and an hour is soon enough after it. A harness that
+# refuses every two minutes would also fill the journal.
+HOLD_RETRY_SECS = 3600
+# The conf key that names a second reader for a hold's line. Empty or absent
+# means the `human` handle alone.
+HOLD_NOTIFY_KEY = "ORCHESTRATE_HOLD_NOTIFY"
+# What a bus handle looks like. A conf value of another shape is not sent to.
+HANDLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # How long the resumed process gets to appear in the harness's session records.
 # A background session writes its record as it starts; thirty seconds is the
 # measured start plus room, and it is the whole cost of a pass that resumed.
@@ -1238,9 +1259,8 @@ def write_state(handle, patch):
 def holds():
     """Every hold this account carries, as (handle, hold) pairs.
 
-    A hold is per handle and it stops every handle, because what a hold usually
-    means is that the harness itself refuses. Trying the next handle would find
-    the same refusal and write the same line.
+    A hold is written per handle. hold_scope() says whether it stops the
+    account or that handle alone.
     """
     out = []
     try:
@@ -1260,6 +1280,43 @@ def holds():
     return out
 
 
+def hold_scope(hold):
+    """`account` when a hold stops every handle, `handle` when it stops one.
+
+    A hold written before the scope existed carries none. Its sign-in word
+    answers, by the same rule a new hold is written under.
+    """
+    scope = hold.get("scope")
+    if scope in ("account", "handle"):
+        return scope
+    return "account" if hold.get("signin") == "signed-out" else "handle"
+
+
+def account_holds():
+    """The handles whose hold stops every handle of this account."""
+    return [h for h, v in holds() if hold_scope(v) == "account"]
+
+
+def handle_hold(handle):
+    """Whether this handle's own hold keeps it from a resume now: (held, why).
+
+    Only a hold of scope `handle` is read here. It is due again once its
+    `retry_after` has passed. A hold that carries none was written before the
+    retry existed, and it is due now.
+    """
+    hold = read_state(handle).get("hold")
+    if not isinstance(hold, dict) or hold_scope(hold) != "handle":
+        return False, ""
+    after = hold.get("retry_after")
+    if not isinstance(after, (int, float)) or time.time() >= after:
+        return False, ""
+    return True, ("%s is held on its own since %s: %s. The rail tries it again at %s, "
+                  "and every other handle is resumed as usual"
+                  % (handle, hold.get("since") or hold.get("at") or "an unknown time",
+                     hold.get("said") or hold.get("reason") or "no reason recorded",
+                     hold.get("retry_at") or "the next pass"))
+
+
 def prune_state(older_than=30 * 86400):
     """Drop state for a handle nothing has written to in a month.
 
@@ -1269,8 +1326,8 @@ def prune_state(older_than=30 * 86400):
     thirty days is far outside any window a pass reads.
 
     TWO FILES SURVIVE WHATEVER THEIR AGE. A file carrying a hold is the one
-    record that this account is stopped, and it is cleared by a person running
-    --clear-hold, which may be a long time after the hold was written. A file
+    record that this account or this handle is stopped, and a person may clear
+    it a long time after the hold was written. A file
     naming a resumed_session is a session this rail started and has not stopped,
     and removing it would leave that session running with nothing left that
     knows to end it. Age is the wrong reading for both: each says something is
@@ -1329,7 +1386,7 @@ def signin_reading():
     return word if word in ("signed-in", "signed-out", "never") else "unreadable"
 
 
-def tell_human(bus_dir, handle, reason, subject="", body=""):
+def tell_human(bus_dir, handle, reason, subject="", body="", to="human"):
     """One line to the `human` handle, and nothing else anywhere on the bus.
 
     The wake rail writes to no bus at all, because a rail that filed its own
@@ -1338,9 +1395,13 @@ def tell_human(bus_dir, handle, reason, subject="", body=""):
     drains. So the line reaches the person who has to sign in, and it starts no
     loop.
 
-    The body carries the handle and the reason. It never carries the harness's
-    own output, which is where a token or a path a person did not choose to share
-    would appear.
+    A HOLD'S LINE MAY GO TO ONE MORE HANDLE, through `to`. tell_hold() passes
+    the handle ORCHESTRATE_HOLD_NOTIFY names, because nobody reads `human`. That
+    handle reads the line as mail, once per hold, so it starts no loop either.
+
+    The body carries the handle and the reason. It never carries a token or a
+    path a person did not choose to share. hold_words() is what a hold's reason
+    passes through first.
 
     THE HOLD IS THE DEFAULT SUBJECT BECAUSE IT WAS THE FIRST CALLER. Two later
     ones pass their own: a forced write whose workpaper never moved, and a
@@ -1358,15 +1419,88 @@ def tell_human(bus_dir, handle, reason, subject="", body=""):
         "the hold is cleared." % (handle, reason))
     try:
         proc = subprocess.run(
-            [bus, "send", "session-continuity", "human", subject, body],
+            [bus, "send", "session-continuity", to, subject, body],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log("could not tell human about %s: %s: %s" % (handle, type(exc).__name__, exc))
+        log("could not tell %s about %s: %s: %s" % (to, handle, type(exc).__name__, exc))
         return False
     if proc.returncode != 0:
-        log("bus send about %s exited %d" % (handle, proc.returncode))
+        log("bus send to %s about %s exited %d" % (to, handle, proc.returncode))
         return False
     return True
+
+
+def hold_notify():
+    """The second reader of a hold's line, from the conf, or "".
+
+    A value that is not shaped like a handle is said in the journal and not
+    sent to. `human` is already the first reader.
+    """
+    name = conf_value(HOLD_NOTIFY_KEY) or ""
+    if not name or name == "human":
+        return ""
+    if not HANDLE_NAME.match(name):
+        log("%s in %s is not a handle, so a hold's line goes to human alone"
+            % (HOLD_NOTIFY_KEY, CONF))
+        return ""
+    return name
+
+
+def tell_hold(bus_dir, handle, subject, body):
+    """A hold's line to `human`, then to the conf's second reader. (human, other).
+
+    The second value is None where the conf names no second reader.
+    """
+    told = tell_human(bus_dir, handle, "", subject=subject, body=body)
+    other = hold_notify()
+    if not other:
+        return told, None
+    return told, tell_human(bus_dir, handle, "", subject=subject, body=body, to=other)
+
+
+# The harness's refusal for a folder its account has not trusted. Read
+# 2026-09-30 from a failed resume's stderr. It ends with a step that names a
+# command in backticks and the folder.
+UNTRUSTED = "Workspace not trusted"
+# What a hold's line drops from the harness's words: a path, and a run of
+# characters long enough to be a token. Each is replaced by a plain word.
+PATH_IN_TEXT = re.compile(r"(?<![\w.])(?:~|/)[^\s'\"`,;]+")
+TOKEN_IN_TEXT = re.compile(r"\b(?:sk-[A-Za-z0-9_-]+|[A-Za-z0-9_-]{24,})")
+
+
+def hold_words(detail, cwd, me):
+    """What a hold's line says: (the harness's reason, the one fix step).
+
+    THE REASON IS THE HARNESS'S FIRST SENTENCE, IN ITS OWN WORDS. The rail's
+    detail wraps it as "the harness exited N: ...". A path other than the
+    handle's own folder becomes "a path", a long run of characters becomes "a
+    hidden value", and a backtick becomes a quote. The handle's folder stays,
+    because the person chose it when they registered the handle.
+
+    THE FIX STEP IS THE RAIL'S. For a folder the harness does not trust, it names
+    the folder and the account. For anything else it names where to run the
+    agent to read the refusal whole.
+    """
+    text = (detail or "").strip()
+    m = re.match(r"^the harness exited -?\d+: (.*)$", text)
+    if m:
+        text = m.group(1)
+    if text.startswith(UNTRUSTED):
+        reason = UNTRUSTED
+        fix = ("Run the agent once in %s as %s and accept the trust prompt" % (cwd, me))
+    else:
+        text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
+        keep = cwd.rstrip("/") if cwd else ""
+
+        def path(mt):
+            p = mt.group(0).rstrip(".")
+            return mt.group(0) if keep and p.rstrip("/") == keep else "a path"
+        text = PATH_IN_TEXT.sub(path, text)
+        text = TOKEN_IN_TEXT.sub("a hidden value", text)
+        reason = text.replace("`", "'") or "no reason was given"
+        fix = ("Run the agent once in %s as %s to read the refusal whole, and fix what it "
+               "names" % (cwd or "the handle's folder", me))
+    return reason, fix
 
 
 def nudge(rail, adapter_dir, bus_dir, handle, rec, pid, text=None):
@@ -1955,6 +2089,9 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
     is left, so the next pass finds it. A failed resume writes the same hold the
     mail road writes, so a signed-out harness is asked about once and not every
     two minutes.
+
+    `held` is the handles whose hold stops the account. A handle's own hold is
+    read here as the mail road reads it.
     """
     held = held if held is not None else []
     records, read_bytes = read_records()
@@ -2124,6 +2261,12 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             out.append(item)
             keep.append(rec)
             continue
+        own, why = handle_hold(handle)
+        if own:
+            item["outcome"], item["detail"] = "held", why
+            out.append(item)
+            keep.append(rec)
+            continue
         if not act:
             item["outcome"] = "would resume"
             item["detail"] = ("no process carries the session; a %s resume with the phrase as "
@@ -2143,10 +2286,13 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             patch["resumed_session"] = session
             patch["stopped_at"] = None
             patch["hold"] = None
+            if isinstance(read_state(handle).get("hold"), dict):
+                patch["hold_healed_at"] = now_iso()
             patch.update(post_compact_stamp(read_state(handle), cwd))
         else:
-            patch.update(hold_patch(bus_dir, handle, detail, model))
-            held.append(handle)
+            patch.update(hold_patch(bus_dir, handle, detail, model, cwd))
+            if hold_scope(patch["hold"]) == "account":
+                held.append(handle)
             keep.append(rec)
         write_state(handle, patch)
         log("%s: post-compaction %s -- %s" % (handle, item["outcome"], detail))
@@ -2165,22 +2311,49 @@ def post_compact_stamp(data, cwd):
             "post_compact_stamp_told": False}
 
 
-def hold_patch(bus_dir, handle, detail, model):
-    """The hold a failed resume writes, and the one line that tells the human.
+def hold_patch(bus_dir, handle, detail, model, cwd):
+    """The hold a failed resume writes, and the one line that says so.
 
     BOTH RESUME ROADS WRITE THIS, and one function is what keeps them saying the
-    same thing. A resume that failed because the harness is signed out is named
-    as a sign-out, because that is what the person has to fix.
+    same thing. A resume that failed because the harness is signed out holds the
+    account, because every resume would fail the same way. Any other failure
+    holds this handle alone, and the rail tries it again after HOLD_RETRY_SECS.
+
+    A RETRY THAT FAILS THE SAME WAY SAYS NOTHING NEW. The line went out with the
+    first failure. A new line goes when the scope or the reason changed.
     """
     signin = signin_reading()
-    body = ""
-    if signin == "signed-out":
-        body = ("%s could not be resumed because the harness is signed out for this "
-                "account. Somebody runs /login as it, then 'session-continuity "
-                "--clear-hold %s'." % (handle, handle))
-    return {"hold": {"at": now_iso(), "reason": detail, "model": model, "signin": signin,
-                     "kind": "sign-out" if signin == "signed-out" else "resume-failed"},
-            "hold_told_human": tell_human(bus_dir, handle, detail, body=body)}
+    me = pwd.getpwuid(os.geteuid()).pw_name
+    prior = read_state(handle).get("hold")
+    prior = prior if isinstance(prior, dict) else {}
+    scope = "account" if signin == "signed-out" else "handle"
+    reason, fix = hold_words(detail, cwd, me)
+    now = time.time()
+    hold = {"at": now_iso(), "reason": detail, "said": reason, "model": model,
+            "signin": signin, "scope": scope,
+            "kind": "sign-out" if scope == "account" else "resume-failed",
+            "since": prior.get("since") or prior.get("at") or now_iso(),
+            "tries": int(prior.get("tries") or 0) + 1 if prior else 1}
+    if scope == "handle":
+        hold["retry_after"] = now + HOLD_RETRY_SECS
+        hold["retry_at"] = datetime.datetime.fromtimestamp(
+            now + HOLD_RETRY_SECS, datetime.timezone.utc).replace(microsecond=0).isoformat()
+    patch = {"hold": hold}
+    if prior and hold_scope(prior) == scope and prior.get("said") == reason:
+        return patch
+    if scope == "account":
+        subject = "continuity rail: %s is held, and so is every handle of %s" % (handle, me)
+        body = ("%s could not be resumed because the harness is signed out for %s. No "
+                "handle of %s is resumed until the hold is cleared. Somebody runs /login "
+                "as %s, then 'session-continuity --clear-hold %s'." % (handle, me, me, me, handle))
+    else:
+        subject = "continuity rail: %s is held" % handle
+        body = ("%s could not be resumed: %s. %s. The rail tries %s again within the hour, "
+                "and every other handle is resumed as usual."
+                % (handle, reason, fix, handle))
+    body = " ".join(body.replace("`", "'").split())
+    patch["hold_told_human"], patch["hold_told_notify"] = tell_hold(bus_dir, handle, subject, body)
+    return patch
 
 
 # ------------------------------------------------------------------- the pass
@@ -2189,10 +2362,12 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
     listing = listed_sessions(cmd)
     rows, why = survey(guard, listing, bus_dir, me, only, read_all=not act)
     window, window_source = compaction_window()
+    # `held` NAMES THE HOLDS THAT STOP THE ACCOUNT. A handle's own hold is read
+    # where that handle would be resumed, and it stops nothing else.
     result = {"bus_dir": bus_dir, "user": me, "only": sorted(only),
               "idle_stop_minutes": idle_stop_minutes, "activity_hours": activity_hours,
               "window": window, "window_source": window_source,
-              "held": [h for h, _ in holds()], "rows": rows,
+              "held": account_holds(), "rows": rows,
               "stops": stop_pass(cmd, listing, idle_stop_minutes, act)}
     # A BOARD THIS PROGRAM CANNOT READ ENDS THE PASS BEFORE ANY OTHER READING.
     # The three passes below each decide from a handle row, and a pass with no
@@ -2241,6 +2416,11 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
                              "--clear-hold clears it" % ", ".join(result["held"]))
             log("%s: %s" % (handle, row["detail"]))
             continue
+        own, why = handle_hold(handle)
+        if own:
+            row["action"], row["outcome"], row["detail"] = "held", "skipped", why
+            log("%s: %s" % (handle, why))
+            continue
         if RESUME_TURN is None:
             row["outcome"], row["detail"] = "refused", no_phrase_detail()
             log("%s: resume refused -- %s" % (handle, row["detail"]))
@@ -2257,13 +2437,16 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
                  "last_resume_bare": row["bare"], "last_resume_session": target}
         if ok:
             patch["hold"] = None
+            if isinstance(read_state(handle).get("hold"), dict):
+                patch["hold_healed_at"] = now_iso()
             # What this rail started is what this rail ends. The stop pass reads
             # this name, and a stop clears it.
             patch["resumed_session"] = target
             patch["stopped_at"] = None
         else:
-            patch.update(hold_patch(bus_dir, handle, detail, row.get("model") or ""))
-            result["held"].append(handle)
+            patch.update(hold_patch(bus_dir, handle, detail, row.get("model") or "", row["cwd"]))
+            if hold_scope(patch["hold"]) == "account":
+                result["held"].append(handle)
         write_state(handle, patch)
         log("%s: resume %s -- %s" % (handle, row["outcome"], detail))
     return result, 0
@@ -2407,7 +2590,9 @@ def main(argv):
                "compaction_records": records_path(), "record_ttl_hours": RECORD_TTL_HOURS,
                "window": window, "window_source": window_source,
                "token_threshold": token_threshold(window),
-               "holds": [{"handle": h, "hold": v} for h, v in holds()],
+               "holds": [{"handle": h, "scope": hold_scope(v), "kind": v.get("kind") or "",
+                          "retry_at": v.get("retry_at") if hold_scope(v) == "handle" else None,
+                          "hold": v} for h, v in holds()],
                "ready": not blocking, "blocking": blocking}
         if not blocking:
             checked, _ = run_pass(guard, rail, adapter_dir, cmd, bus_dir, me,

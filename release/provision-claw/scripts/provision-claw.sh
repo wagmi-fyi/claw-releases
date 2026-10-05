@@ -6670,7 +6670,7 @@ phase_24_wake_rail() {
   # w273. An operator reading a modification time to find when a decision last
   # changed was reading the date of the last apply.
   local cur_model="$DELEGATE_MODEL" cur_skip="$DELEGATE_SKIP_PERMISSIONS" kept=""
-  local before="" added="" want="" rail_line=""
+  local before="" added="" want="" rail_line="" notify_line=""
   # THE CONTINUITY RAIL IS A FACT WHERE IT IS INSTALLED, and absent where it is
   # not. The orchestrate skill's `spawn --check` reads this key to say whether a
   # rail runs here, and a session never guesses which case holds. The installer
@@ -6685,6 +6685,12 @@ phase_24_wake_rail() {
     [ -n "$v" ] && { cur_model="$v"; kept="the model"; }
     v="$(sed -n 's/^ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ORCHESTRATE_CONF_FILE" | tail -1)"
     [ -n "$v" ] && { cur_skip="$v"; kept="${kept:+${kept} and }the permissions flag"; }
+    # THE HOLD'S SECOND READER IS A DECISION THAT IS NEVER SEEDED. The
+    # continuity rail sends a hold's line to the handle this line names, as well
+    # as to human. A claw that carries the line keeps it as written. A claw that
+    # does not gets none, so its file does not move.
+    v="$(sed -n '/^ORCHESTRATE_HOLD_NOTIFY=/p' "$ORCHESTRATE_CONF_FILE" | tail -1)"
+    [ -n "$v" ] && { notify_line="$v"; kept="${kept:+${kept} and }the hold's second reader"; }
   fi
 
   want="$(cat <<ORCHEOF
@@ -6705,7 +6711,8 @@ ORCHESTRATE_BUS_DIR="${BUS_HOME}"
 ORCHESTRATE_SUBSTRATE="claude"${rail_line:+
 ${rail_line}}
 ORCHESTRATE_DELEGATE_MODEL="${cur_model}"
-ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"
+ORCHESTRATE_DELEGATE_SKIP_PERMISSIONS="${cur_skip}"${notify_line:+
+${notify_line}}
 ORCHEOF
 )"
   [ -n "$kept" ] && say "  kept ${kept} this claw already recorded in ${ORCHESTRATE_CONF_FILE}"

@@ -168,8 +168,9 @@ workpaper thirty minutes later is a queue line.
 a pass stops one once the listing reads it idle and its transcript has been quiet
 fifteen minutes. `claude stop` keeps the conversation.
 
-**A resume that fails writes a hold**, and nothing of that account is resumed
-until `--clear-hold <handle>` clears it. A line goes to `human`.
+**A failed resume holds.** Signed out, it holds the account until
+`--clear-hold`. Otherwise it holds that handle, tried hourly. `human` and the
+`ORCHESTRATE_HOLD_NOTIFY` handle get its line.
 
 ## What fails silently here
 
@@ -194,10 +195,11 @@ until `--clear-hold <handle>` clears it. A line goes to `human`.
   own bus and nothing else, which reads exactly like a quiet shared one. The
   install says so when it finds that file already there without the entry, and
   `bus-nudge --check` reports the bus list it resolved.
-- **A held account looks like a quiet one.** Once the continuity rail holds, no
-  orchestrator of that account comes back and nothing else says so. The line on
-  the `human` handle is the notice, and `session-continuity --check` names the
-  hold.
+- **A held account looks like a quiet one.** Once the continuity rail holds an
+  account, no orchestrator of it comes back and nothing else says so. Nobody
+  reads the `human` handle. `ORCHESTRATE_HOLD_NOTIFY` is how the line reaches a
+  handle somebody reads, and `session-continuity --check` names each hold and
+  its scope.
 - **Nothing watches this rail.** The same hole the notifier names about itself.
   Silence means healthy, and it also means the instance is off.
 

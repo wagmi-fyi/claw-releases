@@ -1,28 +1,31 @@
-- **The continuity rail follows a moved conversation that has no title.** When
-  the desktop app moves an orchestrator's conversation that nobody has named,
-  the rail now wakes the newest session, as it already did for a named one.
-  Before this release it resumed nothing for that handle and told a person the
-  conversation had no title.
-- **The checkpoint prompt now comes close to compaction.** The continuity rail
-  tells a live orchestrator to write its workpaper when its last turn passes 90%
-  of the automatic compaction window. Before this release it did so at half.
-  At a window of 650,000 tokens the prompt comes at 585,000.
-- **The automatic compaction window is now 650,000 tokens.** A person with no
-  window set gets 650,000. A person at the old default of 600,000 moves to
-  650,000 with the rest of their settings kept. Any other number a person set
-  stays as it is. The setting is `autoCompactWindow` in
-  `~/.claude/settings.json`.
+- **The continuity rail holds only the orchestrator that failed to resume.**
+  When the harness refuses one orchestrator, for example because its folder is
+  not trusted, the rail stops resuming that one and goes on resuming the
+  others. It tries the held one again once an hour, and a resume that works
+  clears the hold. Before this release one refusal stopped every orchestrator
+  of the account until somebody cleared it by hand. A signed-out harness still
+  stops the whole account.
+- **A hold now says what to do.** The message names the orchestrator and the
+  harness's reason. It ends with the step that fixes it. For a folder the
+  harness does not trust, it names the folder and says to run the agent there
+  once and accept the prompt.
+- **A hold can reach a handle somebody reads.** Set `ORCHESTRATE_HOLD_NOTIFY`
+  in `/etc/orchestrate.conf` to a bus handle, and each hold's message goes
+  there as well as to `human`. Left unset, it goes to `human` alone.
 
 ## Changes with no visible effect
 
-The rail links a moved conversation by the message ids the move copied.
-`session-continuity --check` names each link `ids`, or `title and ids` where
-the conversation carries a title. A named conversation whose move does not
-start with its name is refused, and the reason says so. The fraction the
-checkpoint prompt fires at is one number in the rail, and `--check` shows the
-threshold it gives for each window.
+`session-continuity --check` shows each hold's scope, `account` or `handle`,
+and when a handle's hold is next tried. A hold written by an earlier release is
+read by its sign-in word: `signed-out` holds the account, and anything else
+holds the handle. The claw-ops continuity readout reports the two scopes as
+separate findings. A hold's message drops any path other than the
+orchestrator's own folder, and any value long enough to be a token. A
+provisioning run keeps the `ORCHESTRATE_HOLD_NOTIFY` line where a claw sets it
+and never writes one.
 
 ## What somebody has to do
 
 Most claws need nothing from a person. This release changes no groups and moves
-no core.
+no core. A claw that wants hold messages read by an orchestrator sets
+`ORCHESTRATE_HOLD_NOTIFY` by hand.

@@ -31,9 +31,10 @@
 # the system manager rather than the caller's own. Reading unit state there needs
 # no privilege, and this readout changes nothing.
 #
-# A HOLD AND A SIGN-OUT ARE ONE FINDING. A resume that fails writes a hold, and
-# no handle of the account is resumed until it is cleared. A signed-out harness
-# is the usual reason, so the two are read together and reported together.
+# A HOLD OF THE ACCOUNT AND A SIGN-OUT ARE ONE FINDING. A resume that fails
+# while the harness is signed out holds every handle until the hold is cleared,
+# so the two are read together. Any other failure holds one handle, and the
+# rail tries it again once an hour.
 #
 # ANOTHER ACCOUNT IS UNREADABLE, NEVER ABSENT. The rail keeps its state under
 # each owner's own home. This readout covers the caller and says so.
@@ -198,9 +199,15 @@ if [ "$RAIL_PRESENT" = true ]; then
   done <<< "$(printf '%s' "$CHECK" | jq -c '.rows[]? // empty')"
 fi
 
-holds_count="$(printf '%s' "$HOLDS" | jq -s 'length')"
-[ "${holds_count:-0}" -eq 0 ] || \
-  finding error "${holds_count} handle(s) carry a hold, so no handle of ${ME} is resumed until it is cleared. The rail's --clear-hold clears one."
+# A hold's scope is the rail's: what it wrote, or for a hold written before the
+# scope existed, account when the sign-in word was signed-out.
+SCOPE='(.hold.scope // (if .hold.signin == "signed-out" then "account" else "handle" end))'
+account_holds="$(printf '%s' "$HOLDS" | jq -s "[.[] | select(${SCOPE} == \"account\")] | length")"
+handle_holds="$(printf '%s' "$HOLDS" | jq -s "[.[] | select(${SCOPE} == \"handle\")] | length")"
+[ "${account_holds:-0}" -eq 0 ] || \
+  finding error "${account_holds} handle(s) carry a hold of scope account, so no handle of ${ME} is resumed until it is cleared. The rail's --clear-hold clears one."
+[ "${handle_holds:-0}" -eq 0 ] || \
+  finding error "${handle_holds} handle(s) carry a hold of their own. Each one's reason names the fix, and the rail tries it again once an hour."
 
 nudged_unread="$(printf '%s' "$ROWS" | jq -s '[.[] | select(.unread > 0 and .last_wake_outcome == "delivered")] | length')"
 [ "${nudged_unread:-0}" -eq 0 ] || \

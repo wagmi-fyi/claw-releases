@@ -15,8 +15,9 @@ what enrols a handle. Each pass reads the bus. A handle with mail and a live ses
 rail's nudge. One whose session has gone is resumed in the background under its
 owner, with a fixed sentence telling it to invoke orchestrate's resume operation. A
 session it resumed is stopped after fifteen quiet minutes, and the conversation is
-kept. A resume that fails writes a hold, and no handle of the account is resumed
-until it is cleared. After a compaction it sends a live orchestrator the resume
+kept. A resume that fails writes a hold. When the harness is signed out, no
+handle of the account is resumed until the hold is cleared. Any other failure
+holds that one handle, and the rail tries it again once an hour. After a compaction it sends a live orchestrator the resume
 phrase, which the orchestrate skill's resume hook turns into the skill's front page. A gone one
 is resumed the same way as for mail, with the phrase as its first turn.
 
@@ -34,8 +35,8 @@ says why. Re-registering the handle from the app's conversation ends that.
 One row per orchestrator handle this account holds: the last wake and its outcome,
 the last resume and its outcome, any session the rail resumed and has not stopped,
 and any hold. Then the account's own state: whether the rail is enabled here, what
-its timer did, and whether the harness is signed in. A hold is the sign-out case,
-so those two go together.
+its timer did, and whether the harness is signed in. A hold that stops the
+account is the sign-out case, so those two go together.
 
 The rail's own board of handles is the board this readout uses. A second reading of
 the bus here would be a second opinion about which handles are orchestrators, and
@@ -52,6 +53,7 @@ Run `scripts/continuity.sh --help`, then run it. It changes nothing.
 
 ## Reading the result
 
-A hold is the finding that matters: no handle of this account is resumed until it
-is cleared, and a signed-out harness is usually why. A handle whose last wake was
+A hold is the finding that matters. A hold of scope `account` means no handle of
+this account is resumed until it is cleared, and a signed-out harness is why. A
+hold of scope `handle` stops that handle alone, and its reason names the fix. A handle whose last wake was
 delivered and whose inbox is still unread got the nudge and did not act.
