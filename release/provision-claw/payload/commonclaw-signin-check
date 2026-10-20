@@ -5,7 +5,8 @@
 # PAYLOAD PROGRAM. install-bus-nudge.sh lays it in /opt/commonclaw/bin beside the
 # other per-account rails, and commonclaw-signin-check@<account>.timer runs it
 # once an hour. Its consumers are the notifier, the mail alarm's address, the
-# journal, and session-continuity, which takes the same reading for its holds.
+# journal, and session-continuity, which takes the same reading for its holds
+# and reads the stored word below before any resume.
 #
 #   commonclaw-signin-check --read              print one word, change nothing
 #   commonclaw-signin-check --once              the account's hourly reading
@@ -182,10 +183,11 @@ cmd_once() {
     return 0
   fi
 
-  [ "$word" = "$last" ] || {
-    printf '%s\n' "$word" > "${dir}/reading.tmp" && mv -f "${dir}/reading.tmp" "${dir}/reading"
-    log info "${me} reads ${word} (was ${last:-unrecorded})"
-  }
+  # Rewritten at every reading, changed or not, so the file's age is the age of
+  # the reading. session-continuity reads the word and that age before it
+  # resumes anything, and runs nothing to get them.
+  printf '%s\n' "$word" > "${dir}/reading.tmp" && mv -f "${dir}/reading.tmp" "${dir}/reading"
+  [ "$word" = "$last" ] || log info "${me} reads ${word} (was ${last:-unrecorded})"
 
   case "$word" in
     signed-in|never)

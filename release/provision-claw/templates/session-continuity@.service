@@ -33,5 +33,8 @@ ExecStart=/opt/commonclaw/bin/session-continuity --once
 # longest pass. It takes no --idle-stop-minutes: that flag is for driving a proof
 # and the shipped threshold is the program's own.
 TimeoutStartSec=15min
-Nice=10
-IOSchedulingClass=idle
+# A session a pass resumes outlives the pass. With the default, systemd ends
+# every process the pass started once the pass exits, and the harness's
+# background program and each session it holds go with it. This line keeps
+# them. The pass's own idle stop is what ends a session this rail resumed.
+KillMode=process

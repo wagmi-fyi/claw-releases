@@ -118,6 +118,28 @@ takes. A reading of a credentials file would not do: a file can be present for a
 login the server refused long ago. `kind` reads `sign-out` or `resume-failed`,
 and `scope` reads `account` or `handle`. `--check` shows both for every hold.
 
+A STORED SIGNED-OUT READING HOLDS THE ACCOUNT BEFORE ANY RESUME. A resume into a
+signed-out harness can pass the thirty-second alive test, so the failure above
+never fires. Measured on one claw: signed out for three days, and the rail
+resumed sessions every two minutes the whole time. So before any resume, a pass
+reads the word the hourly sign-in check last stored for the account, from the
+check's own `reading` file. It reads the file and starts no program: no check,
+no harness, no doctor, no login. A `signed-out` written less than
+SIGNIN_FRESH_SECS ago writes the account hold above, once, and resumes nothing.
+It sends no line, because the sign-in check's alarm already tells the people who
+can sign in. A missing file, an older one, or any other word leaves the pass as
+it was before this gate. Nudges are not resumes, and they go on. `--check` shows
+the stored reading under `signin_stored`.
+
+THAT HOLD CLEARS ITSELF ONCE THE CHECK READS THE ACCOUNT SIGNED IN. A hold this
+gate wrote carries `read: stored`. In the first pass where the stored word is
+`signed-in` and less than SIGNIN_FRESH_SECS old, the pass clears it and then
+resumes as usual. A person signs in from the desktop app and needs no terminal.
+A stale, missing or `never` reading leaves the hold. A sign-out hold a failed
+resume wrote carries no `read: stored`, and only `--clear-hold` or a resume that
+succeeds clears it. `--check` names the holds the next pass would clear under
+`signin_clears`.
+
 A HOLD SENDS ONE LINE, TO TWO READERS AT MOST. The line goes to the `human`
 handle, and to the handle ORCHESTRATE_HOLD_NOTIFY names in the conf, when it
 names one. It names the held handle, the harness's refusal in its own words, and
@@ -135,7 +157,24 @@ folder. The hold check reads those and never the harness's words. An account
 hold sends nothing there, because the hourly sign-in alarm already says the same
 thing to the same people.
 
-Nudging and stopping go on under a hold. Neither is the act that was failing.
+Nudging and stopping go on under a hold of either kind above. Neither is the
+act that was failing.
+
+A WAKE THAT CHANGES NOTHING WRITES A THIRD KIND OF HOLD. Read 2026-10-09: a
+session was resumed or nudged every two minutes for two days, and each turn
+ended with the same mail unread, so every pass woke it again. So a pass records
+the handle's unread count and newest message id at each wake that reached the
+session, a delivered nudge or a resume that came up. While the two values stay
+as they were, the next wake waits two minutes, and the one after it ten. After
+three such wakes the next pass holds the handle instead of waking it again. The
+hold reads kind `unread-unchanged`, scope `handle` and class `unread`, and it is
+not tried again on the clock. It stops the mail road's nudge and resume for that
+handle alone. New mail or a message read clears it, and so does --clear-hold.
+Its line goes to the same readers as any handle's hold, and names the handle,
+the unread count, the wakes that changed nothing and the step that clears it.
+A pass the compaction road acts on is not a wake here, and that road never
+reads this hold. `--check` shows each row's count and its next allowed wake
+under `wake`.
 
 THE FORCED WRITE, ON A CADENCE AND AT A TOKEN THRESHOLD. A live orchestrator gets
 FORCED_WRITE_TURN through the wake rail's adapter when either arm reads due.
@@ -205,7 +244,8 @@ RECORD_TTL_HOURS goes the same way.
                                        waking every one an account holds
   session-continuity --law             print both fixed sentences and prove
                                        neither carries interpolation
-  session-continuity --clear-hold <h>  clear that handle's hold, of either scope
+  session-continuity --clear-hold <h>  clear that handle's hold, of any kind, and
+                                       its count of wakes that changed nothing
 
   --idle-stop-minutes <n>              how long a session this rail resumed may
                                        sit quiet before a pass ends it. It is
@@ -237,6 +277,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import string
 import subprocess
 import sys
@@ -345,6 +386,27 @@ ROLE = "orchestrator"
 # The fix is a person's act, and an hour is soon enough after it. A harness that
 # refuses every two minutes would also fill the journal.
 HOLD_RETRY_SECS = 3600
+# THE WAKE GUARD. How long the rail waits after a wake that left a handle's mail
+# as it was before it wakes that handle again: two minutes after the first, ten
+# after the second. After the third such wake a pass holds the handle instead of
+# waking it a fourth time, where the fourth would have waited thirty.
+WAKE_WAITS_SECS = (120, 600, 1800)
+WAKE_LIMIT = 3
+# The timer fires every two minutes with up to twenty seconds of random delay,
+# so two passes can sit less than 120 seconds apart. A wait is read with this
+# much slack, or the second wake would slip a whole beat.
+WAKE_SLACK_SECS = 30
+# The hold the wake guard writes. It does not retry on the clock: mail that
+# changes clears it, and so does --clear-hold.
+UNREAD_KIND = "unread-unchanged"
+UNREAD_CLASS = "unread"
+# THE SIGN-IN GATE. The age past which the sign-in check's stored reading says
+# nothing about now. The check runs hourly, with up to five minutes of random
+# delay and up to five minutes to run, so two readings sit at most seventy
+# minutes apart. Twenty more are slack. SIGNIN_STATE_DIR moves the file, as it
+# moves the check's own.
+SIGNIN_FRESH_SECS = 5400
+SIGNIN_STATE_KEY = "SIGNIN_STATE_DIR"
 # The conf key that names a second reader for a hold's line. Empty or absent
 # means the `human` handle alone.
 HOLD_NOTIFY_KEY = "ORCHESTRATE_HOLD_NOTIFY"
@@ -1315,9 +1377,14 @@ def handle_hold(handle):
     Only a hold of scope `handle` is read here. It is due again once its
     `retry_after` has passed. A hold that carries none was written before the
     retry existed, and it is due now.
+
+    The wake guard's hold is not read here. The mail road reads it through
+    wake_gate(), and the compaction road does not read it at all.
     """
     hold = read_state(handle).get("hold")
     if not isinstance(hold, dict) or hold_scope(hold) != "handle":
+        return False, ""
+    if hold.get("kind") == UNREAD_KIND:
         return False, ""
     after = hold.get("retry_after")
     if not isinstance(after, (int, float)) or time.time() >= after:
@@ -1396,6 +1463,100 @@ def signin_reading():
         return "unreadable"
     word = proc.stdout.decode("utf-8", "replace").strip()
     return word if word in ("signed-in", "signed-out", "never") else "unreadable"
+
+
+def signin_stored(now=None):
+    """The sign-in check's last stored reading for this account, and its verdict.
+
+    THIS READS A FILE AND STARTS NO PROGRAM. signin_reading() above runs the
+    check, and the check runs the harness and its doctor, which tries a token
+    refresh. Here nothing runs and no login is tried. The file is the check's
+    `reading`, one word, under the account's own state directory, where the
+    check's --once writes it at every reading it could take. So the file's age
+    is the age of the reading.
+
+    The verdict is `signed-out` only for that word written less than
+    SIGNIN_FRESH_SECS ago. Otherwise it is `missing`, `stale`, or the word
+    itself, and none of those stops a resume.
+    """
+    now = time.time() if now is None else now
+    base = (os.environ.get(SIGNIN_STATE_KEY)
+            or os.path.expanduser("~/.local/state/commonclaw/signin-check"))
+    path = os.path.join(base, "reading")
+    out = {"path": path, "word": None, "read_at": None, "age_secs": None,
+           "fresh_secs": SIGNIN_FRESH_SECS, "verdict": "missing"}
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            return out
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            word = fh.read(64).split("\n", 1)[0].strip()
+    except OSError:
+        return out
+    out["word"] = word if word in ("signed-in", "signed-out", "never") else "unrecognized"
+    out["read_at"] = datetime.datetime.fromtimestamp(
+        st.st_mtime, datetime.timezone.utc).replace(microsecond=0).isoformat()
+    age = max(0, now - st.st_mtime)
+    out["age_secs"] = int(age)
+    out["verdict"] = "stale" if age > SIGNIN_FRESH_SECS else out["word"]
+    return out
+
+
+def signout_patch(handle, model, cwd, stored):
+    """The account hold a fresh signed-out reading writes, with no line sent.
+
+    It is the hold a failed resume writes under a signed-out reading: kind
+    sign-out, scope account. `read: stored` marks it, and signin_settle() clears
+    it once the stored reading is a fresh signed-in. --clear-hold clears it too.
+    No line goes to `human` or
+    to ORCHESTRATE_HOLD_NOTIFY, and the root hold check skips an account hold,
+    because the sign-in check's alarm already tells the people who can sign in.
+    """
+    prior = read_state(handle).get("hold")
+    prior = prior if isinstance(prior, dict) else {}
+    detail = ("the sign-in check read signed-out at %s, so no resume was started"
+              % (stored.get("read_at") or "an unknown time"))
+    return {"hold": {"at": now_iso(), "reason": detail, "said": "the harness is signed out",
+                     "model": model, "signin": "signed-out", "scope": "account",
+                     "kind": "sign-out", "read": "stored", "read_at": stored.get("read_at"),
+                     "id": prior.get("id") or uuid.uuid4().hex[:16], "class": "refused",
+                     "cwd": cwd or "",
+                     "since": prior.get("since") or prior.get("at") or now_iso(),
+                     "tries": int(prior.get("tries") or 0) + 1 if prior else 1}}
+
+
+def signout_held(handle, stored):
+    """The detail a row carries when the stored reading held the account."""
+    return ("the sign-in check read this account signed out at %s, so %s is not resumed and "
+            "no handle is resumed until the check reads it signed in or --clear-hold clears it"
+            % (stored.get("read_at") or "an unknown time", handle))
+
+
+def signin_settle(stored, act):
+    """Clear the holds the stored reading wrote, once it reads signed in: the handles.
+
+    Only a hold of kind sign-out, scope account, with `read: stored` clears here,
+    and only when the verdict is `signed-in`, which means the word was written
+    less than SIGNIN_FRESH_SECS ago. A stale, missing or `never` reading clears
+    nothing. A hold a failed resume wrote carries no `read: stored`, and it
+    clears as before. A pass that does not act clears nothing and names what it
+    would clear.
+    """
+    if stored.get("verdict") != "signed-in":
+        return []
+    out = []
+    for handle, hold in holds():
+        if (hold.get("kind") != "sign-out" or hold_scope(hold) != "account"
+                or hold.get("read") != "stored"):
+            continue
+        out.append(handle)
+        if act:
+            write_state(handle, {"hold": None, "hold_cleared_at": now_iso(),
+                                 "hold_cleared_by": "signin-stored",
+                                 "hold_cleared_read_at": stored.get("read_at")})
+            log("%s: the sign-in check read this account signed in at %s, so its sign-out "
+                "hold is cleared" % (handle, stored.get("read_at") or "an unknown time"))
+    return out
 
 
 def tell_human(bus_dir, handle, reason, subject="", body="", to="human"):
@@ -2079,7 +2240,8 @@ def stamp_pass(bus_dir, rows, act):
 
 
 # ------------------------------------------------- the post-compaction resume
-def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only, act, held=None):
+def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only, act, held=None,
+                    signin=None):
     """Re-ground an orchestrator the hook recorded a compaction for.
 
     TWO ROADS, CHOSEN BY WHETHER THE SESSION IS HERE. Q184, ruled 2026-09-26.
@@ -2279,6 +2441,15 @@ def compaction_pass(guard, rail, adapter_dir, cmd, listing, bus_dir, rows, only,
             out.append(item)
             keep.append(rec)
             continue
+        if signin and signin.get("verdict") == "signed-out":
+            item["outcome"], item["detail"] = "held", signout_held(handle, signin)
+            out.append(item)
+            keep.append(rec)
+            if act:
+                write_state(handle, signout_patch(handle, model, cwd, signin))
+                held.append(handle)
+                log("%s: post-compaction held -- %s" % (handle, item["detail"]))
+            continue
         if not act:
             item["outcome"] = "would resume"
             item["detail"] = ("no process carries the session; a %s resume with the phrase as "
@@ -2376,18 +2547,164 @@ def hold_patch(bus_dir, handle, detail, model, cwd):
     return patch
 
 
+# ------------------------------------------------------------- the wake guard
+#
+# A WAKE THAT CHANGES NOTHING IS ITS OWN LOOP. Read 2026-10-09 from the journal:
+# a session resumed or nudged every two minutes for two days, and each turn ended
+# with the same mail unread, so every pass found the same mail and woke it
+# again. The hold above answers a resume that fails. This answers a wake that
+# works and moves nothing.
+#
+# THE MAIL IS THE READING. The pass records the handle's unread count and its
+# newest message id at each wake it makes. A later pass that finds the same two
+# values waits before it wakes again: two minutes, then ten. After three wakes
+# that left the mail as it was, the next pass holds the handle and wakes it no
+# more. A nudge and a resume count alike. Only a wake that reached the session
+# counts: a nudge the adapter delivered, or a resume that came up. A failed
+# resume is the other hold's business.
+#
+# MAIL THAT CHANGES STARTS IT OVER. New mail changes the newest id, and a read
+# message lowers the count. Either one clears the record, and the hold with it.
+# So does --clear-hold. The compaction road never reads this: what it acts on
+# is not a wake of the mail road, and a pass it touched wakes nothing here.
+def wake_pair(row):
+    return [int(row.get("unread") or 0), row.get("newest_id")]
+
+
+def wake_reading(handle, row, now=None):
+    """What the wake guard says about one handle now. Writes nothing.
+
+    `verdict` is one of: wake, wait, hold (a pass writes the hold), held (the
+    hold stands), clear (the mail changed, so the record and any hold of this
+    kind go).
+    """
+    now = time.time() if now is None else now
+    data = read_state(handle)
+    loop = data.get("wake_loop") if isinstance(data.get("wake_loop"), dict) else {}
+    hold = data.get("hold") if isinstance(data.get("hold"), dict) else {}
+    mine = hold.get("kind") == UNREAD_KIND
+    pair = wake_pair(row)
+    out = {"unread": pair[0], "newest_id": pair[1], "attempts": 0, "next_at": None,
+           "hold_kind": hold.get("kind") or None,
+           "hold_scope": hold_scope(hold) if hold else None}
+    if mine:
+        if [hold.get("unread"), hold.get("newest")] == pair and pair[0] > 0:
+            out.update(attempts=int(loop.get("attempts") or WAKE_LIMIT), verdict="held")
+            return out
+        out["verdict"] = "clear"
+        return out
+    if not loop:
+        out["verdict"] = "wake" if pair[0] > 0 else "idle"
+        return out
+    if [loop.get("unread"), loop.get("newest")] != pair or pair[0] <= 0:
+        out["verdict"] = "clear"
+        return out
+    attempts = int(loop.get("attempts") or 0)
+    last = loop.get("last_at")
+    out["attempts"] = attempts
+    if attempts <= 0 or not isinstance(last, (int, float)):
+        out["verdict"] = "wake"
+        return out
+    wait = WAKE_WAITS_SECS[attempts - 1] if attempts < WAKE_LIMIT else WAKE_WAITS_SECS[0]
+    due = last + wait
+    out["next_at"] = datetime.datetime.fromtimestamp(
+        due, datetime.timezone.utc).replace(microsecond=0).isoformat()
+    if now + WAKE_SLACK_SECS < due:
+        out["verdict"] = "wait"
+    else:
+        out["verdict"] = "hold" if attempts >= WAKE_LIMIT else "wake"
+    if out["verdict"] == "hold":
+        out["next_at"] = None
+    return out
+
+
+def wake_settle(handle, reading):
+    """Clear the record, and a hold of this kind, when the mail changed."""
+    if reading.get("verdict") != "clear":
+        return False
+    patch = {"wake_loop": None}
+    hold = read_state(handle).get("hold")
+    if isinstance(hold, dict) and hold.get("kind") == UNREAD_KIND:
+        patch["hold"] = None
+        patch["hold_healed_at"] = now_iso()
+        log("%s: the mail changed, so the hold on unread mail is cleared" % handle)
+    write_state(handle, patch)
+    return True
+
+
+def wake_hold(bus_dir, handle, row, attempts, me):
+    """Write the guard's hold and send its one line. Returns the hold."""
+    unread, newest = wake_pair(row)
+    hold = {"at": now_iso(), "since": now_iso(), "scope": "handle", "kind": UNREAD_KIND,
+            "class": UNREAD_CLASS, "id": uuid.uuid4().hex[:16], "cwd": row.get("cwd") or "",
+            "unread": unread, "newest": newest, "wakes": attempts,
+            "said": "%d wakes left %d unread message%s as they were"
+                    % (attempts, unread, "" if unread == 1 else "s")}
+    hold["reason"] = hold["said"]
+    subject = "continuity rail: %s is held" % handle
+    body = ("%s is held. The continuity rail woke it %d times, and its %d unread message%s "
+            "did not change. New mail or a message read "
+            "clears the hold by itself. To clear it now, run "
+            "'session-continuity --clear-hold %s' as %s."
+            % (handle, attempts, unread, "" if unread == 1 else "s", handle, me))
+    body = " ".join(body.replace("`", "'").split())
+    told, notify = tell_hold(bus_dir, handle, subject, body)
+    write_state(handle, {"hold": hold, "hold_told_human": told, "hold_told_notify": notify})
+    log("%s: held after %d wakes left %d unread as they were" % (handle, attempts, unread))
+    return hold
+
+
+def wake_gate(bus_dir, row, me):
+    """Whether the mail road may wake this handle now: (go, outcome, detail)."""
+    handle = row["handle"]
+    reading = wake_reading(handle, row)
+    if reading["verdict"] == "clear":
+        wake_settle(handle, reading)
+        reading = wake_reading(handle, row)
+    row["wake"] = reading
+    verdict = reading["verdict"]
+    if verdict in ("wake", "idle"):
+        return True, "", ""
+    if verdict == "wait":
+        return False, "waiting", ("%d wake(s) left the mail as it was, so the next waits "
+                                  "until %s" % (reading["attempts"], reading["next_at"]))
+    if verdict == "hold":
+        wake_hold(bus_dir, handle, row, reading["attempts"], me)
+    return False, "held", ("held: %d wakes left %d unread as they were. New mail, a message "
+                           "read or --clear-hold clears it"
+                           % (reading["attempts"], reading["unread"]))
+
+
+def wake_record(handle, row):
+    """Count one wake that reached the session, against the mail it found."""
+    reading = row.get("wake") or wake_reading(handle, row)
+    unread, newest = wake_pair(row)
+    attempts = int(reading.get("attempts") or 0) + 1
+    now = time.time()
+    write_state(handle, {"wake_loop": {
+        "unread": unread, "newest": newest, "attempts": attempts, "last_at": now,
+        "last_at_iso": datetime.datetime.fromtimestamp(
+            now, datetime.timezone.utc).replace(microsecond=0).isoformat()}})
+
+
 # ------------------------------------------------------------------- the pass
 def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minutes=IDLE_STOP_MINUTES,
              activity_hours=ACTIVITY_HOURS, act=True):
     listing = listed_sessions(cmd)
     rows, why = survey(guard, listing, bus_dir, me, only, read_all=not act)
     window, window_source = compaction_window()
+    # A FRESH SIGNED-IN READING CLEARS THE HOLD A SIGNED-OUT ONE WROTE, BEFORE
+    # `held` IS READ. So the same pass resumes. A check pass clears nothing and
+    # leaves out of `held` what an acting pass would clear.
+    stored = signin_stored()
+    clears = signin_settle(stored, act)
     # `held` NAMES THE HOLDS THAT STOP THE ACCOUNT. A handle's own hold is read
     # where that handle would be resumed, and it stops nothing else.
     result = {"bus_dir": bus_dir, "user": me, "only": sorted(only),
               "idle_stop_minutes": idle_stop_minutes, "activity_hours": activity_hours,
               "window": window, "window_source": window_source,
-              "held": account_holds(), "rows": rows,
+              "held": [h for h in account_holds() if h not in clears], "rows": rows,
+              "signin_stored": stored, "signin_clears": clears,
               "stops": stop_pass(cmd, listing, idle_stop_minutes, act)}
     # A BOARD THIS PROGRAM CANNOT READ ENDS THE PASS BEFORE ANY OTHER READING.
     # The three passes below each decide from a handle row, and a pass with no
@@ -2402,10 +2719,17 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
     # the resume.
     result["compactions"], compacting = compaction_pass(guard, rail, adapter_dir, cmd, listing,
                                                         bus_dir, rows, only, act,
-                                                        result["held"])
+                                                        result["held"], result["signin_stored"])
     result["writes"] = forced_write_pass(rail, adapter_dir, bus_dir, rows, activity_hours,
                                          window, only, act, compacting)
     result["stamps"] = stamp_pass(bus_dir, rows, act)
+    # THE WAKE GUARD'S READING, ON EVERY ROW. --check shows it whole. An acting
+    # pass clears what changed mail has cleared, on every row it may act on,
+    # including a row whose mail is all read now.
+    for row in rows:
+        row["wake"] = wake_reading(row["handle"], row)
+        if act and not (only and row["handle"] not in only):
+            wake_settle(row["handle"], row["wake"])
     if not act:
         return result, 0
     for row in rows:
@@ -2422,18 +2746,34 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
             row["detail"] = "this pass was scoped to %s" % ", ".join(sorted(only))
             continue
         if row["action"] == "nudge":
+            go, row["outcome"], row["detail"] = wake_gate(bus_dir, row, me)
+            if not go:
+                continue
             got = nudge(rail, adapter_dir, bus_dir, handle, {"owner": me,
                         "address": row["address"], "cwd": row["cwd"]}, row["pid"])
             row["outcome"] = got.get("outcome", "failed")
             row["detail"] = got.get("reason") or got.get("detail") or ""
             write_state(handle, {"last_wake": now_iso(), "last_wake_outcome": row["outcome"],
                                  "last_wake_detail": row["detail"]})
+            if row["outcome"] == "delivered":
+                wake_record(handle, row)
             log("%s: nudged pid %d -- %s %s" % (handle, row["pid"], row["outcome"], row["detail"]))
             continue
         if result["held"]:
             row["action"], row["outcome"] = "held", "skipped"
             row["detail"] = ("this account is held by %s, and no handle is resumed until "
                              "--clear-hold clears it" % ", ".join(result["held"]))
+            log("%s: %s" % (handle, row["detail"]))
+            continue
+        # THE SIGN-IN GATE, BEFORE ANYTHING ELSE CAN START THE SESSION. A fresh
+        # signed-out reading holds the account here, once: the next row finds
+        # the hold above.
+        if result["signin_stored"]["verdict"] == "signed-out":
+            write_state(handle, signout_patch(handle, row.get("model") or "", row["cwd"],
+                                              result["signin_stored"]))
+            result["held"].append(handle)
+            row["action"], row["outcome"] = "held", "skipped"
+            row["detail"] = signout_held(handle, result["signin_stored"])
             log("%s: %s" % (handle, row["detail"]))
             continue
         own, why = handle_hold(handle)
@@ -2444,6 +2784,10 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
         if RESUME_TURN is None:
             row["outcome"], row["detail"] = "refused", no_phrase_detail()
             log("%s: resume refused -- %s" % (handle, row["detail"]))
+            continue
+        go, outcome, detail = wake_gate(bus_dir, row, me)
+        if not go:
+            row["outcome"], row["detail"] = outcome, detail
             continue
         # Rule C may name a newer session than the one the handle records, and
         # that is the one resumed. It registers the handle from inside.
@@ -2468,6 +2812,8 @@ def run_pass(guard, rail, adapter_dir, cmd, bus_dir, me, only=(), idle_stop_minu
             if hold_scope(patch["hold"]) == "account":
                 result["held"].append(handle)
         write_state(handle, patch)
+        if ok:
+            wake_record(handle, row)
         log("%s: resume %s -- %s" % (handle, row["outcome"], detail))
     return result, 0
 
@@ -2514,7 +2860,9 @@ def cmd_clear_hold(handle):
         log("no state for '%s' at %s" % (handle, state_path(handle)))
         return 0
     had = data.get("hold")
-    write_state(handle, {"hold": None, "hold_cleared_at": now_iso()})
+    # The wake guard's count goes with it, or the next pass would hold again on
+    # the same unchanged mail.
+    write_state(handle, {"hold": None, "hold_cleared_at": now_iso(), "wake_loop": None})
     print(json.dumps({"handle": handle, "cleared": bool(had),
                       "was": had, "state": state_path(handle)}, indent=2))
     return 0
@@ -2610,6 +2958,10 @@ def main(argv):
                "compaction_records": records_path(), "record_ttl_hours": RECORD_TTL_HOURS,
                "window": window, "window_source": window_source,
                "token_threshold": token_threshold(window),
+               "wake_guard": {"waits_secs": list(WAKE_WAITS_SECS[:WAKE_LIMIT - 1]),
+                              "limit": WAKE_LIMIT, "hold_kind": UNREAD_KIND},
+               "signin_stored": signin_stored(),
+               "signin_clears": signin_settle(signin_stored(), False),
                "holds": [{"handle": h, "scope": hold_scope(v), "kind": v.get("kind") or "",
                           "retry_at": v.get("retry_at") if hold_scope(v) == "handle" else None,
                           "hold": v} for h, v in holds()],

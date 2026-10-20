@@ -154,7 +154,7 @@ else
   finding info "no sign-in check at ${SIGNIN}, so whether ${ME} is signed in was not read. A release installs it."
 fi
 case "$SIGNED_IN" in
-  signed-out) finding error "the harness is signed out for ${ME}. Every resume fails until somebody signs in as ${ME}, and the rail holds after the first failure." ;;
+  signed-out) finding error "the harness is signed out for ${ME}. Every resume fails until somebody signs in as ${ME}. The rail holds before any resume while the stored sign-in reading says signed out, and it resumes on its own once the check reads ${ME} signed in." ;;
   never)      finding info "${ME} has never signed in to the harness on this claw, so no orchestrator of this account can be resumed." ;;
   unreadable) [ ! -x "$SIGNIN" ] || finding info "the sign-in check answered unreadable for ${ME}. Unreadable is not signed out." ;;
 esac
@@ -203,11 +203,14 @@ fi
 # scope existed, account when the sign-in word was signed-out.
 SCOPE='(.hold.scope // (if .hold.signin == "signed-out" then "account" else "handle" end))'
 account_holds="$(printf '%s' "$HOLDS" | jq -s "[.[] | select(${SCOPE} == \"account\")] | length")"
-handle_holds="$(printf '%s' "$HOLDS" | jq -s "[.[] | select(${SCOPE} == \"handle\")] | length")"
+handle_holds="$(printf '%s' "$HOLDS" | jq -s "[.[] | select(${SCOPE} == \"handle\" and .hold.kind != \"unread-unchanged\")] | length")"
+unread_holds="$(printf '%s' "$HOLDS" | jq -s '[.[] | select(.hold.kind == "unread-unchanged")] | length')"
 [ "${account_holds:-0}" -eq 0 ] || \
   finding error "${account_holds} handle(s) carry a hold of scope account, so no handle of ${ME} is resumed until it is cleared. The rail's --clear-hold clears one."
 [ "${handle_holds:-0}" -eq 0 ] || \
   finding error "${handle_holds} handle(s) carry a hold of their own. Each one's reason names the fix, and the rail tries it again once an hour."
+[ "${unread_holds:-0}" -eq 0 ] || \
+  finding error "${unread_holds} handle(s) are held because three wakes left their mail as it was. New mail or a message read clears one, and so does the rail's --clear-hold."
 
 nudged_unread="$(printf '%s' "$ROWS" | jq -s '[.[] | select(.unread > 0 and .last_wake_outcome == "delivered")] | length')"
 [ "${nudged_unread:-0}" -eq 0 ] || \

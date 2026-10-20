@@ -27,12 +27,18 @@
 # tries out of seven, while the stall check's own root unit did. This unit is
 # the stall check's shape: root, with the credential loaded by systemd.
 #
+# A SECOND KIND OF HANDLE HOLD. The rail also holds a handle it has woken three
+# times while its mail stayed as it was. That hold has class `unread`, and it is
+# not tried again on the clock: new mail or a message read clears it, and so
+# does the rail's --clear-hold. Its line says so and names the step.
+#
 # WHAT IS READ. For each account with a home, the files in
 # <home>/.local/state/commonclaw/continuity. A file is read only when it is a
 # regular file, not a link, owned by that account, and under 64 KiB. From a
 # hold, four fields are taken: `scope` (or the sign-in word an earlier release
-# wrote), `id`, `class` and `cwd`. The handle is the file's own `handle` field.
-# The harness's words in `reason` and `said` are never read.
+# wrote), `id`, `class` and `cwd`. A hold of class `unread` gives two numbers
+# more, `unread` and `wakes`, cut to digits. The handle is the file's own
+# `handle` field. The harness's words in `reason` and `said` are never read.
 #
 # ONE ALERT PER HOLD. The rail gives each hold an `id` and keeps it through
 # every retry. This check records the ids it delivered, per account. A retry
@@ -169,8 +175,10 @@ accounts() {
 
 # ------------------------------------------------------------------ the sweep
 #
-# One row per handle hold, tab-separated: account, file uid, handle, key, class,
-# cwd. jq reads the four fields and nothing else.
+# One row per handle hold, tab-separated: account, handle, key, class, cwd,
+# unread, wakes. jq reads those fields and nothing else. An empty field is
+# written as a dash, because read joins a run of tabs into one and the fields
+# after it would shift.
 ROWS=()
 while IFS= read -r pair; do
   acct="${pair%%=*}"; dir="${pair#*=}"
@@ -192,9 +200,11 @@ while IFS= read -r pair; do
       | select($scope == "handle")
       | [(.handle // "" | tostring),
          ($h.id // $h.since // $h.at // "" | tostring),
-         (if $h.class == "untrusted" or (($h.said // "") | tostring) == "Workspace not trusted"
+         (if $h.class == "unread" then "unread"
+          elif $h.class == "untrusted" or (($h.said // "") | tostring) == "Workspace not trusted"
           then "untrusted" else "refused" end),
-         ($h.cwd // "" | tostring)] | @tsv' 2>/dev/null)" || continue
+         ($h.cwd // "-" | tostring | if . == "" then "-" else . end),
+         ($h.unread // "-" | tostring), ($h.wakes // "-" | tostring)] | @tsv' 2>/dev/null)" || continue
     [ -n "$row" ] || continue
     ROWS+=("${acct}"$'\t'"${row}")
   done
@@ -210,12 +220,21 @@ fi
 
 # ------------------------------------------------------------------ the words
 #
-# words <account> <handle> <class> <cwd> sets LINE, FIX and SUBJECT.
+# words <account> <handle> <class> <cwd> <unread> <wakes> sets LINE, FIX and
+# SUBJECT.
 words() {
-  local acct handle cls folder
+  local acct handle cls folder unread wakes
   acct="$(clean "$1")"; handle="$(clean "$2")"; cls="$3"; folder=""
+  unread="$(printf '%s' "${5:-}" | tr -cd '0-9' | cut -c1-6)"
+  wakes="$(printf '%s' "${6:-}" | tr -cd '0-9' | cut -c1-6)"
   case "$4" in /?*) folder="$(clean_path "${4:0:200}")" ;; esac
   [ -n "$folder" ] || folder="the folder that handle is registered in"
+  SUBJECT="${handle} on ${CLAW} is held by the continuity rail"
+  if [ "$cls" = unread ]; then
+    LINE="${handle} on ${CLAW} is held. The continuity rail woke it ${wakes:-several} times, and its ${unread:-unread} unread message(s) did not change."
+    FIX="New mail or a message read clears the hold by itself. To clear it now, run 'session-continuity --clear-hold ${handle}' as ${acct}."
+    return 0
+  fi
   if [ "$cls" = untrusted ]; then
     LINE="${handle} on ${CLAW} is held: the continuity rail cannot resume it, because the harness does not trust its folder."
     FIX="Run the agent once in ${folder} as ${acct} and accept the trust prompt."
@@ -224,7 +243,6 @@ words() {
     FIX="Run the agent once in ${folder} as ${acct} to read the refusal, and fix what it names."
   fi
   FIX="${FIX} The rail tries it again within the hour, and every other orchestrator of ${acct} is resumed as usual."
-  SUBJECT="${handle} on ${CLAW} is held by the continuity rail"
 }
 
 delivered_file() { printf '%s/%s' "$DELIVERED_DIR" "$(clean "$1")"; }
@@ -234,8 +252,8 @@ was_delivered() { grep -qxF -- "$(clean "$2")"$'\t'"$(clean "$3")" "$(delivered_
 if [ "$MODE" != beat ]; then
   if [ -n "$TO" ]; then printf 'hold mail: to the address in HOLD_ALERT_TO\n'; else printf 'hold mail: none, because %s\n' "$MAIL_WHY"; fi
   for r in "${ROWS[@]}"; do
-    IFS=$'\t' read -r acct handle key cls cwd <<< "$r"
-    words "$acct" "$handle" "$cls" "$cwd"
+    IFS=$'\t' read -r acct handle key cls cwd unread wakes <<< "$r"
+    words "$acct" "$handle" "$cls" "$cwd" "$unread" "$wakes"
     if was_delivered "$acct" "$handle" "$key"; then verdict="quiet, because this hold was already sent"; else verdict="due"; fi
     printf '%s (%s): %s, %s\n' "$(clean "$handle")" "$(clean "$acct")" "$cls" "$verdict"
     if [ "$MODE" = dry-run ] && [ "$verdict" = due ]; then
@@ -252,13 +270,13 @@ fi
 # present now. A hold that healed drops out of it.
 declare -A KEEP=()
 for r in "${ROWS[@]}"; do
-  IFS=$'\t' read -r acct handle key cls cwd <<< "$r"
+  IFS=$'\t' read -r acct handle key cls cwd unread wakes <<< "$r"
   entry="$(clean "$handle")"$'\t'"$(clean "$key")"
   if was_delivered "$acct" "$handle" "$key"; then
     KEEP["$(clean "$acct")"]+="${entry}"$'\n'
     continue
   fi
-  words "$acct" "$handle" "$cls" "$cwd"
+  words "$acct" "$handle" "$cls" "$cwd" "$unread" "$wakes"
   sent=0
   if [ -x "$NOTIFIER" ]; then
     nrc=0
